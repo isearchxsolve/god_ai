@@ -126,28 +126,33 @@ process.on("uncaughtException", (err) => {
     // this serves both the API and the client.
     // It is the only port that is not firewalled.
     const port = parseInt(process.env.PORT || "5000", 10);
+    let bindRetries = 0;
     
-    httpServer.on("error", (err: NodeJS.ErrnoException) => {
-      if (err.code === "EADDRINUSE") {
-        console.error(`[FATAL] Port ${port} already in use. Kill the existing process and try again.`);
-        log.error(`Port ${port} already in use`, { error: err.message });
-      } else {
+    function tryBind() {
+      const server = httpServer;
+      server.removeAllListeners("error");
+      server.removeAllListeners("listening");
+      server.on("error", (err: NodeJS.ErrnoException) => {
+        if (err.code === "EADDRINUSE") {
+          bindRetries++;
+          const delay = Math.min(1000 * Math.pow(1.5, Math.min(bindRetries, 12)), 30_000);
+          console.error(`[RETRY] Port ${port} in use — retry #${bindRetries} in ${Math.round(delay)}ms`);
+          log.warn(`Port ${port} in use, retry #${bindRetries}`);
+          server.close(() => setTimeout(tryBind, delay));
+          return;
+        }
         console.error(`[FATAL] HTTP Server Error: ${err.message}`);
         log.error("HTTP Server Error", { error: err.message, code: err.code });
-      }
-      setTimeout(() => process.exit(1), 500);
-    });
-
-    httpServer.listen(
-      {
-        port,
-        host: "0.0.0.0",
-        reusePort: true,
-      },
-      () => {
-        logHttp(`serving on port ${port}`);
-      },
-    );
+        setTimeout(() => process.exit(1), 500);
+      });
+      server.listen(
+        { port, host: "0.0.0.0", reusePort: true },
+        () => {
+          logHttp(`serving on port ${port}`);
+        },
+      );
+    }
+    tryBind();
   } catch (err) {
     console.error("[FATAL] Startup failed:", err);
     log.error("Startup failed", { error: String(err) });

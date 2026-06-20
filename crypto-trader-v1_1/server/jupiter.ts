@@ -69,16 +69,30 @@ export class RpcRotator {
     }
   }
 
+  /** Force-mark the current endpoint unhealthy so the next call rotates away from it */
+  markCurrentUnhealthy() {
+    const healthyNodes = this.endpoints.filter(e => e.healthy);
+    const node = healthyNodes[this.currentIndex % healthyNodes.length] || this.endpoints[0];
+    if (node) {
+      node.healthy = false;
+      node.restoredAt = Date.now() + RPC_BLACKLIST_MS;
+      setTimeout(() => { node.healthy = true; }, RPC_BLACKLIST_MS);
+    }
+  }
+
   async exec<T>(name: string, fn: (c: Connection) => Promise<T>, timeoutMs: number): Promise<T> {
     const healthyNodes = this.endpoints.filter(e => e.healthy);
     const node = healthyNodes[this.currentIndex % healthyNodes.length] || this.endpoints[0];
     this.currentIndex++;
     const conn = new Connection(node.url, "confirmed");
     try {
-      return await Promise.race([fn(conn), new Promise<never>((_, r) => setTimeout(() => r(new Error("RPC_TIMEOUT")), timeoutMs * 1.5))]) as T;
+      return await Promise.race([fn(conn), new Promise<never>((_, r) => setTimeout(() => r(new Error("RPC_TIMEOUT")), timeoutMs * 2.0))]) as T;
     } catch (e: any) {
-      // Blacklist on timeout, server errors, AND rate limits
-      if (e.message.includes("TIMEOUT") || e.message.includes("503") || e.message.includes("429")) {
+      // Blacklist on timeout, server errors, rate limits, AND network failures
+      if (e.message.includes("TIMEOUT") || e.message.includes("503") || e.message.includes("429") ||
+          e.message.includes("fetch failed") || e.message.includes("ECONNRESET") ||
+          e.message.includes("socket hang up") || e.message.includes("ETIMEDOUT") ||
+          e.message.includes("ENOTFOUND")) {
         node.healthy = false;
         node.restoredAt = Date.now() + RPC_BLACKLIST_MS;
         setTimeout(() => { node.healthy = true; }, RPC_BLACKLIST_MS);
@@ -233,14 +247,46 @@ export class JupiterService {
 
   get walletAddress(): string { return this.keypair.publicKey.toBase58(); }
 
-  /** Fast balance read with 3s timeout. No retries -- caller retries if needed. */
+  /** Balance read — tries public mainnet-beta first (proven accurate), then falls back to rotator. */
   async getWalletBalance(): Promise<number> {
-    const lamports = await this.rpc.exec(
-      "getBalance",
-      c => c.getBalance(this.keypair.publicKey, "confirmed"),
-      3_000
-    );
-    return lamports / LAMPORTS_PER_SOL;
+    const publicKey = this.keypair.publicKey;
+    // Try the canonical public endpoint first — it consistently returns the correct balance
+    // even when private RPC nodes return stale/wrong values.
+    const publicEndpoints = [
+      "https://api.mainnet-beta.solana.com",
+      "https://solana-api.projectserum.com",
+      "https://rpc.ankr.com/solana",
+    ];
+    for (const endpoint of publicEndpoints) {
+      try {
+        const conn = new Connection(endpoint, "confirmed");
+        const lamports = await Promise.race([
+          conn.getBalance(publicKey, "confirmed"),
+          new Promise<never>((_, r) => setTimeout(() => r(new Error("TIMEOUT")), 8_000))
+        ]) as number;
+        return lamports / LAMPORTS_PER_SOL;
+      } catch { /* fall through to rotator */ }
+    }
+    // Fall back to the RPC rotator pool
+    let lastError: Error | null = null;
+    for (let i = 0; i < 3; i++) {
+      try {
+        const lamports = await this.rpc.exec(
+          "getBalance",
+          c => c.getBalance(publicKey, "confirmed"),
+          5_000
+        );
+        return lamports / LAMPORTS_PER_SOL;
+      } catch (err: any) {
+        lastError = err;
+        if (i === 2) break;
+        const backoff = Math.min(500 * Math.pow(2, i), 2000);
+        await new Promise(r => setTimeout(r, backoff));
+      }
+    }
+    // Rotate to a different endpoint for next call by marking current as unhealthy
+    this.rpc.markCurrentUnhealthy();
+    throw lastError || new Error("RPC_TIMEOUT: All retries failed");
   }
 
  

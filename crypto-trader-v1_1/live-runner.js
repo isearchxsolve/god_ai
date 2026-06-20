@@ -293,7 +293,7 @@ async function startHealthChecks() {
       log("[HEALTH] Health check FAILED — server not responding on port " + HEALTH_CHECK_PORT);
       log("[HEALTH] Attempting emergency sell + recovery kill + restart...");
       await emergencySellAll("health_check_failure");
-      killChild();
+      await killChild();
     }
   }, HEALTH_CHECK_INTERVAL_MS);
 }
@@ -326,26 +326,56 @@ function killProcessTree(pid) {
 }
 
 function killChild() {
-  if (!child) return;
+  if (!child) return Promise.resolve();
   const pid = child.pid;
-  try { child.kill("SIGTERM"); } catch (e) { log(`[KILL] SIGTERM failed: ${e.message}`); }
-  setTimeout(async () => {
-    if (child) {
-      try { child.kill("SIGKILL"); } catch {}
-      await killProcessTree(pid);
-    }
-    child = null;
-  }, 5_000);
+  return new Promise((resolve) => {
+    try { child.kill("SIGTERM"); } catch (e) { log(`[KILL] SIGTERM failed: ${e.message}`); }
+    // Give the process 6s to die gracefully, then SIGKILL
+    setTimeout(async () => {
+      if (child) {
+        try { child.kill("SIGKILL"); } catch {}
+        await killProcessTree(pid);
+      }
+      child = null;
+      resolve();
+    }, 6_000);
+  });
+}
+
+// ── Port availability helper ──────────────────────────────────────────
+function waitForPortFree(port, timeoutMs) {
+  const start = Date.now();
+  return new Promise((resolve) => {
+    const check = () => {
+      if (isShuttingDown) return resolve();
+      const cmd = process.platform === "win32"
+        ? `netstat -ano | findstr :${port}`
+        : `lsof -i :${port} 2>/dev/null`;
+      exec(cmd, { windowsHide: true }, (err, stdout) => {
+        const inUse = stdout && stdout.includes("LISTEN");
+        if (!inUse) return resolve();
+        if (Date.now() - start > timeoutMs) {
+          log(`[PORT] Port ${port} still in use after ${timeoutMs}ms — proceeding anyway`);
+          return resolve();
+        }
+        log(`[PORT] Port ${port} still in use — waiting 1s...`);
+        setTimeout(check, 1000);
+      });
+    };
+    check();
+  });
 }
 
 // ── Server lifecycle ──────────────────────────────────────────────────
-function startServer() {
+async function startServer() {
   if (isShuttingDown) return;
-  if (child) killChild();
+  if (child) await killChild();
 
   clearStaleResources();
 
   const now = Date.now();
+  // Wait for port to free before spawning — avoids EADDRINUSE crash loop
+  await waitForPortFree(HEALTH_CHECK_PORT, 15_000);
   const recentCrashes = crashCount > 0 && now - lastCrashTime < CRASH_WINDOW_MS;
 
   if (recentCrashes && crashCount >= MAX_CRASHES_BEFORE_GIVEUP) {
@@ -430,7 +460,7 @@ async function shutdown(signal) {
   await syncWalletBalance();
   await emergencySellAll(`supervisor_shutdown_${signal}`);
   switchToPaperMode();
-  killChild();
+  await killChild();
   try { writeFileSync(PID_FILE, ""); } catch {}
   setTimeout(() => process.exit(0), 1000);
 }

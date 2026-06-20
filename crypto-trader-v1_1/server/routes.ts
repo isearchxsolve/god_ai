@@ -4,15 +4,15 @@ import type { Server } from "http";
 import { storage, initStorageWrapper } from "./storage";
 import { api } from "@shared/routes";
 import { JupiterService, createJupiterService, SOL_MINT, MIN_FEE_BUFFER_SOL,getLatencyLog  } from "./jupiter";
+import { existsSync, readFileSync, writeFileSync } from "fs";
+import { join as pathJoin } from "path";
 
 // ── MULTIPLIER & STAGING CACHES ──
-const SEARCH_QUERIES = ["raydium sol", "pump-fun trending", "solana usdc", "meteora sol"];
+const SEARCH_QUERIES = ["raydium sol", "meteora sol", "orca sol", "solana usdc", "sol usdt", "raydium usdc", "orca usdc", "meteora usdc", "raydium usdt", "orca usdt", "sol usdc"]; // WIDENED: more liquid DEX+quote-pair seeds to surface more quality candidates (no safety bar lowered)
 const watchlistCache = new Map<string, { pair: DexScreenerPair, firstSeen: number }>();
 const WATCHLIST_MAX_AGE_MS = 15 * 60_000; // Keep on watch for 15 mins
 
 const MIN_VIABLE_TRADE_SOL  = 0.001; // Force-lowered to allow <0.003 SOL trades
-// FIX: lowered from 7.0 to 2.0 to stop "FINAL EDGE SKIP" on tokens with 3‑4% margin
-const MIN_EDGE_PCT          = 2.0;
 const MIN_TRADE_SIZE_SOL    = 0.001; // Force-lowered to allow <0.003 SOL trades
 const EXECUTION_TIMEOUT_MS  = 60_000; // Increased from 30,000 for network stability
 
@@ -25,6 +25,37 @@ if (!ADMIN_SECRET) {
     "[SECURITY] ADMIN_SECRET env var is not set — all admin endpoints " +
     "are publicly accessible. Set ADMIN_SECRET before going live."
   );
+}
+
+// ── MICRO-AWARE EDGE GATE ────────────────────────────────────────────────
+// One source of truth for both the live and paper edge checks. Micro wallets
+// relax the gate so a sub-0.10 SOL balance can actually clear round-trip cost;
+// normal wallets keep the strict fee-bleed protection unchanged.
+interface EdgeParams {
+  minEdgePct:        number; // edge threshold (pass if edge >= this)
+  feeMultiplier:     number; // multiplier on txFeePercent (2 = model both legs)
+  buffer:            number; // flat safety cushion, pct
+  expectedMoveCoeff: number; // score→expected-move slope
+  exitImpactMult:    number; // modeled exit impact = entry impact × this
+}
+
+function getEdgeParams(isMicroWallet: boolean): EdgeParams {
+  if (isMicroWallet) {
+    return {
+      minEdgePct:        engineSettings.microMinEdgePct,
+      feeMultiplier:     2.0,
+      buffer:            engineSettings.microEdgeBuffer,
+      expectedMoveCoeff: 0.35,
+      exitImpactMult:    1.30,
+    };
+  }
+  return {
+    minEdgePct:        engineSettings.minEdgePct,
+    feeMultiplier:     2.0,
+    buffer:            engineSettings.edgeBuffer,
+    expectedMoveCoeff: 0.35,
+    exitImpactMult:    1.30,
+  };
 }
 
 function requireAdmin(req: any, res: any): boolean {
@@ -211,8 +242,19 @@ let engineSettings = {
   safetyChecksEnabled: 1,
   txFeePercent: 1.5, // Bumped from 0.5 for high volatility priority
   rugcheckMinScore: 400, 
+
+  // -- Micro-aware EDGE gate (dashboard-tunable) --
+  // Only the two LOW-RISK knobs are exposed. feeMultiplier (2.0),
+  // expectedMoveCoeff (0.35) and exitImpactMult (1.30) are intentionally
+  // NOT settable — they model real round-trip economics and loosening them
+  // re-admits fee-bleed/optimism. They stay hardcoded in getEdgeParams().
+  minEdgePct:       2.0,   // non-micro edge threshold (pass if edge >= this)
+  edgeBuffer:       1.0,   // non-micro flat cushion, pct
+  microMinEdgePct:  0.5,   // micro-wallet edge threshold
+  microEdgeBuffer:  0.5,   // micro-wallet flat cushion, pct
+
   maxVolLiqRatioNewToken: 14, 
-  maxDiscoveryAgeSeconds: 10800, 
+  maxDiscoveryAgeSeconds: 86400, // FIX: raised 3h->24h so mature, liquid trending tokens reach the scanner (was starving funnel of anything but seconds-old junk)
   
   dynamicHoldEnabled: 1, 
   dynamicHoldMaxSeconds: 2100,
@@ -437,6 +479,27 @@ let dailyPnlSol = 0, dailyTradeCount = 0;
 let dailyStartBalance = engineSettings.startingBalance;
 let lastDailyReset = new Date().toDateString();
 let peakBalance = engineSettings.startingBalance;
+// LIFETIME ROI BASELINE: the real on-chain balance recorded the FIRST time live trading
+// ever started, persisted to disk so it survives restarts (true lifetime denominator,
+// not reset each boot). 0 = paper mode / not yet captured.
+let liveStartingBalance = 0;
+function liveBaselineFile(): string { return pathJoin(process.cwd(), "live-baseline.json"); }
+function loadLiveBaseline(): number {
+  try {
+    const f = liveBaselineFile();
+    if (existsSync(f)) {
+      const v = parseFloat(JSON.parse(readFileSync(f, "utf8")).startingBalance);
+      return Number.isFinite(v) && v > 0 ? v : 0;
+    }
+  } catch (e) { console.warn(`[ROI] read live-baseline.json failed: ${(e as any)?.message}`); }
+  return 0;
+}
+function saveLiveBaseline(bal: number): void {
+  try {
+    writeFileSync(liveBaselineFile(), JSON.stringify({ startingBalance: bal, capturedAt: new Date().toISOString() }, null, 2));
+    console.log(`[ROI] Lifetime baseline captured: ${bal.toFixed(4)} SOL → live-baseline.json`);
+  } catch (e) { console.warn(`[ROI] write live-baseline.json failed: ${(e as any)?.message}`); }
+}
 let circuitBreakerActive = false;
 let flightToSafetyActive = false;
 const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -490,6 +553,28 @@ let priceCheckLock = false;
 let sellingInProgress = new Set<number>();
 let scanLock = false;
 let reservedCapital = 0;
+// BALANCE RESILIENCE: cache the last successful on-chain wallet read so transient RPC
+// failures (429 / timeout / fetch failed) don't collapse live sizing & micro-detection to
+// the 0.01 paper sentinel. Fallback order: last-good on-chain -> persisted DB walletBalance
+// -> paper sentinel (last resort only).
+let lastGoodLiveBalance = 0;
+async function readLiveWalletBalance(): Promise<number> {
+  if (jupiterService) {
+    try {
+      const b = await jupiterService.getWalletBalance();
+      if (typeof b === "number" && Number.isFinite(b) && b > 0) { lastGoodLiveBalance = b; return b; }
+    } catch (err) {
+      console.log(`[RPC] getWalletBalance failed — using last-good ${lastGoodLiveBalance.toFixed(4)} SOL: ${(err as any)?.message}`);
+    }
+  }
+  if (lastGoodLiveBalance > 0) return lastGoodLiveBalance;
+  try {
+    const st = await storage.getBotStatus();
+    const dbBal = parseFloat(String((st as any)?.walletBalance ?? "0"));
+    if (Number.isFinite(dbBal) && dbBal > 0 && dbBal !== engineSettings.startingBalance) { lastGoodLiveBalance = dbBal; return dbBal; }
+  } catch {}
+  return paperBalance;
+}
 let pendingBuys = new Map<string, number>();
 let recentlyAttemptedBuys = new Map<string, number>();
 // Tracks consecutive on-chain zero-balance reads per trade id.
@@ -614,7 +699,8 @@ async function getEffectiveBalance(): Promise<number> {
   // 1. Establish the base free balance depending on the mode
   let baseBalance = paperBalance;
   if (modeStatus.tradingMode === "live" && jupiterService) {
-    baseBalance = await jupiterService.getWalletBalance(); // Let it throw if RPC fails
+    // RESILIENT: never collapse to the 0.01 paper sentinel on a transient RPC failure.
+    baseBalance = await readLiveWalletBalance();
   }
 
   // 2. Add the real-time value of all open positions
@@ -995,23 +1081,23 @@ function scoreToken(
   if (combinedScore >= adjustedHwrScore && meetsHwrMetrics) {
     candidates.push({ mode: "HWR", minScore: adjustedHwrScore, sizeSol: sizeForMode(engineSettings.hwrMaxSize, adjustedHwrScore), slippage: liq < 5000 ? 5 : liq < 20000 ? 3 : 2 });
   }
-  let qualifiedMode: string | null = null, sizeSol = 0, slippage = 0;
+  let qualifiedMode: string | null = null, sizeSol = 0, slippage = 0, rejectionReason = "";
   if (candidates.length > 0) {
-    // MODE SELECTION: prefer the highest-minScore qualifying mode (HWR > MG > SNIPER).
-    // A higher minScore means stricter qualification criteria = higher conviction signal.
-    // SNIPER is only chosen when it is the sole qualifying mode — it exists to handle
-    // brand-new thin pools where HWR/MG data hasn't accumulated yet, not to override
-    // better-qualified modes just because the token is young.
-    //
-    // SLIPPAGE NOTE: when HWR/MG win over SNIPER on a young token, their tighter
-    // slippage (2–4%) is appropriate because those tokens already meet the HWR/MG
-    // liquidity floors (hwrMinLiquidity: 8000) that make wide slippage unnecessary.
-    // Pure-SNIPER tokens (only SNIPER qualifies) still get SNIPER's wider slippage.
-    // Tie-break: on equal minScore prefer MG/HWR over SNIPER (strictly greater than).
     const best = candidates.reduce((a, b) => b.minScore > a.minScore ? b : a);
     qualifiedMode = best.mode; sizeSol = parseFloat(best.sizeSol.toFixed(4)); slippage = parseFloat(best.slippage.toFixed(2));
+  } else {
+    // Generate rejection reason
+    const reasons: string[] = [];
+    if (combinedScore < effSniperScore && combinedScore < effMgScore && combinedScore < effHwrScore) reasons.push("score too low");
+    if (ageSeconds > engineSettings.sniperMaxAge) reasons.push("age > " + engineSettings.sniperMaxAge);
+    if (bp5m < engineSettings.sniperMinBuyPressure) reasons.push("bp5m < " + engineSettings.sniperMinBuyPressure);
+    if (liq < effSniperLiq) reasons.push("liq < " + effSniperLiq);
+    if (volMomentum < engineSettings.mgMinVolMomentum) reasons.push("volMom < " + engineSettings.mgMinVolMomentum);
+    if (priceChange5m < engineSettings.mgMinPriceChange5m) reasons.push("px5m < " + engineSettings.mgMinPriceChange5m);
+    if (txVelocity5m < engineSettings.mgMinTxVelocity) reasons.push("tx5m < " + engineSettings.mgMinTxVelocity);
+    rejectionReason = reasons.join(", ");
   }
-  return { score, mlScore, combinedScore, breakdown: {}, metrics, qualifiedMode, sizeSol, slippage };
+  return { score, mlScore, combinedScore, breakdown: {}, metrics, qualifiedMode, sizeSol, slippage, rejectionReason };
 }
 
 function getScoreBasedTP(score: number): number {
@@ -1191,13 +1277,17 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
   try {
     const allPairs: DexScreenerPair[] = [];
     const maxAgeMs = engineSettings.maxDiscoveryAgeSeconds * 1000;
+    // FUNNEL DIAGNOSTICS: count drops per filter so the discovery bottleneck is visible each cycle.
+    let funnelSeen = 0, cutLiq = 0, cutVol = 0, cutAge = 0, cutPrice = 0, cutVolZero = 0, cutHoneypot = 0, cutTooNew = 0;
     
     // UPDATED: Loosened funnel to let micro-caps into the scanner
-    const QUALITY_LIQ_FLOOR = 800;
+    const QUALITY_LIQ_FLOOR = 1500;      // LEVER 4: raised 800->1500 to bias toward higher-liquidity pairs (also clears the $1k micro buy floor with margin)
     const QUALITY_VOL_5M_MIN = 250;
+    const QUALITY_MIN_AGE_SEC = 120;     // LEVER 1: skip freshest tokens (<2m) where mint/freeze authority is usually still active
+    const QUALITY_MIN_M5_SELLS = 10;     // LEVER 3: mirror the buy-time honeypot gate (m5 sells >= 10) when txn data is present
 
     // Gecko trending + new pools (Normal fetch is fine, high rate limits)
-    const geckoPages = [1, 2, 3];
+    const geckoPages = [1, 2, 3, 4, 5]; // WIDENED: more trending/new-pool pages = larger candidate pool (Gecko has high rate limits, cheap to expand)
     const geckoFetches = geckoPages.flatMap(page => [
       withTimeout(
         fetch(`https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?page=${page}`, { headers: { "Accept": "application/json;version=20230302" }, signal: AbortSignal.timeout(8000) })
@@ -1234,9 +1324,28 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
         } catch { dexResults.push({ pairs: [] }); }
     }
 
+    // DISCOVERY UPGRADE: pull DexScreener boosted (paid-attention) tokens and HYDRATE them.
+    // The boosts endpoints return only token addresses with no liquidity/volume/price, so
+    // boosted tokens were always cut by the quality funnel (liq=0 < floor). Resolve each to
+    // full pair data via /latest/dex/tokens/{addrs} so real, liquid movers reach the scorer.
     try {
-        const boosts = await throttledDexScreenerFetch("https://api.dexscreener.com/token-boosts/top/v1");
-        dexResults.push(boosts);
+        const boostFeeds = await Promise.all([
+            throttledDexScreenerFetch("https://api.dexscreener.com/token-boosts/top/v1").catch(() => []),
+            throttledDexScreenerFetch("https://api.dexscreener.com/token-boosts/latest/v1").catch(() => []),
+        ]);
+        const boostAddrs = Array.from(new Set(
+            boostFeeds
+                .flatMap((bf: any) => Array.isArray(bf) ? bf : (bf?.data || []))
+                .filter((b: any) => b && b.chainId === "solana" && b.tokenAddress)
+                .map((b: any) => b.tokenAddress as string)
+        )).slice(0, 100); // WIDENED: hydrate more boosted (paid-attention) tokens per cycle
+        for (let i = 0; i < boostAddrs.length; i += 30) {
+            const chunk = boostAddrs.slice(i, i + 30).join(",");
+            try {
+                const hydrated = await throttledDexScreenerFetch(`https://api.dexscreener.com/latest/dex/tokens/${chunk}`);
+                dexResults.push(hydrated);
+            } catch { /* skip chunk */ }
+        }
     } catch { dexResults.push([]); }
 
     const geckoAndBirdeyeResults = await Promise.all([...geckoFetches, birdEyeFetch]);
@@ -1253,11 +1362,24 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
           const vol5m = pair.volume?.m5 || 0;
           const age = pair.pairCreatedAt ? now - pair.pairCreatedAt : 0;
 
-          if (liq < QUALITY_LIQ_FLOOR) continue;
-          if (vol5m < QUALITY_VOL_5M_MIN) continue;
-          if (age > maxAgeMs) continue;
-          if (!pair.priceUsd || isNaN(Number(pair.priceUsd)) || Number(pair.priceUsd) <= 0) continue;
-          if (vol5m === 0) continue;
+          funnelSeen++; if (liq < QUALITY_LIQ_FLOOR) { cutLiq++; continue; }
+          if (vol5m < QUALITY_VOL_5M_MIN) { cutVol++; continue; }
+          if (age > maxAgeMs) { cutAge++; continue; }
+          if (pair.pairCreatedAt && age < QUALITY_MIN_AGE_SEC * 1000) { cutTooNew++; continue; }
+          if (!pair.priceUsd || isNaN(Number(pair.priceUsd)) || Number(pair.priceUsd) <= 0) { cutPrice++; continue; }
+          if (vol5m === 0) { cutVolZero++; continue; }
+
+          // HONEYPOT PRE-SCREEN (free — uses DexScreener txn data already in hand): cut clear
+          // no-sell / coordinated-buy and locked-liquidity honeypot patterns early so they don't
+          // burn scoring + sizing cycles before the buy-time safety gate rejects them anyway.
+          // Only fires when txn data is actually present (skips feeds like BirdEye with txns:{}).
+          {
+            const hpBuys = pair.txns?.m5?.buys || 0;
+            const hpSells = pair.txns?.m5?.sells || 0;
+            const hpFdv = pair.fdv || 0;
+            if ((hpBuys + hpSells) > 0 && hpSells < QUALITY_MIN_M5_SELLS) { cutHoneypot++; continue; }
+            if (hpFdv > 0 && liq / hpFdv < 0.003) { cutHoneypot++; continue; }
+          }
 
           allPairs.push(pair);
         }
@@ -1270,11 +1392,12 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
           const vol5m = vol24h / 288;
           const ageSec = (Date.now() - (bToken.first_seen || 0) * 1000) / 1000;
           
-          if (liq < QUALITY_LIQ_FLOOR) continue;
-          if (vol5m < QUALITY_VOL_5M_MIN) continue;
-          if (ageSec > engineSettings.maxDiscoveryAgeSeconds) continue;
+          funnelSeen++; if (liq < QUALITY_LIQ_FLOOR) { cutLiq++; continue; }
+          if (vol5m < QUALITY_VOL_5M_MIN) { cutVol++; continue; }
+          if (ageSec > engineSettings.maxDiscoveryAgeSeconds) { cutAge++; continue; }
+          if (bToken.first_seen && ageSec < QUALITY_MIN_AGE_SEC) { cutTooNew++; continue; }
           const priceUsd = bToken.price?.toString();
-          if (!priceUsd || isNaN(Number(priceUsd)) || Number(priceUsd) <= 0) continue;
+          if (!priceUsd || isNaN(Number(priceUsd)) || Number(priceUsd) <= 0) { cutPrice++; continue; }
 
           allPairs.push({
             chainId: "solana",
@@ -1348,6 +1471,19 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
     });
 
     results.sort((a, b) => b.score - a.score);
+
+    // LEVER 2: rugcheck-prescreen the single top scored candidate per cycle. Result is cached in
+    // safetyCache, so the buy loop reuses it (no double call); drops a rug top-pick before it can
+    // dominate the cycle. ~1 extra API call only when the top pick wouldn't otherwise be reached.
+    if (results.length > 0 && engineSettings.safetyChecksEnabled) {
+      const topPick = results[0];
+      const topPair = bestByAddress.get(topPick.tokenAddress);
+      if (topPair) {
+        const pre = await checkTokenSafety(topPick.tokenAddress, topPair);
+        if (!pre.safe) { console.log(`[PRESCREEN] Dropped top candidate $${topPick.tokenSymbol} — ${pre.reason}`); results.shift(); }
+      }
+    }
+    console.log(`[SCAN] Funnel: seen=${funnelSeen} -> cutLiq=${cutLiq} cutVol=${cutVol} cutAge=${cutAge} cutPrice=${cutPrice} cutVolZero=${cutVolZero} cutHoneypot=${cutHoneypot} cutTooNew=${cutTooNew} | survived=${allPairs.length} deduped=${dedupedPairs.length} scored=${results.length}`);
     
     if (results.length > 0) {
       console.log(`[SCAN] Discovery: ${results.length} candidates found.`);
@@ -1434,6 +1570,7 @@ async function runScanCycle() {
 
     const currentBalance = await getEffectiveBalance();
     const isMicroWallet = currentBalance < 0.10;
+    console.log(`[DEBUG] currentBalance: ${currentBalance}, isMicroWallet: ${isMicroWallet}`);
     if (isMicroWallet) {
       console.log(`[SCAN] Micro-Wallet Mode Active (Bal: ${currentBalance.toFixed(4)} SOL)`);
     }
@@ -1451,7 +1588,7 @@ async function runScanCycle() {
         return; 
     }
     
-    const liveBal = (status.tradingMode === "live" && jupiterService) ? await jupiterService.getWalletBalance().catch(() => paperBalance) : paperBalance;
+    const liveBal = (status.tradingMode === "live" && jupiterService) ? await readLiveWalletBalance() : paperBalance;
     const effectiveBalance = Math.max(0, liveBal - reservedCapital);
     
     const minViableBalance = 0.005 + engineSettings.minPositionSize;
@@ -1603,7 +1740,7 @@ async function runScanCycle() {
         }
       }
       
-      let scoring = scoreToken(pair);
+      let scoring = scoreToken(pair, null, isMicroWallet);
       if (candidate.mlActive && candidate.mlScore != null) {
         const pumpProb = candidate.mlScore / 100;
         const dumpRisk = candidate.mlDumpRisk != null ? candidate.mlDumpRisk : 1 - pumpProb;
@@ -1622,10 +1759,10 @@ async function runScanCycle() {
       }
       
       scoring.sizeSol = Math.max(cycleMinSize, scoring.sizeSol);
-      const effectiveMinScore = getEffectiveMinScore();
+      const effectiveMinScore = getEffectiveMinScore(isMicroWallet);
       
       if (!scoring.qualifiedMode || scoring.combinedScore < effectiveMinScore || scoring.sizeSol < cycleMinSize) {
-        console.log(`[SCORE_GATE] SKIP $${candidate.tokenSymbol} — Score: ${scoring.combinedScore} (Min: ${effectiveMinScore}) | Mode: ${scoring.qualifiedMode ?? "none"} | Size: ${scoring.sizeSol.toFixed(4)} (Min: ${cycleMinSize})`);
+        console.log(`[SCORE_GATE] SKIP $${candidate.tokenSymbol} — Score: ${scoring.combinedScore} (Min: ${effectiveMinScore}) | Mode: ${scoring.qualifiedMode ?? "none (Reason: " + (scoring.rejectionReason || "failed strict gates") + ")"} | Size: ${scoring.sizeSol.toFixed(4)} (Min: ${cycleMinSize})`);
         continue;
       }
       if (status.mode !== "AUTO" && scoring.qualifiedMode !== status.mode) {
@@ -1702,7 +1839,7 @@ async function runScanCycle() {
       const txCosts = calcTransactionCosts(liq, scoring.sizeSol);
       const entryTotalCostSol = scoring.sizeSol * (1 + (txCosts.entrySlippagePct + txCosts.entryFeePct) / 100);
       if (entryTotalCostSol < MIN_VIABLE_TRADE_SOL) {
-          console.log(`[GATE] SKIP $${candidate.tokenSymbol} — Trade too small after fees (${entryTotalCostSol.toFixed(4)} SOL)`);
+          console.log(`[GATE] SKIP $${candidate.tokenSymbol} ��� Trade too small after fees (${entryTotalCostSol.toFixed(4)} SOL)`);
           continue;
       }
       
@@ -1825,7 +1962,8 @@ async function runScanCycle() {
       
       const solPrice = SOL_PRICE_USD;
       const estimatedImpact = preflight?.priceImpactPct ?? (liq > 0 ? Math.min(12, ((scoring.sizeSol * solPrice) / (liq * 2)) * 100) : 6);
-      const scoreBasedExpectedMove = Math.max(0, (scoring.combinedScore - 50) * 0.35);
+      const edge = getEdgeParams(isMicroWallet);
+      const scoreBasedExpectedMove = Math.max(0, (scoring.combinedScore - 50) * edge.expectedMoveCoeff);
       
       if (isMicroCapToken) {
         scoring.sizeSol = 0.02;
@@ -1867,10 +2005,13 @@ async function runScanCycle() {
         }
         
         const finalEstimatedImpact = impactPct || estimatedImpact;
-        const finalRoundTripCost = finalEstimatedImpact * 1.3 + engineSettings.txFeePercent * 2 + 1.0;
+        const finalRoundTripCost =
+          finalEstimatedImpact * edge.exitImpactMult +
+          engineSettings.txFeePercent * edge.feeMultiplier +
+          edge.buffer;
         const finalEdge = scoreBasedExpectedMove - finalRoundTripCost;
-        if (finalEdge < MIN_EDGE_PCT) { 
-            console.log(`[EDGE SKIP] $${candidate.tokenSymbol} — Edge ${finalEdge.toFixed(2)}% < ${MIN_EDGE_PCT}% minimum.`);
+        if (finalEdge < edge.minEdgePct) {
+            console.log(`[EDGE SKIP] $${candidate.tokenSymbol} — edge ${finalEdge.toFixed(2)}% < ${edge.minEdgePct}% (micro=${isMicroWallet}, expMove=${scoreBasedExpectedMove.toFixed(2)}%, rtCost=${finalRoundTripCost.toFixed(2)}%, impact=${finalEstimatedImpact.toFixed(2)}%)`);
             recentlyAttemptedBuys.set(addr, Date.now()); 
             continue; 
         }
@@ -1949,10 +2090,13 @@ async function runScanCycle() {
       } else {
         if (paperBalance < entryTotalCostSol) break;
         const paperEstimatedImpact = estimatedImpact;
-        const paperRoundTripCost = paperEstimatedImpact * 1.3 + engineSettings.txFeePercent * 2 + 1.0;
+        const paperRoundTripCost =
+          paperEstimatedImpact * edge.exitImpactMult +
+          engineSettings.txFeePercent * edge.feeMultiplier +
+          edge.buffer;
         const paperEdge = scoreBasedExpectedMove - paperRoundTripCost;
-        if (paperEdge < MIN_EDGE_PCT) {
-            console.log(`[PAPER EDGE SKIP] $${candidate.tokenSymbol} — Score edge ${paperEdge.toFixed(2)}% below ${MIN_EDGE_PCT}% minimum.`);
+        if (paperEdge < edge.minEdgePct) {
+            console.log(`[PAPER EDGE SKIP] $${candidate.tokenSymbol} — edge ${paperEdge.toFixed(2)}% < ${edge.minEdgePct}% (micro=${isMicroWallet}).`);
             continue;
         }
         
@@ -2053,6 +2197,18 @@ async function initBalanceFromDB() {
   if (isLiveMode) {
     paperBalance = engineSettings.startingBalance;
     console.log(`[ENGINE] Live mode — paper baseline held at startingBalance: ${paperBalance.toFixed(3)} SOL (live wallet: ${liveWalletBalOnInit.toFixed(4)} SOL)`);
+    // DISPLAY FIX: persist the REAL on-chain balance so /api/health, restart.cjs, and the
+    // dashboard show the live wallet immediately on startup instead of the 0.01 sentinel.
+    if (liveWalletBalOnInit > 0) {
+      await storage.updateBotStats({ walletBalance: liveWalletBalOnInit.toFixed(4) });
+    }
+    // LIFETIME ROI: load the persisted baseline; if none exists yet, capture the current
+    // on-chain balance as the lifetime starting capital (write-once, survives restarts).
+    liveStartingBalance = loadLiveBaseline();
+    if (liveStartingBalance <= 0 && liveWalletBalOnInit > 0) {
+      liveStartingBalance = liveWalletBalOnInit;
+      saveLiveBaseline(liveStartingBalance);
+    }
   } else if (storedBalance > 0 && !isAnomalous) {
     paperBalance = storedBalance;
     console.log(`[ENGINE] Restored wallet balance from DB: ${paperBalance.toFixed(3)} SOL`);
@@ -2160,16 +2316,21 @@ async function initBalanceFromDB() {
   balanceInitialized = true;
 }
 
-function getEffectiveMinScore(): number {
-  const base = engineSettings.minScoreToTrade;
+function getEffectiveMinScore(isMicroWallet: boolean = false): number {
+  const base = isMicroWallet ? 58 : engineSettings.minScoreToTrade;
   const dailyLossPct = dailyStartBalance > 0 ? Math.max(0, (-dailyPnlSol / dailyStartBalance) * 100) : 0;
   // FIX: raised tier thresholds from (>0 / >=5 / >=10) to (>=3 / >=8 / >=15).
   // On a 0.05 SOL micro-wallet, a single -8% trade instantly triggered the old ">0"
   // tier (+5) and pushed effective minScore from 60 → 65+, blocking recovery entries.
   // The new thresholds only fire when drawdown is material (≥3%), severe (≥8%),
   // or critical (≥15%), matching the intent without penalising normal variance.
-  const tierBonus = dailyLossPct >= 15 ? 15 : dailyLossPct >= 8 ? 10 : dailyLossPct >= 3 ? 5 : 0;
-  const streakBonus = Math.min(15, consecutiveLosses * 3);
+  // MICRO FIX: loss-based penalties created a death spiral on micro wallets.
+  // Paper/early losses raised the floor to 73-88, but the best micro candidates
+  // top out around score 73-74, so they could NEVER clear the bar and the bot
+  // could never recover. Skip both penalties entirely while in micro mode;
+  // the base 58 floor + per-token safety/score gates are enough protection here.
+  const tierBonus = isMicroWallet ? 0 : (dailyLossPct >= 15 ? 15 : dailyLossPct >= 8 ? 10 : dailyLossPct >= 3 ? 5 : 0);
+  const streakBonus = isMicroWallet ? 0 : Math.min(15, consecutiveLosses * 3);
   const effective = base + tierBonus + streakBonus;
   if (effective > base) console.log(`[SCORE_GATE] Raised min score: ${base} → ${effective} (dailyLoss=${dailyLossPct.toFixed(1)}%, streak=${consecutiveLosses})`);
   return effective;
@@ -2188,7 +2349,7 @@ const MAX_FORCE_SELL_TIME_MS  = 5 * 60_000;       // FIX 5: max 5-minute liquida
 // for up to MAX_FORCE_SELL_TIME_MS at 30 % slippage (survival mode: any fill > nothing).
 //
 // Worst case outcome: bad fill price.  NOT: stuck funds.
-// ─────────────────────────────────────────────────────────────────────────────
+// ────────────���────────────────────────────────────────────────────────────────
 async function forceSellPosition(
   trade: any,
   fallbackPrice: number
@@ -3201,6 +3362,8 @@ async function startTradingEngine() {
   console.log(`[CONFIG] Wallet: ${engineSettings.startingBalance} SOL`);
   console.log("[CONFIG] ROI Target: 1000x");
   console.log("[CONFIG] Win Rate Target: >80%");
+  const _micro = getEdgeParams(true), _normal = getEdgeParams(false);
+  console.log(`[CONFIG] EDGE micro: minEdge=${_micro.minEdgePct}% buffer=${_micro.buffer}% | normal: minEdge=${_normal.minEdgePct}% buffer=${_normal.buffer}%`);
   console.log("[CONFIG] Starting trading engine...");
   jupiterService = createJupiterService();
   if (jupiterService) {
@@ -3314,6 +3477,12 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       // directly from dailyPnlSol in the same JSON snapshot, rather than deriving
       // it from a separate poll that may be one cycle stale.
       const elapsedTodaySeconds = Math.round(elapsedToday);
+      // REAL-MONEY P&L: report the true on-chain balance and LIFETIME ROI measured against
+      // liveStartingBalance (persisted), not the 0.01 paper sentinel. Paper mode (baseline 0)
+      // falls back to startingBalance. Additive fields only.
+      const effectiveBalForRoi = await getEffectiveBalance();
+      const roiBaselineStats = liveStartingBalance > 0 ? liveStartingBalance : engineSettings.startingBalance;
+      const roiPctStats = roiBaselineStats > 0 ? ((effectiveBalForRoi - roiBaselineStats) / roiBaselineStats) * 100 : 0;
       res.json({
         totalTrades: allTrades.length, closedTrades: closedTrades.length, openTrades: openTrades.length,
         wins: wins.length, losses: losses.length,
@@ -3321,7 +3490,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         avgWinPct: avgWin.toFixed(2), avgLossPct: avgLoss.toFixed(2), totalPnlSol: totalPnlSol.toFixed(4),
         bestTrade: bestTrade ? { symbol: bestTrade.tokenSymbol, pnl: bestTrade.pnl, mode: bestTrade.mode } : null,
         worstTrade: worstTrade ? { symbol: worstTrade.tokenSymbol, pnl: worstTrade.pnl, mode: worstTrade.mode } : null,
-        consecutiveWins, consecutiveLosses, paperBalance: paperBalance.toFixed(3), engineVersion: "4.2+ML",
+        consecutiveWins, consecutiveLosses, paperBalance: paperBalance.toFixed(3), liveBalance: effectiveBalForRoi.toFixed(4), liveStartBalance: roiBaselineStats.toFixed(4), roiPct: roiPctStats.toFixed(1), engineVersion: "4.2+ML",
         mlServiceActive: mlServiceAvailable, scoreBlend: `Rule ${engineSettings.scoreWeight * 100}% + ML ${engineSettings.mlWeight * 100}%`,
         trailingStop: `+${engineSettings.trailingStopActivation}% / -${engineSettings.trailingStopDistance}%`,
         hardTP: `+${engineSettings.hardTakeProfit}-100%`, stopLoss: `${engineSettings.stopLoss}%`,
@@ -3335,6 +3504,15 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         lastMiniCooldownEnd, lastLossCooldownEnd,
       });
     } catch (e) { console.error(e); res.status(500).json({ error: "Failed to fetch stats" }); }
+  });
+  app.post("/api/engine/reset-roi-baseline", async (_req, res) => {
+    // Re-baseline lifetime ROI to the current on-chain balance. Call this after a deposit
+    // or withdrawal so ROI stays meaningful (lifetime ROI assumes capital is unchanged).
+    try {
+      const bal = await getEffectiveBalance();
+      if (bal > 0) { liveStartingBalance = bal; saveLiveBaseline(bal); }
+      res.json({ success: true, liveStartBalance: liveStartingBalance.toFixed(4) });
+    } catch (e) { res.status(500).json({ error: String(e) }); }
   });
   app.get("/api/engine/risk-status", async (_req, res) => {
     const riskCheck = await checkCircuitBreakers();
@@ -3451,8 +3629,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (!updates || typeof updates !== "object") return res.status(400).json({ message: "Invalid settings payload" });
       const validKeys = Object.keys(engineSettings) as (keyof typeof engineSettings)[];
       let restartIntervals = false;
-      const minValues: Record<string, number> = { scanIntervalMs: 1000, priceCheckIntervalMs: 1000, reentryDelayMs: 0, slReentryDelayMs: 0, lossCooldownMs: 0, maxHoldSeconds: 10, maxOpenPositions: 1, maxTradesPerCycle: 1, minScoreToTrade: 0, startingBalance: 0.1, minPositionSize: 0.01, maxPositionSize: 0.01, txFeePercent: 0, rugcheckMinScore: 0, maxVolLiqRatioNewToken: 1, maxDiscoveryAgeSeconds: 60, dynamicHoldMaxSeconds: 60, txCostsEnabled: 0, safetyChecksEnabled: 0, dynamicHoldEnabled: 0, compoundBoostEnabled: 0, compoundRefSol: 0.1, compoundPower: 0.5, compoundMaxMultiplier: 1.0, compoundAbsCapSol: 0.1 };
-      const maxValues: Record<string, number> = { mlWeight: 1, scoreWeight: 1, partialTpRatio: 1, dailyLossLimitPct: 100, maxDrawdownPct: 100, txFeePercent: 5, rugcheckMinScore: 1000, maxVolLiqRatioNewToken: 50, maxDiscoveryAgeSeconds: 86400, dynamicHoldMaxSeconds: 7200, txCostsEnabled: 1, safetyChecksEnabled: 1, dynamicHoldEnabled: 1, compoundBoostEnabled: 1, compoundRefSol: 100.0, compoundPower: 5.0, compoundMaxMultiplier: 10.0, compoundAbsCapSol: 10.0 };
+      const minValues: Record<string, number> = { scanIntervalMs: 1000, priceCheckIntervalMs: 1000, reentryDelayMs: 0, slReentryDelayMs: 0, lossCooldownMs: 0, maxHoldSeconds: 10, maxOpenPositions: 1, maxTradesPerCycle: 1, minScoreToTrade: 0, startingBalance: 0.1, minPositionSize: 0.01, maxPositionSize: 0.01, txFeePercent: 0, rugcheckMinScore: 0, maxVolLiqRatioNewToken: 1, maxDiscoveryAgeSeconds: 60, dynamicHoldMaxSeconds: 60, txCostsEnabled: 0, safetyChecksEnabled: 0, dynamicHoldEnabled: 0, compoundBoostEnabled: 0, compoundRefSol: 0.1, compoundPower: 0.5, compoundMaxMultiplier: 1.0, compoundAbsCapSol: 0.1, minEdgePct: 0, edgeBuffer: 0, microMinEdgePct: 0, microEdgeBuffer: 0 };
+      const maxValues: Record<string, number> = { mlWeight: 1, scoreWeight: 1, partialTpRatio: 1, dailyLossLimitPct: 100, maxDrawdownPct: 100, txFeePercent: 5, rugcheckMinScore: 1000, maxVolLiqRatioNewToken: 50, maxDiscoveryAgeSeconds: 86400, dynamicHoldMaxSeconds: 7200, txCostsEnabled: 1, safetyChecksEnabled: 1, dynamicHoldEnabled: 1, compoundBoostEnabled: 1, compoundRefSol: 100.0, compoundPower: 5.0, compoundMaxMultiplier: 10.0, compoundAbsCapSol: 10.0, minEdgePct: 20, edgeBuffer: 10, microMinEdgePct: 20, microEdgeBuffer: 10 };
       for (const key of validKeys) {
         if (key in updates) {
           const newVal = updates[key];
