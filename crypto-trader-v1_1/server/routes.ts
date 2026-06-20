@@ -609,33 +609,31 @@ async function resetDailyStats() {
 }
 
 async function getEffectiveBalance(): Promise<number> {
-  try {
-    const modeStatus = await storage.getBotStatus().catch(() => ({ tradingMode: "paper" }));
-    
-    // 1. Establish the base free balance depending on the mode
-    let baseBalance = paperBalance;
-    if (modeStatus.tradingMode === "live" && jupiterService) {
-      baseBalance = await jupiterService.getWalletBalance().catch(() => paperBalance);
-    }
+  const modeStatus = await storage.getBotStatus().catch(() => ({ tradingMode: "paper" }));
+  
+  // 1. Establish the base free balance depending on the mode
+  let baseBalance = paperBalance;
+  if (modeStatus.tradingMode === "live" && jupiterService) {
+    baseBalance = await jupiterService.getWalletBalance(); // Let it throw if RPC fails
+  }
 
-    // 2. Add the real-time value of all open positions
-    const openTrades = await storage.getOpenTrades();
-    let openCapital = 0;
-    for (const t of openTrades) {
-      if (!peakPrices.has(t.id)) continue;
-      const sizeSol = parseFloat(t.amount || "0");
-      const entryPrice = parseFloat(t.price || "0");
-      const currentPrice = parseFloat(t.currentPrice || t.price || "0");
-      if (sizeSol > 0 && entryPrice > 0 && currentPrice > 0) {
-        const unrealizedPnlPct = ((currentPrice - entryPrice) / entryPrice) * 100;
-        const unrealizedPnlSol = sizeSol * (unrealizedPnlPct / 100);
-        openCapital += sizeSol + unrealizedPnlSol;
-      }
+  // 2. Add the real-time value of all open positions
+  const openTrades = await storage.getOpenTrades();
+  let openCapital = 0;
+  for (const t of openTrades) {
+    if (!peakPrices.has(t.id)) continue;
+    const sizeSol = parseFloat(t.amount || "0");
+    const entryPrice = parseFloat(t.price || "0");
+    const currentPrice = parseFloat(t.currentPrice || t.price || "0");
+    if (sizeSol > 0 && entryPrice > 0 && currentPrice > 0) {
+      const unrealizedPnlPct = ((currentPrice - entryPrice) / entryPrice) * 100;
+      const unrealizedPnlSol = sizeSol * (unrealizedPnlPct / 100);
+      openCapital += sizeSol + unrealizedPnlSol;
     }
-    
-    // 3. Return the true total portfolio value
-    return Math.max(0, baseBalance + openCapital);
-  } catch { return paperBalance; }
+  }
+  
+  // 3. Return the true total portfolio value
+  return Math.max(0, baseBalance + openCapital);
 }
 
 let cachedSolPriceUsd = 180, lastSolPriceFetch = 0, solPriceFetchedOnce = false;
