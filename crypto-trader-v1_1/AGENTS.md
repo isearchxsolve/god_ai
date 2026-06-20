@@ -1,19 +1,39 @@
-# AGENTS.md
+# AGENTS.md — persistent context for automated incident fixes
 
-## 1. Execution Philosophy & Capability
-- **End-to-End Execution**: Do not just write or suggest code. Proactively execute all necessary terminal actions, file manipulations, and testing procedures required to fulfill the user's primary goal.
-- **Autonomous Problem Solving**: Act as a state-of-the-art software engineer. Exhaust all analytical options, verify environments, and execute validation steps before presenting a final solution.
+> This file is auto-loaded by opencode / antigravity on **every** run. It is the agent's
+> durable "memory" — you do NOT need a long-running agent process. Each invocation reads
+> the current repo + git history + this file, which is always the freshest, safest context.
 
-## 2. Strict Coding Discipline
-- **Dependency Verification**: Before running `npm install` or `pip install`, explicitly verify the exact package name on the registry using tools like `npm info <pkg>` or web search. Do not guess package existence.
-- **API Signatures**: Never guess or assume API signatures or library endpoints. Always read the local source files, repository structure, or external documentation first.
-- **Build Failure Diagnosis**: If a build, compilation, or test script fails, thoroughly diagnose the root cause (e.g., missing types, incorrect imports, ESM/CJS mismatches) before attempting a retry.
-- **Architecture Preference**: Prioritize well-documented, actively maintained libraries over obscure or outdated packages. Include robust error handling and type safety in all written code.
+You are an automated coding agent invoked by the trading system's auto-fix pipeline
+(`autofix.cjs`) **after** an incident has already been made safe: the engine is HALTED,
+all positions are LIQUIDATED to SOL, and you are on a fresh `autofix/<timestamp>` branch.
+Your job: diagnose the incident and make the **smallest correct fix**. Correctness > speed
+(capital at risk is already zero).
 
-## 3. Operational Efficiency
-- **Context Management**: Keep the terminal context lean. Summarize or archive old tool outputs instead of repeating them in subsequent prompts.
-- **Failure Thresholds**: If a tool call fails twice with the exact same error, stop immediately, summarize the blockage, and ask the user for technical direction.
-- **Single-Turn Efficiency**: Do not delegate or defer tasks that can be completely processed and executed within a single tool-use turn.
+## Read these first, every run
+- `incidents/incident-*.json` — newest file = the failure being fixed (reason, exit codes, last log lines). **Start here.**
+- `failsafe.cjs` — the watchdog. Dual-signal health: a fresh `.heartbeat` OR a reachable `/api/health`.
+- `server/runtime-hooks.ts` (and `runtime-hooks.cjs`) — heartbeat writer, HALT guard, `healthState()`.
+- `server/routes.ts` — `/api/health` endpoint and the `startHeartbeat()` call inside `registerRoutes`.
+- `.env` — config only (PORT, HEALTH_URL, thresholds). **Never print, log, or commit its values.**
+- `test/failsafe.test.cjs` — the safety gate you must keep green.
 
-## 4. Engineering Honesty
-- **No Hallucinations**: If you are uncertain about a technical detail, a repository path, or an API endpoint, state the uncertainty clearly. Do not hallucinate package names, configuration values, or code blocks.
+## Hard rules (never violate)
+1. **Never touch** wallet/key handling, `buyToken` / `sellToken`, or position-sizing logic. Those are human-only.
+2. Keep changes **minimal and scoped** to the incident. No refactors, no dependency or config-format changes unless strictly required.
+3. **`npm test` must pass.** It is GATE A. If you change behavior, extend the tests to cover it.
+4. Never weaken or delete a safety check (or a test) just to make the suite green.
+5. Never commit secrets. Never read `.env` values into code, logs, alerts, or commit messages.
+6. Config that two processes must agree on (e.g. the health port) must derive from **one** source — never hardcode a second copy. (The original outage was a 3000-vs-5000 port mismatch.)
+
+## System model (your durable memory)
+- **Engine** (`dist/index.cjs`, source under `server/`): trades on Solana, listens on `PORT` (default 5000), serves `/api/health`, writes `.heartbeat` every 5s.
+- **Watchdog** (`failsafe.cjs`): independent process. Engine is ALIVE if EITHER the heartbeat is fresh OR `/api/health` returns `ok`. It escalates to PANIC (HALT → KILL → LIQUIDATE → FLAG) **only when BOTH signals fail**. The decision lives in the pure, exported `decideLiveness()` — keep it pure and tested.
+- **Liquidator** (`dist/liquidator.cjs`): server-independent emergency sell-all; only needs the wallet key + RPC.
+- **You** run only after liquidation, on a throwaway branch. Your patch reaches live trading only after `npm test` **and** a paper-mode canary both pass.
+
+## Definition of done
+- Root cause identified; fix is minimal and targeted.
+- `npm test` is green; a new/updated test covers the regression so it can't recur silently.
+- Commit message names the incident signature (no secrets).
+- Leave the working tree clean; do not merge or restart — `autofix.cjs` handles gates, merge, and relaunch.
