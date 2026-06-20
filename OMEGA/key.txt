@@ -1,0 +1,7 @@
+$env:OMEGA_LLM_PROVIDER="openai"
+$env:OPENAI_BASE_URL="https://trustee-breaks-urw-yrs.trycloudflare.com/v1"
+$env:OPENAI_API_KEY="***"
+$env:OPENAI_MODEL="Qwen/Qwen2-VL-7B-Instruct-AWQ"
+$env:GITHUB_TOKEN="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"
+$env:OMEGA_TENANT_RPM_LIMIT="60"
+$env:OMEGA_TENANT_BURST_ALLOWANCE="4"

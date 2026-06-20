@@ -1,0 +1,26 @@
+# API Money Bot v3.0 — Complete Dependencies
+# =============================================
+# Install: pip install -r requirements.txt && playwright install chromium
+
+# ── Core ──
+playwright==1.40.0
+playwright-stealth==1.0.6
+python-dotenv==1.0.0
+requests==2.31.0
+
+# ── Stealth Stack (Optional: CloakBrowser + Gemini + Whisper + BrightData) ──
+# cloakbrowser>=2.0
+# google-generativeai>=0.8
+# openai-whisper>=20231117
+# numpy>=1.24
+# Pillow>=10.0
+
+# ── Crypto Exchanges ──
+python-binance==1.0.19
+coinbase-advanced-py==1.2.0
+
+# ── Social ──
+praw==7.7.1
+
+# ── Optional: 2Captcha wrapper ──
+# twocaptcha-python==1.1.3
