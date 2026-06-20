@@ -6,27 +6,58 @@ const path = require("path");
 const HEARTBEAT_FILE = path.join(__dirname, ".heartbeat"); // engine writes Date.now() every 5s
 const HALT_FILE      = path.join(__dirname, ".HALT");      // engine MUST refuse new buys if this exists
 const INCIDENT_DIR   = path.join(__dirname, "incidents");
-const HEALTH_URL     = process.env.HEALTH_URL || "http://127.0.0.1:3000/api/health";
+const HEALTH_URL     = process.env.HEALTH_URL || `http://127.0.0.1:${process.env.PORT || 3000}/api/health`; // defaults to the engine's PORT
 const ENGINE_PM2_NAME = process.env.ENGINE_PM2_NAME || "trading-engine";
 
 const HEARTBEAT_MAX_AGE_MS = 60_000;
 const POLL_MS = 10_000;
 const MAX_FAILS = 3;
 
-let fails = 0, panicking = false;
+let fails = 0, panicking = false, seenHeartbeat = false;
+const STARTUP_GRACE_MS = Number(process.env.STARTUP_GRACE_MS || 90_000); // don't PANIC while engine is still booting
+const startedAt = Date.now();
+
+// Pure decision (exported for unit tests): the engine is ALIVE if EITHER signal is good;
+// escalate to PANIC only when BOTH the heartbeat AND the HTTP health signal fail.
+function decideLiveness(hb, http) {
+  if (hb.ok || http.ok) return null;
+  return `${hb.reason} + ${http.reason}`;
+}
 
 async function checkHealth() {
+  // DUAL-SIGNAL liveness. PANIC fires ONLY when BOTH signals fail. A single broken signal --
+  // a stale heartbeat while HTTP is healthy, OR an unreachable/misconfigured HTTP endpoint
+  // while the heartbeat is fresh -- is logged as a warning but NEVER escalated. This prevents
+  // both the port-mismatch false PANIC and a heartbeat-writer gap from a wrongful liquidation.
+
+  // Signal 1: heartbeat freshness.
+  const hb = { ok: false, reason: "heartbeat missing" };
   try {
     const age = Date.now() - Number(fs.readFileSync(HEARTBEAT_FILE, "utf8").trim());
-    if (age > HEARTBEAT_MAX_AGE_MS) return `heartbeat stale ${Math.round(age/1000)}s`;
-  } catch { return "heartbeat missing"; }
+    if (age <= HEARTBEAT_MAX_AGE_MS) hb.ok = true;
+    else hb.reason = `heartbeat stale ${Math.round(age/1000)}s`;
+  } catch { hb.reason = "heartbeat missing"; }
+
+  // Signal 2: HTTP health endpoint.
+  const http = { ok: false, reason: "health unreachable" };
   try {
     const res = await fetch(HEALTH_URL, { signal: AbortSignal.timeout(5000) });
-    if (!res.ok) return `health HTTP ${res.status}`;
-    const j = await res.json();
-    if (j.status && j.status !== "ok") return `health=${j.status}`;
-  } catch (e) { return `health unreachable: ${e.message}`; }
-  return null;
+    if (res.ok) {
+      const j = await res.json().catch(() => ({}));
+      if (!j.status || j.status === "ok") http.ok = true;
+      else http.reason = `health=${j.status}`;
+    } else {
+      http.reason = `health HTTP ${res.status}`;
+    }
+  } catch (e) {
+    http.reason = `health unreachable: ${e.message}`;
+  }
+
+  // Warn about a single broken signal, but stay alive.
+  if (!hb.ok && http.ok) console.warn(`[FAILSAFE] ${hb.reason} but HTTP health ok -- engine alive, not escalating`);
+  if (!http.ok && hb.ok) console.warn(`[FAILSAFE] ${http.reason} but heartbeat fresh -- engine alive, not escalating`);
+
+  return decideLiveness(hb, http);
 }
 
 async function alert(text) {
@@ -96,18 +127,29 @@ async function panic(reason) {
   process.exit(ok ? 0 : 1);
 }
 
-process.on("SIGUSR1", () => panic("manual SIGUSR1")); // manual trigger: kill -USR1 <pid>
-
-(async function loop() {
+async function loop() {
   console.log("[FAILSAFE] watchdog online");
   for (;;) {
     if (fs.existsSync(path.join(__dirname, ".PANIC"))) await panic("manual .PANIC file");
     const problem = await checkHealth();
     if (problem) {
-      fails++;
-      console.warn(`[FAILSAFE] unhealthy (${fails}/${MAX_FAILS}): ${problem}`);
-      if (fails >= MAX_FAILS) await panic(problem);
-    } else if (fails) { console.log("[FAILSAFE] recovered"); fails = 0; }
+      // Startup grace: ignore a missing/booting heartbeat until the engine has had time to come up.
+      if (!seenHeartbeat && (Date.now() - startedAt) < STARTUP_GRACE_MS) {
+        console.log(`[FAILSAFE] waiting for engine to boot... (${problem})`);
+      } else {
+        fails++;
+        console.warn(`[FAILSAFE] unhealthy (${fails}/${MAX_FAILS}): ${problem}`);
+        if (fails >= MAX_FAILS) await panic(problem);
+      }
+    } else { seenHeartbeat = true; if (fails) { console.log("[FAILSAFE] recovered"); fails = 0; } }
     await new Promise(r => setTimeout(r, POLL_MS));
   }
-})();
+}
+
+// Exported for unit tests; the watchdog only auto-starts when this file is run directly.
+module.exports = { decideLiveness, checkHealth };
+
+if (require.main === module) {
+  process.on("SIGUSR1", () => panic("manual SIGUSR1")); // manual trigger: kill -USR1 <pid>
+  loop();
+}

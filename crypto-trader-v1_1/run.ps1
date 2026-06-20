@@ -197,11 +197,15 @@ function Do-Bootstrap {
     exit 1
   }
   Load-DotEnv
-  if (-not (Test-Path (Join-Path $Root '.git'))) {
+  $inGit = $false
+  try { $inGit = ((git rev-parse --is-inside-work-tree 2>$null) -eq 'true') } catch {}
+  if (-not $inGit) {
     Info 'Initializing git repo (required for unattended auto-fix branch/merge)...'
     git init | Out-Null; git add -A | Out-Null; git commit -m 'bootstrap' | Out-Null
     $main = if ($env:GIT_MAIN_BRANCH) { $env:GIT_MAIN_BRANCH } else { 'main' }
     git branch -M $main
+  } else {
+    Info 'Already inside a git work tree (parent repo) -- skipping git init.'
   }
   if (-not (Test-Path (Join-Path $Root 'node_modules'))) { Info 'npm install...'; npm install }
   Install-Agent
