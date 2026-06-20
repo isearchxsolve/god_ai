@@ -6,6 +6,7 @@ import { api } from "@shared/routes";
 import { JupiterService, createJupiterService, SOL_MINT, MIN_FEE_BUFFER_SOL,getLatencyLog  } from "./jupiter";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { join as pathJoin } from "path";
+import { startHeartbeat, isHalted, healthState } from "./runtime-hooks";
 
 // ── MULTIPLIER & STAGING CACHES ──
 const SEARCH_QUERIES = ["raydium sol", "meteora sol", "orca sol", "solana usdc", "sol usdt", "raydium usdc", "orca usdc", "meteora usdc", "raydium usdt", "orca usdt", "sol usdc"]; // WIDENED: more liquid DEX+quote-pair seeds to surface more quality candidates (no safety bar lowered)
@@ -2029,6 +2030,13 @@ async function runScanCycle() {
           }
         }
         
+        if (isHalted()) {
+          pendingBuys.delete(addr);
+          reservedCapital -= entryTotalCostSol;
+          console.warn(`[FAILSAFE] \u{1F6D1} HALT flag set -- skipping buy $${candidate.tokenSymbol}`);
+          break;
+        }
+
         let buyResult: { success: boolean; txSignature: string | null; actualSolSpent: number; tokenAmountRaw: bigint; priceImpactPct: number; feesSol: number; error?: string } | undefined;
         try {
           await new Promise(r => setTimeout(r, 150));
@@ -3358,8 +3366,10 @@ async function startTradingEngine() {
   consecutiveWins = 0;
   consecutiveLosses = 0;
   console.log("==================== 1000x ROI TRADING BOT ====================");
-  console.log("[CONFIG] Mode: paper + moonbag + shadow");
-  console.log(`[CONFIG] Wallet: ${engineSettings.startingBalance} SOL`);
+  const _bootStatus = await storage.getBotStatus().catch(() => ({ tradingMode: "paper" }));
+  const _bootMode = _bootStatus.tradingMode === "live" ? "live" : "paper";
+  console.log(`[CONFIG] Mode: ${_bootMode === "live" ? "LIVE (on-chain trading)" : "paper + moonbag + shadow"}`);
+  console.log(`[CONFIG] Paper seed: ${engineSettings.startingBalance} SOL (config default — NOT the live wallet; real balance shown below)`);
   console.log("[CONFIG] ROI Target: 1000x");
   console.log("[CONFIG] Win Rate Target: >80%");
   const _micro = getEdgeParams(true), _normal = getEdgeParams(false);
@@ -3428,6 +3438,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // CRITICAL: Initialize storage wrapper before any storage access
   await initStorageWrapper();
   await storage.seedInitialData();
+  startHeartbeat();            // FAILSAFE: write .heartbeat every 5s so the watchdog sees liveness
   await startTradingEngine();
 
   app.get(api.status.get.path, async (req, res) => { res.json(await storage.getBotStatus()); });
@@ -3436,7 +3447,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const status = await storage.getBotStatus().catch(() => ({ tradingMode: "paper", isRunning: false, walletBalance: "0" }));
       const openTrades = await storage.getOpenTrades().catch(() => []);
       res.json({
-        status: "ok",
+        status: healthState().status,
+        halted: isHalted(),
         mode: status.tradingMode || "paper",
         isRunning: status.isRunning ?? false,
         walletBalance: status.walletBalance || "0",

@@ -8,6 +8,7 @@ import { Connection, Keypair, VersionedTransaction, PublicKey, LAMPORTS_PER_SOL,
 import { getAccount, getAssociatedTokenAddress, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, createCloseAccountInstruction, createBurnInstruction } from "@solana/spl-token";
 import base58 from "bs58";
 import { log } from "./logger";
+import { isHalted } from "./runtime-hooks";
 
 // esbuild compatibility for default exports
 const bs58 = (base58 as any).default || base58;
@@ -661,6 +662,12 @@ export class JupiterService {
   }
 
   async buyToken(tokenMint: string, amountSol: number, slippageBps: number, quoteOverride?: any, maxImpactPct = 15): Promise<BuyResult> {
+    // FAILSAFE CHOKEPOINT: every buy path flows through here. If the watchdog
+    // has set the .HALT flag, refuse to open any new position.
+    if (isHalted()) {
+      log.warn(`[FAILSAFE] Buy blocked -- .HALT flag is set (${tokenMint})`);
+      return { success: false, txSignature: null, actualSolSpent: 0, tokenAmountRaw: 0n, priceImpactPct: 0, feesSol: 0, error: "HALTED" };
+    }
     const lamports = Math.floor(amountSol * LAMPORTS_PER_SOL);
     try {
       const latestSolBal = await this.getWalletBalance();

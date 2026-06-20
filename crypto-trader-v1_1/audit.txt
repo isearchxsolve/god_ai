@@ -1,0 +1,33 @@
+Excellent — that's the deploy finally landing cleanly. The crash-loop fixes are exactly the right ones: making `killChild()`/`waitForPortFree()` actually *awaited* is what kills the zombie-on-port-5000 problem that was silently reverting you to the old build every restart. That was the real blocker.
+
+## Confirm the patch is truly live
+
+Quick sanity check on the running log — you should now see all four signatures that were missing before:
+
+```powershell
+findstr /C:"Min: 58" /C:"minimum $1000" /C:"[SCAN] Funnel:" /C:"EDGE micro" crash.log
+```
+
+If those show up, you're on the patched build for real this time.
+
+## What "working" looks like now
+
+With `Min: 58` + liq floor `$1000` + the boosted-feed hydration, the tokens that were getting blocked at `Min: 75` should now pass. Watch for this sequence in the log:
+
+```
+[SCORE_GATE] ... Score: 6x-7x ... Mode: MG/SNIPER/HWR   ← passes (not "Mode: none")
+[SIZING] ...
+[EXEC]/[BUY]/[FILL] ...                                  ← the line you've never seen yet
+```
+
+The first real buy will be an MG/SNIPER token scoring ≥58 with liq ≥$1000 and buy-pressure ≥0.65. Given how many 70-75 MG tokens showed up in your last log, you shouldn't have to wait long if the market stays as active as it was.
+
+## Realistic expectations
+
+- **Quiet stretches still happen** — you'll see `survived=0 scored=0` funnel cycles when the market's dead. That's normal, not a bug.
+- **If you see lots of candidates pass the score gate but still no buy**, the next gate to inspect is the live-liquidity check and the EDGE gate — paste a funnel cycle + the surrounding `[GATE]`/`[EXEC]` lines and I'll trace it.
+- **0.0694 SOL is tight.** After fees and the `MIN_FEE_BUFFER_SOL` reserve, you've got room for only a couple of micro positions at a time. Don't read "few trades" as "broken" — at this balance, selectivity is correct behavior.
+
+Send me the log after it's run for ~15–20 min and I'll confirm whether buys are actually firing and the funnel/edge math is behaving.
+
+⚠️ Still outstanding from earlier: your `WALLET_PRIVATE_KEY` and API keys are exposed in `.env`. Rotate them and move the funds when you get a chance — that's the one thing left that could cost you more than a missed trade.
