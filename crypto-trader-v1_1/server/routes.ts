@@ -12,7 +12,7 @@ const WATCHLIST_MAX_AGE_MS = 15 * 60_000; // Keep on watch for 15 mins
 
 const MIN_VIABLE_TRADE_SOL  = 0.001; // Force-lowered to allow <0.003 SOL trades
 // FIX: lowered from 7.0 to 2.0 to stop "FINAL EDGE SKIP" on tokens with 3‑4% margin
-const MIN_EDGE_PCT          = 5.0;
+const MIN_EDGE_PCT          = 2.0;
 const MIN_TRADE_SIZE_SOL    = 0.001; // Force-lowered to allow <0.003 SOL trades
 const EXECUTION_TIMEOUT_MS  = 60_000; // Increased from 30,000 for network stability
 
@@ -1433,7 +1433,7 @@ async function runScanCycle() {
     if (!riskCheck.canTrade) return;
 
     const currentBalance = await getEffectiveBalance();
-    const isMicroWallet = currentBalance < 0.05;
+    const isMicroWallet = currentBalance < 0.10;
     if (isMicroWallet) {
       console.log(`[SCAN] Micro-Wallet Mode Active (Bal: ${currentBalance.toFixed(4)} SOL)`);
     }
@@ -1867,7 +1867,7 @@ async function runScanCycle() {
         }
         
         const finalEstimatedImpact = impactPct || estimatedImpact;
-        const finalRoundTripCost = finalEstimatedImpact * 1.3 + engineSettings.txFeePercent * 2 + 1.0;
+        const finalRoundTripCost = finalEstimatedImpact * 1.3 + engineSettings.txFeePercent + 1.0;
         const finalEdge = scoreBasedExpectedMove - finalRoundTripCost;
         if (finalEdge < MIN_EDGE_PCT) { 
             console.log(`[EDGE SKIP] $${candidate.tokenSymbol} — Edge ${finalEdge.toFixed(2)}% < ${MIN_EDGE_PCT}% minimum.`);
