@@ -1867,7 +1867,7 @@ async function runScanCycle() {
         }
         
         const finalEstimatedImpact = impactPct || estimatedImpact;
-        const finalRoundTripCost = finalEstimatedImpact * 1.3 + engineSettings.txFeePercent + 1.0;
+        const finalRoundTripCost = finalEstimatedImpact * 1.3 + engineSettings.txFeePercent * 2 + 1.0;
         const finalEdge = scoreBasedExpectedMove - finalRoundTripCost;
         if (finalEdge < MIN_EDGE_PCT) { 
             console.log(`[EDGE SKIP] $${candidate.tokenSymbol} — Edge ${finalEdge.toFixed(2)}% < ${MIN_EDGE_PCT}% minimum.`);
