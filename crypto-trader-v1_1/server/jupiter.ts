@@ -248,27 +248,13 @@ export class JupiterService {
 
   get walletAddress(): string { return this.keypair.publicKey.toBase58(); }
 
-  /** Balance read — tries public mainnet-beta first (proven accurate), then falls back to rotator. */
+  /** Balance read — tries the paid RPC rotator (Helius/QuickNode) FIRST, then public nodes as fallback. */
   async getWalletBalance(): Promise<number> {
     const publicKey = this.keypair.publicKey;
-    // Try the canonical public endpoint first — it consistently returns the correct balance
-    // even when private RPC nodes return stale/wrong values.
-    const publicEndpoints = [
-      "https://api.mainnet-beta.solana.com",
-      "https://solana-api.projectserum.com",
-      "https://rpc.ankr.com/solana",
-    ];
-    for (const endpoint of publicEndpoints) {
-      try {
-        const conn = new Connection(endpoint, "confirmed");
-        const lamports = await Promise.race([
-          conn.getBalance(publicKey, "confirmed"),
-          new Promise<never>((_, r) => setTimeout(() => r(new Error("TIMEOUT")), 8_000))
-        ]) as number;
-        return lamports / LAMPORTS_PER_SOL;
-      } catch { /* fall through to rotator */ }
-    }
-    // Fall back to the RPC rotator pool
+    // RPC FIX: use the paid rotator pool (Helius/QuickNode) first. The old code hit three
+    // flaky/dead public nodes first — including solana-api.projectserum.com, decommissioned
+    // in 2022 — which caused intermittent "fetch failed" on every balance read and wasted
+    // up to 8s per dead endpoint before falling back to the healthy paid RPC.
     let lastError: Error | null = null;
     for (let i = 0; i < 3; i++) {
       try {
@@ -280,13 +266,27 @@ export class JupiterService {
         return lamports / LAMPORTS_PER_SOL;
       } catch (err: any) {
         lastError = err;
-        if (i === 2) break;
+        // Mark the current node unhealthy so the next retry rotates to a different endpoint.
+        this.rpc.markCurrentUnhealthy();
         const backoff = Math.min(500 * Math.pow(2, i), 2000);
         await new Promise(r => setTimeout(r, backoff));
       }
     }
-    // Rotate to a different endpoint for next call by marking current as unhealthy
-    this.rpc.markCurrentUnhealthy();
+    // Fallback: public mainnet endpoints (dead projectserum node removed).
+    const publicEndpoints = [
+      "https://api.mainnet-beta.solana.com",
+      "https://rpc.ankr.com/solana",
+    ];
+    for (const endpoint of publicEndpoints) {
+      try {
+        const conn = new Connection(endpoint, "confirmed");
+        const lamports = await Promise.race([
+          conn.getBalance(publicKey, "confirmed"),
+          new Promise<never>((_, r) => setTimeout(() => r(new Error("TIMEOUT")), 8_000))
+        ]) as number;
+        return lamports / LAMPORTS_PER_SOL;
+      } catch (err: any) { lastError = err; /* try next public endpoint */ }
+    }
     throw lastError || new Error("RPC_TIMEOUT: All retries failed");
   }
 

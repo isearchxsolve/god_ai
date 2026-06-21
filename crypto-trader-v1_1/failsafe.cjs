@@ -6,7 +6,7 @@ const path = require("path");
 const HEARTBEAT_FILE = path.join(__dirname, ".heartbeat"); // engine writes Date.now() every 5s
 const HALT_FILE      = path.join(__dirname, ".HALT");      // engine MUST refuse new buys if this exists
 const INCIDENT_DIR   = path.join(__dirname, "incidents");
-const HEALTH_URL     = process.env.HEALTH_URL || `http://127.0.0.1:${process.env.PORT || 3000}/api/health`; // defaults to the engine's PORT
+const HEALTH_URL     = process.env.HEALTH_URL || `http://127.0.0.1:${process.env.PORT || 5000}/api/health`; // PORT-FIX: default 5000 matches the engine's default, so both sides resolve to the SAME port whether or not PORT is set in .env
 const ENGINE_PM2_NAME = process.env.ENGINE_PM2_NAME || "trading-engine";
 
 const HEARTBEAT_MAX_AGE_MS = 60_000;

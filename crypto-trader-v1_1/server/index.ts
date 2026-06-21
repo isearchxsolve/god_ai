@@ -138,11 +138,13 @@ process.on("uncaughtException", (err) => {
       setTimeout(() => process.exit(1), 500);
     });
 
+    // reusePort removed: a single trading engine must own port 5000 exclusively.
+    // Without it, a second launch hits the EADDRINUSE guard above and exits loudly
+    // instead of silently double-running (which would mean double trades).
     httpServer.listen(
       {
         port,
         host: "0.0.0.0",
-        reusePort: true,
       },
       () => {
         logHttp(`serving on port ${port}`);

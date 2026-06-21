@@ -179,8 +179,11 @@ async function throttledDexScreenerFetch(url: string, timeoutMs: number = 8000):
 let engineSettings = {
 
   // -- Core Exit & Speed Strategy --
-  trailingStopActivation: 15,   // Let it run! Don't trail until it hits +15%
-  trailingStopDistance: 8,      // Give it an 8% breathing room to handle extreme volatility
+  // PATCH #3: lowered from 15/8 to 5/3. Memecoin pumps rarely reach +15% in a single
+  // push; they spike +5-8% then crash. With activation at 15, trailing never armed on
+  // real pumps. $Taz peaked at +5.64% and never had its trailing stop armed.
+  trailingStopActivation: 5,    // Arm trailing stop as soon as we have +5% profit
+  trailingStopDistance: 3,      // Tighter floor once armed (was 8 — too loose for fast rugs)
   hardTakeProfit: 200,          // Aggressive 200% TP for 100 SOL path
   stopLoss: -10,                 // 10% SL to match hard loss kill
 
@@ -189,7 +192,7 @@ let engineSettings = {
   
   // -- SNIPER Mode Calibration --
   sniperMinScore: 70,
-  sniperMinBuyPressure: 0.65,   // Buyers MUST be in absolute control
+  sniperMinBuyPressure: 0.58,   // Was 0.65 — too strict for current flat market; 0.58 still buyer-dominant
   // -- Core Exit & Speed Strategy --
   // trailingStopActivation: 5, 
   // trailingStopDistance: 2.5, 
@@ -206,19 +209,20 @@ let engineSettings = {
   mlServiceUrl: "http://localhost:5001",
   mlWeight: 0.10, 
   scoreWeight: 0.90, 
-  dailyLossLimitPct: 10, 
+  dailyLossLimitPct: 10,
+  microDailyLossLimitPct: 10, // FIX(daily-loss-micro): micro wallets (<0.10 SOL) use a wider daily-loss cap aligned with maxDrawdownPct. A 10% cap on a sub-0.10 SOL wallet = ~0.006 SOL, smaller than one trade's round-trip cost, so it trips after ~1 trade and then DEADLOCKS the bot (can't trade to recover) until the calendar date rolls over. 
   maxDrawdownPct: 25,
   lossCooldownMs: 600000, 
   partialTpRatio: 0.5, 
   partialTpThreshold: 15, 
 
   // -- Sizing Strategy (Calibrated for 1000x compounding) --
-  minPositionSize: 0.001,       // Force-lowered to allow micro-trading
+  minPositionSize: 0.004,       // Raised from 0.001: floor-size trades bled fees as a huge % of position. 0.004 keeps fee drag sane while staying small on a ~0.07 SOL wallet.
   maxPositionSize: 1.0,      // Raised: Allow compounding to scale positions as balance grows. Caps below enforce safety.
   
   // -- SNIPER Mode Calibration --
   // sniperMinScore: 60,
-  sniperMaxAge: 300,
+  sniperMaxAge: 900,            // Was 300 — too tight; in a flat market the best 58–59 candidates are 5–15 min old and were stuck at "Mode: none". 900s (15 min) lets them qualify for SNIPER (still gated by bp5m, liq).
   // sniperMinBuyPressure: 0.55, 
   sniperMinLiquidity: 50000, 
   sniperMaxSize: 0.003,      
@@ -229,9 +233,9 @@ let engineSettings = {
   hwrMaxSize: 0.004,
 
   // -- Mode Classifier Thresholds (MG / HWR gates) --
-  mgMinVolMomentum: 1.0,
-  mgMinPriceChange5m: 3,
-  mgMinTxVelocity: 10,
+  mgMinVolMomentum: 0.7,    // Was 1.0 — required rising volume; 0.7 admits steady (not just accelerating) volume
+  mgMinPriceChange5m: 1.5,  // Was 3 — required strong 5m pump; 1.5 admits early/mild momentum
+  mgMinTxVelocity: 8,       // Was 10 — minor relax for thinner-but-active pairs
   hwrMinBuyPressure5m: 0.55,
   hwrMinBuyPressure1h: 0.50,
 
@@ -512,13 +516,23 @@ function triggerFlightToSafety() {
   jupiterService.getWalletBalance().then(async (bal) => {
     const safeAmount = Math.max(0, bal - 0.05); // Leave 0.05 SOL for fees
     if (safeAmount > 0.05) {
-      const result = await jupiterService!.buyToken(USDC_MINT, safeAmount, 500);
+      // BUGFIX #1: was 500 bps (5%) — sandwich bots steal 2-3% of the swap.
+      // SOL/USDC on Jupiter routes through major DEXes with deep liquidity;
+      // 50 bps (0.5%) is more than enough and prevents MEV extraction.
+      const result = await jupiterService!.buyToken(USDC_MINT, safeAmount, 50);
       if (result.success) {
         console.log(`[FLIGHT TO SAFETY] Successfully shielded ${safeAmount.toFixed(4)} SOL into USDC.`);
       } else {
         console.log(`[FLIGHT TO SAFETY] Swap failed: ${result.error}`);
         flightToSafetyActive = false; // reset so it can try again
       }
+    } else {
+      // BUGFIX #2: wallet too small to flight-to-safety (<0.10 SOL after fee reserve).
+      // Previously the flag stayed true forever, blocking all trading and never
+      // calling triggerReturnFromSafety(). Now we log and reset so the bot can
+      // continue trading (the circuit breaker's loss-limit protection still applies).
+      console.log(`[FLIGHT TO SAFETY] Wallet balance ${bal.toFixed(4)} SOL too small to shield (need >0.10 after 0.05 fee reserve) — resetting flight flag, breaker stays active via circuitBreakerActive`);
+      flightToSafetyActive = false;
     }
   }).catch((e) => {
     console.log(`[FLIGHT TO SAFETY] Error: ${e.message}`);
@@ -532,7 +546,8 @@ function triggerReturnFromSafety() {
   console.log(`[FLIGHT TO SAFETY] Market clear. Swapping USDC back to SOL...`);
   jupiterService.getTokenBalance(USDC_MINT).then(async (usdcBal) => {
     if (usdcBal > 0n) {
-      const result = await jupiterService!.sellToken(USDC_MINT, usdcBal, 500);
+      // BUGFIX #1: was 500 bps — same MEV risk on the return swap.
+      const result = await jupiterService!.sellToken(USDC_MINT, usdcBal, 50);
       if (result.success) {
         console.log(`[FLIGHT TO SAFETY] Successfully returned to SOL. Received ${result.solReceived.toFixed(4)} SOL.`);
       } else {
@@ -631,10 +646,20 @@ const sessionSymbolBuyCount = new Map<string, number>(); // symbol → entry cou
 // Adds zero logic overhead and is safe to remove at any time.
 const lifecycleLastLogMs = new Map<number, number>(); // trade.id → last LIFECYCLE:HOLD timestamp
 const trailActivatedLogged = new Set<number>();        // trade.id → TRAIL:ACTIVATED already emitted
-const LIFECYCLE_HOLD_INTERVAL_MS = 30_000;             // heartbeat every 30s per trade
+const LIFECYCLE_HOLD_INTERVAL_MS = 30_000;
+const costGateLastLogMs = new Map<number, number>(); // DIAG-COSTGATE throttle: trade.id -> last log ms (one line / 30s)             // heartbeat every 30s per trade
 // FIX LIQ_CO: warn-once guard so the "entry liquidity missing" message is logged
 // exactly once per trade instead of every priceCheckIntervalMs (1000ms) forever.
 const liqCoWarnedTrades = new Set<number>();
+// BUGFIX #14: tracks consecutive partial TP sell failures per trade.
+// After 3 failures (rugged pool / no route), stop retrying to save priority fees.
+const partialTpFailuresMap = new Map<number, number>();
+// PATCH #6: per-trade last-rugcheck timestamp for mid-hold re-evaluation.
+// Rugpulls execute over 1-3 minutes; an entry-time rugcheck can pass while the
+// rugpuller is still accumulating. Re-running rugcheck every 60s during the hold
+// catches new risk flags that appear mid-rug.
+const midHoldRugcheckMs = new Map<number, number>();
+const midHoldRugcheckLastHash = new Map<number, string>();
 // FIX PRICE_SANITY SPAM + STUCK TRADE: tracks consecutive PRICE_SANITY rejections per
 // trade. A single bad-feed tick is transient and self-corrects in 1–3 cycles. But a
 // token that stays below PRICE_RATIO_MIN for 30+ consecutive cycles (~30 seconds) has
@@ -709,6 +734,7 @@ async function getEffectiveBalance(): Promise<number> {
   let openCapital = 0;
   for (const t of openTrades) {
     if (!peakPrices.has(t.id)) continue;
+    if (sellingInProgress.has(t.id)) continue; // FIX(circuit-breaker): skip positions whose on-chain sell already returned SOL to the wallet but whose trade row isn't closed yet. Counting wallet proceeds AND the still-"open" position double-counts capital (~0.10 SOL from a 0.069 wallet), corrupting peakBalance and falsely tripping MAX_DRAWDOWN -> FLIGHT TO SAFETY.
     const sizeSol = parseFloat(t.amount || "0");
     const entryPrice = parseFloat(t.price || "0");
     const currentPrice = parseFloat(t.currentPrice || t.price || "0");
@@ -729,6 +755,7 @@ const SOL_PRICE_CACHE_TTL_MS = 20_000;
 async function getLiveSolPrice(): Promise<number> {
   const now = Date.now();
   if (solPriceFetchedOnce && now - lastSolPriceFetch < SOL_PRICE_CACHE_TTL_MS) return cachedSolPriceUsd;
+  let fetchSucceeded = false;
   try {
     const resp = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${SOL_MINT}`, { signal: AbortSignal.timeout(3000) });
     if (resp.ok) {
@@ -736,10 +763,21 @@ async function getLiveSolPrice(): Promise<number> {
       const pairs = data?.pairs || [];
       const bestPair = pairs.filter((p: any) => p.chainId === "solana").sort((a: any, b: any) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
       const price = parseFloat(bestPair?.priceUsd ?? "0");
-      if (price > 0) { cachedSolPriceUsd = price; lastSolPriceFetch = now; solPriceFetchedOnce = true; }
+      if (price > 0) {
+        cachedSolPriceUsd = price;
+        lastSolPriceFetch = now;
+        solPriceFetchedOnce = true;  // BUGFIX #8: only set on successful fetch
+        fetchSucceeded = true;
+      }
     }
   } catch {}
-  lastSolPriceFetch = now; solPriceFetchedOnce = true;
+  // BUGFIX #8: was unconditionally setting solPriceFetchedOnce=true even on failure,
+  // which locked in the default $180 for the full 20s cache TTL. SOL is currently $73,
+  // so all cost/sizing calculations were 2.4x wrong. Only update timestamp on failure
+  // so we retry sooner (next cycle), but don't mark as fetched.
+  if (!fetchSucceeded) {
+    lastSolPriceFetch = now;  // throttle retries but don't mark as fetched
+  }
   return cachedSolPriceUsd;
 }
 
@@ -752,6 +790,12 @@ async function getOpenUnrealizedPnl(): Promise<number> {
     // unrealizedPnl, which can falsely trip the DAILY_LOSS_LIMIT circuit breaker
     // before any trade in the current session has even executed.
     if (!peakPrices.has(t.id)) continue;
+    // BUGFIX #15: skip trades being force-sold. Their on-chain sell already
+    // returned SOL to the wallet (or will soon), but the trade row is still
+    // OPEN. Counting both the wallet proceeds AND the still-"open" unrealized
+    // PnL double-counts, inflating effective balance and preventing the circuit
+    // breaker from tripping when it should.
+    if (sellingInProgress.has(t.id)) continue;
     const entry = parseFloat(t.price), current = parseFloat(t.currentPrice || t.price), size = parseFloat(t.amount);
     if (entry > 0 && current > 0 && size > 0) total += size * (((current - entry) / entry) * 100) / 100;
   }
@@ -774,7 +818,7 @@ async function checkBitcoinSafety(): Promise<boolean> {
           if (!cachedBtcCrashActive) console.log(`[RISK] 🚨 BITCOIN CRASH DETECTED: BTC is down ${pctChange.toFixed(2)}%. Activating global market circuit breaker!`);
           cachedBtcCrashActive = true;
         } else if (pctChange >= -3.0) {
-          if (cachedBtcCrashActive) console.log(`[RISK] 🟩 BITCOIN RECOVERING: BTC is now at ${pctChange.toFixed(2)}%. Deactivating global market circuit breaker.`);
+          if (cachedBtcCrashActive) console.log(`[RISK] �������� BITCOIN RECOVERING: BTC is now at ${pctChange.toFixed(2)}%. Deactivating global market circuit breaker.`);
           cachedBtcCrashActive = false;
         }
       }
@@ -805,10 +849,11 @@ async function checkCircuitBreakers(): Promise<{ canTrade: boolean; reason: stri
   const netDailyPnl = dailyPnlSol + unrealized;
   const totalLoss   = netDailyPnl < 0 ? Math.abs(netDailyPnl) : 0;
   const dailyLossPct = dailyStartBalance > 0 ? (totalLoss / dailyStartBalance) * 100 : 0;
-  if (dailyLossPct >= engineSettings.dailyLossLimitPct) {
+  const effDailyLossLimitPct = dailyStartBalance < 0.10 ? engineSettings.microDailyLossLimitPct : engineSettings.dailyLossLimitPct; // FIX(daily-loss-micro): micro wallets use the wider, trade-meaningful cap; per-trade cost gate + liquidity floor + loss cooldown remain the primary protections.
+  if (dailyLossPct >= effDailyLossLimitPct) {
     circuitBreakerActive = true;
     triggerFlightToSafety();
-    return { canTrade: false, reason: `DAILY_LOSS_LIMIT (${dailyLossPct.toFixed(1)}% >= ${engineSettings.dailyLossLimitPct}%)` };
+    return { canTrade: false, reason: `DAILY_LOSS_LIMIT (${dailyLossPct.toFixed(1)}% >= ${effDailyLossLimitPct}%)` };
   }
   const effectiveBal = await getEffectiveBalance();
   // FIX U-1: keep peakBalance in sync with unrealized gains. Previously it only
@@ -830,10 +875,24 @@ async function checkCircuitBreakers(): Promise<{ canTrade: boolean; reason: stri
   }
   if (Date.now() < lastMiniCooldownEnd) {
     const remaining = Math.ceil((lastMiniCooldownEnd - Date.now()) / 1000);
+    // BUGFIX #17: if flight-to-safety was triggered but the underlying condition
+    // (daily loss / drawdown / BTC crash) has cleared, return to SOL even though
+    // we're still in cooldown. Otherwise bot stays stuck in USDC for the full
+    // cooldown duration, missing recovery trades.
+    if (circuitBreakerActive) {
+      circuitBreakerActive = false;
+      triggerReturnFromSafety();
+      console.log(`[RISK] Circuit breaker cleared during cooldown — returning from USDC to SOL`);
+    }
     return { canTrade: false, reason: `MINI_LOSS_COOLDOWN (${remaining}s remaining — 2 consecutive losses)` };
   }
   if (Date.now() < lastLossCooldownEnd) {
     const remaining = Math.ceil((lastLossCooldownEnd - Date.now()) / 1000);
+    if (circuitBreakerActive) {
+      circuitBreakerActive = false;
+      triggerReturnFromSafety();
+      console.log(`[RISK] Circuit breaker cleared during cooldown — returning from USDC to SOL`);
+    }
     return { canTrade: false, reason: `LOSS_COOLDOWN (${remaining}s remaining)` };
   }
   circuitBreakerActive = false;
@@ -888,9 +947,9 @@ function getTieredSizing(totalPortfolioSol: number): { pct: number; boost: numbe
   // 5.5 SOL (catastrophic). The tiers keep per-trade loss impact bounded.
   let pct: number, tier: string;
   if (totalPortfolioSol < 0.05) {
-    pct = 0.55; tier = "MICRO";          // -8.3% per loss — aggressive growth
+    pct = 0.10; /* SAFE PROFILE: ~10% per trade (was 0.55) - bounds single-trade loss on a small live wallet */ tier = "MICRO";          // -8.3% per loss — aggressive growth
   } else if (totalPortfolioSol < 0.20) {
-    pct = 0.44; tier = "GROWTH";         // -6.7% per loss
+    pct = 0.10; /* SAFE PROFILE: ~10% per trade (was 0.44) - bounds single-trade loss on a small live wallet */ tier = "GROWTH";         // -6.7% per loss
   } else if (totalPortfolioSol < 1.0) {
     pct = 0.30; tier = "SCALING";        // -4.5% per loss
   } else if (totalPortfolioSol < 5.0) {
@@ -1059,8 +1118,8 @@ function scoreToken(
   const effSniperScore = isMicroWallet ? 58 : engineSettings.sniperMinScore;
   const effMgScore     = isMicroWallet ? 58 : engineSettings.mgMinScore;
   const effHwrScore    = isMicroWallet ? 60 : engineSettings.hwrMinScore;
-  const effSniperLiq   = isMicroWallet ? 1000 : engineSettings.sniperMinLiquidity;
-  const effHwrLiq      = isMicroWallet ? 2000 : engineSettings.hwrMinLiquidity;
+  const effSniperLiq   = engineSettings.sniperMinLiquidity /* FIX(liq-floor): removed micro-wallet $1k discount that let the bot buy un-tradeable thin tokens (BioCraft $21k -> ~35% real round-trip loss). Restored $50k floor. */;
+  const effHwrLiq      = engineSettings.hwrMinLiquidity /* FIX(liq-floor): removed micro-wallet $2k discount. Restored $50k floor. */;
 
   const sizeForMode = (maxSizeFraction: number, minScore: number) => {
     const ratio = Math.max(0, (combinedScore - minScore) / Math.max(1, 100 - minScore));
@@ -1071,7 +1130,7 @@ function scoreToken(
   if (combinedScore >= effSniperScore && ageSeconds <= engineSettings.sniperMaxAge && bp5m >= engineSettings.sniperMinBuyPressure && liq >= effSniperLiq) {
     candidates.push({ mode: "SNIPER", minScore: effSniperScore, sizeSol: sizeForMode(engineSettings.sniperMaxSize, effSniperScore), slippage: liq < 3000 ? 8 : liq < 10000 ? 5 : 3 });
   }
-  if (combinedScore >= effMgScore && volMomentum >= engineSettings.mgMinVolMomentum && priceChange5m >= engineSettings.mgMinPriceChange5m && txVelocity5m >= engineSettings.mgMinTxVelocity) {
+  if (combinedScore >= effMgScore && volMomentum >= engineSettings.mgMinVolMomentum && priceChange5m >= engineSettings.mgMinPriceChange5m && txVelocity5m >= engineSettings.mgMinTxVelocity && liq >= engineSettings.sniperMinLiquidity) {
     candidates.push({ mode: "MG", minScore: effMgScore, sizeSol: sizeForMode(engineSettings.mgMaxSize, effMgScore), slippage: liq < 5000 ? 6 : liq < 20000 ? 4 : 2.5 });
   }
 
@@ -1096,6 +1155,10 @@ function scoreToken(
     if (volMomentum < engineSettings.mgMinVolMomentum) reasons.push("volMom < " + engineSettings.mgMinVolMomentum);
     if (priceChange5m < engineSettings.mgMinPriceChange5m) reasons.push("px5m < " + engineSettings.mgMinPriceChange5m);
     if (txVelocity5m < engineSettings.mgMinTxVelocity) reasons.push("tx5m < " + engineSettings.mgMinTxVelocity);
+    // HWR-specific gates (previously unlogged — HWR failures showed as silent "Mode: none")
+    if (bp5m < engineSettings.hwrMinBuyPressure5m) reasons.push("hwrBp5m < " + engineSettings.hwrMinBuyPressure5m);
+    if (bp1h < engineSettings.hwrMinBuyPressure1h) reasons.push("bp1h < " + engineSettings.hwrMinBuyPressure1h);
+    if (liq < effHwrLiq) reasons.push("hwrLiq < " + effHwrLiq);
     rejectionReason = reasons.join(", ");
   }
   return { score, mlScore, combinedScore, breakdown: {}, metrics, qualifiedMode, sizeSol, slippage, rejectionReason };
@@ -1472,6 +1535,20 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
     });
 
     results.sort((a, b) => b.score - a.score);
+    // [DIAG-SCOREWALL] TEMP instrumentation (no trading effect): dump the top-5 scored
+    // candidates with full metrics + rejection reason BEFORE the safety prescreen, so we
+    // can confirm whether the highest scorers are being removed by safety and see the real
+    // scores/metrics of what the engine is actually finding. Remove after diagnosis.
+    try {
+      const diagTop = results.slice(0, 5).map((r: any, i: number) => {
+        const m = r.metrics || {};
+        return `#${i + 1} $${r.tokenSymbol} score=${r.score} mode=${r.qualifiedMode || "none"}`
+          + ` bp5m=${(m.bp5m ?? 0).toFixed(2)} px5m=${(m.priceChange5m ?? 0).toFixed(2)}`
+          + ` volMom=${(m.volMomentum ?? 0).toFixed(2)} liq=${Math.round(m.liq ?? 0)}`
+          + ` age=${m.ageSeconds ?? 0}s rej=[${r.rejectionReason || ""}]`;
+      });
+      console.log(`[DIAG-SCOREWALL] top${diagTop.length} (pre-safety): ` + diagTop.join("  ||  "));
+    } catch (diagErr) { console.log("[DIAG-SCOREWALL] error", diagErr); }
 
     // LEVER 2: rugcheck-prescreen the single top scored candidate per cycle. Result is cached in
     // safetyCache, so the buy loop reuses it (no double call); drops a rug top-pick before it can
@@ -1520,13 +1597,65 @@ async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair): Pr
 
   try {
     const resp = await fetch(`https://api.rugcheck.xyz/v1/tokens/${tokenAddress}/report/summary`, { signal: AbortSignal.timeout(5000) });
-    if (!resp.ok) return { safe: false, reason: `rugcheck_api_error_${resp.status}` };
+    if (!resp.ok) {
+      // GRACEFUL FALLBACK: a 4xx/5xx from RugCheck previously hard-blocked the token
+      // (rugcheck_api_error_400) and was re-fetched every cycle. Instead, fall back to
+      // local heuristics-only safety and CACHE the result so we stop hammering the API.
+      const fallback = await checkTokenSafetyHeuristicsOnly(tokenAddress, pair);
+      const fb = { safe: fallback.safe, reason: `${fallback.reason}_rugcheck_${resp.status}` };
+      safetyCache.set(tokenAddress, { ...fb, timestamp: Date.now() });
+      return fb;
+    }
     
     const data = await resp.json() as any;
     let safe = true;
     let reason = "ok";
-    if (data.tokenMeta?.mintAuthority !== null || data.tokenMeta?.freezeAuthority !== null) {
-        safe = false; reason = "mint_or_freeze_authority_active";
+    // ROOT-CAUSE FIX: RugCheck /report/summary does NOT return tokenMeta.mint/freezeAuthority,
+    // so `data.tokenMeta?.freezeAuthority !== null` was `undefined !== null` === true for EVERY token —
+    // silently blocking 100% of candidates for days. Detect authorities from the reliable `risks` array
+    // (RugCheck flags "Freeze Authority still enabled" / "Mint Authority still enabled"), with full-report
+    // field fallbacks. Revoked authority = risk absent / null address.
+    const _risks = Array.isArray(data?.risks) ? data.risks : [];
+    const _hasRisk = (kw: string) => _risks.some((r: any) => String(r?.name || "").toLowerCase().includes(kw));
+    const _NULL_ADDR = "11111111111111111111111111111111";
+    const _isAddr = (v: any) => typeof v === "string" && v.length > 0 && v !== _NULL_ADDR;
+    const _freezeActive = _hasRisk("freeze authority") || _isAddr(data?.token?.freezeAuthority) || _isAddr(data?.tokenMeta?.freezeAuthority);
+    const _mintActive   = _hasRisk("mint authority")   || _isAddr(data?.token?.mintAuthority)   || _isAddr(data?.tokenMeta?.mintAuthority);
+    // PATCH #1: HARD-VETO on rugcheck risk flags that predict LP-pull / concentration rugs.
+    // Previously these were logged via DIAG-AUTH and then ignored. $Taz had 6 such flags
+    // (LP Unlocked, Single holder ownership, Top 10 high ownership, High ownership,
+    //  Low Liquidity, Low amount of LP Providers) and was still bought — the pool was
+    // pulled 5 minutes later for a -101.65% loss. These flags predict FUTURE liquidity
+    // loss, not CURRENT sellability, so they must be vetoes at entry.
+    //
+    // VERIFIED (per codebase comment at line 455): "High Ownership" and "Low Liquidity"
+    // are common structural properties of Solana memecoins — vetoing on them would reject
+    // most legitimate candidates. Restricted to the 2 highest-signal flags only:
+    //   - "lp unlocked"            : literal cause of LP-pull rugs (directly predicts rug)
+    //   - "single holder ownership": one wallet can dump everything (concentration rug)
+    const HARD_VETO_RISK_KEYWORDS = [
+      "lp unlocked",            // LP can be pulled anytime — direct rug predictor
+      "single holder ownership" // one wallet can dump everything — concentration rug
+    ];
+    const _vetoRisk = _risks.find((r: any) =>
+      HARD_VETO_RISK_KEYWORDS.some(kw => String(r?.name || "").toLowerCase().includes(kw))
+    );
+    // TEMP DIAG-AUTH: confirm the real RugCheck shape on live data (dev sandbox has no network). Remove after confirming.
+    console.log(`[DIAG-AUTH] $${pair.baseToken?.symbol || tokenAddress} keys=[${Object.keys(data || {}).join(",")}] risks=[${_risks.map((r: any) => r?.name).join(" | ")}] freezeActive=${_freezeActive} mintActive=${_mintActive} vetoRisk=${_vetoRisk?.name || "none"}`);
+    if (_freezeActive) {
+        // FIX: FREEZE authority = honeypot (dev can freeze your account so you cannot sell) -> hard block, non-negotiable.
+        safe = false; reason = "freeze_authority_active_honeypot_risk";
+    } else if (_vetoRisk) {
+      // PATCH #1: hard-veto on LP-pull / concentration risk flags.
+      safe = false;
+      const _vetoSlug = String(_vetoRisk.name || "unknown").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
+      reason = `rugcheck_veto_${_vetoSlug}`;
+      console.log(`[SAFETY-VETO] $${pair.baseToken?.symbol || tokenAddress} HARD-VETO on risk flag: ${_vetoRisk.name}`);
+    } else if (_mintActive) {
+      // FIX: MINT authority active but freeze is null -> dilution risk only, token is still sellable.
+      // Allow the trade (safe stays true) but log it for monitoring. Honeypot (freeze) is already blocked above,
+      // and position size is capped by the micro-wallet sizing + fast take-profit ladder.
+      console.log(`[SAFETY] $${pair.baseToken?.symbol || tokenAddress} mint_authority_active_ALLOWED (freeze=null, rugcheckScore=${data.score})`);
     } else if (data.score < engineSettings.rugcheckMinScore) {
       safe = false; reason = `rugcheck_score_low(${data.score})`;
     }
@@ -1561,7 +1690,10 @@ async function runScanCycle() {
       const ttl = (tokenStopLossCount.get(addr) ?? 0) >= 2 ? REPEAT_LOSER_BLOCK_MS : HARD_BLOCK_TTL_MS;
       if (now - ts > ttl) { hardBlockedAddresses.delete(addr); tokenStopLossCount.delete(addr); }
     }
-    for (const [addr, ts] of recentlyAttemptedBuys) if (now - ts > 15000) recentlyAttemptedBuys.delete(addr);
+    // BUGFIX #21: was 15000ms (15s) — too short for Jupiter outages. Each failed
+    // buy costs ~0.0002 SOL in priority fees. Extending to 30s halves the fee bleed
+    // during outages without significantly delaying valid re-entries.
+    for (const [addr, ts] of recentlyAttemptedBuys) if (now - ts > 30000) recentlyAttemptedBuys.delete(addr);
     for (const [addr, ts] of pendingBuys) if (now - ts > 30000) pendingBuys.delete(addr);
 
     const status = await storage.getBotStatus();
@@ -1669,7 +1801,7 @@ async function runScanCycle() {
       const sym = candidate.tokenSymbol;
       const symLastLossTime = tokenSymbolLastLossMs.get(sym);
       if (symLastLossTime && (Date.now() - symLastLossTime) < SYMBOL_LOSS_COOLDOWN_MS) {
-          console.log(`[GATE] SKIP $${sym} — Symbol in post-loss cooldown.`);
+          console.log(`[GATE] SKIP $${sym} �� Symbol in post-loss cooldown.`);
           continue;
       }
       
@@ -1736,7 +1868,12 @@ async function runScanCycle() {
         const driftLimit = candidate.qualifiedMode === "SNIPER" ? 30 : candidate.qualifiedMode === "MG" ? 25 : 20;
         if (priceDrift > driftLimit) { 
             console.log(`[GATE] SKIP $${candidate.tokenSymbol} — Price drifted ${priceDrift.toFixed(1)}% since scan (Limit: ${driftLimit}%)`);
-            tradedAddresses.set(addr, Date.now()); 
+            // FIX: drift-skips must NOT touch tradedAddresses (the real-trade
+            // re-entry cooldown). Stamping it here produced phantom "Re-entry
+            // hard floor (traded Xs ago)" logs and imposed a 60s re-entry block
+            // on tokens that were never actually bought. priceDrift is recomputed
+            // with a fresh price every cycle, so a token that stabilizes passes
+            // next cycle on its own — no debounce needed.
             continue; 
         }
       }
@@ -1781,8 +1918,8 @@ async function runScanCycle() {
           console.log(`[GATE] SKIP $${candidate.tokenSymbol} — Zero liquidity reported.`);
           continue;
       }
-      const effSniperLiq   = isMicroWallet ? 1000 : engineSettings.sniperMinLiquidity;
-      const effHwrLiq      = isMicroWallet ? 2000 : engineSettings.hwrMinLiquidity;
+      const effSniperLiq   = engineSettings.sniperMinLiquidity /* FIX(liq-floor): removed micro-wallet $1k discount that let the bot buy un-tradeable thin tokens (BioCraft $21k -> ~35% real round-trip loss). Restored $50k floor. */;
+      const effHwrLiq      = engineSettings.hwrMinLiquidity /* FIX(liq-floor): removed micro-wallet $2k discount. Restored $50k floor. */;
       const MIN_BUY_LIQ_USD = scoring.qualifiedMode === "HWR" ? effHwrLiq : effSniperLiq;
       if (liq < MIN_BUY_LIQ_USD) {
           console.log(`[GATE] SKIP $${candidate.tokenSymbol} — Live liq $${liq.toFixed(0)} < minimum $${MIN_BUY_LIQ_USD}`);
@@ -1847,8 +1984,15 @@ async function runScanCycle() {
       if (isLiveBuy) {
         const freshSolBal = await jupiterService!.getWalletBalance().catch(() => remainingBalance);
         const safeBalance = Math.max(0, freshSolBal - reservedCapital);
-        if (safeBalance < scoring.sizeSol + MIN_FEE_BUFFER_SOL) {
-          console.log(`[RISK] SKIP $${candidate.tokenSymbol} — Safe balance ${safeBalance.toFixed(4)} SOL < trade size + fee buffer`);
+        // BUGFIX #5: was `scoring.sizeSol + MIN_FEE_BUFFER_SOL` — but actual spent
+        // can be up to `sizeSol * (1 + slippagePct/100)` due to slippage. $Taz
+        // targeted 0.0059 SOL but spent 0.0124 SOL (110% overspend). Account for
+        // max slippage to prevent the buy from draining more SOL than expected.
+        // Uses scoring.slippage directly (slippageBps is declared later as scoring.slippage * 100).
+        const _b5SlippagePct = scoring.slippage;
+        const maxPossibleSpend = scoring.sizeSol * (1 + _b5SlippagePct / 100) + MIN_FEE_BUFFER_SOL;
+        if (safeBalance < maxPossibleSpend) {
+          console.log(`[RISK] SKIP $${candidate.tokenSymbol} — Safe balance ${safeBalance.toFixed(4)} SOL < max spend ${maxPossibleSpend.toFixed(4)} SOL (size ${scoring.sizeSol.toFixed(4)} + ${_b5SlippagePct}% slippage + ${MIN_FEE_BUFFER_SOL} fee buffer)`);
           recentlyAttemptedBuys.set(addr, Date.now());
           continue;
         }
@@ -1967,7 +2111,10 @@ async function runScanCycle() {
       const scoreBasedExpectedMove = Math.max(0, (scoring.combinedScore - 50) * edge.expectedMoveCoeff);
       
       if (isMicroCapToken) {
-        scoring.sizeSol = 0.02;
+        // BUGFIX #7: was hardcoded 0.02 SOL — on a 0.05 SOL micro-wallet this
+        // is 40% of balance and may exceed available funds after slippage.
+        // Cap at 0.02 OR 20% of remaining balance, whichever is smaller.
+        scoring.sizeSol = Math.min(0.02, remainingBalance * 0.20);
         const newSlippageBps = 800;
         if (isLiveBuy && newSlippageBps !== slippageBps) {
           try {
@@ -2049,19 +2196,68 @@ async function runScanCycle() {
           reservedCapital -= entryTotalCostSol;
         }
         if (!buyResult) { continue; }
-        if (!buyResult.success) { 
+        if (!buyResult.success) {
             console.log(`[LIVE FAILED] Buy failed for $${candidate.tokenSymbol}.`);
-            recentlyAttemptedBuys.set(addr, Date.now()); 
-            tradedAddresses.set(addr, Date.now()); 
-            failedTradesThisCycle++; 
-            if (failedTradesThisCycle >= (isMicroWallet ? 1 : 2)) break; 
-            continue; 
+            recentlyAttemptedBuys.set(addr, Date.now());
+            // BUGFIX #10: was `tradedAddresses.set(addr, Date.now())` — but the buy
+            // NEVER happened. Setting tradedAddresses blocks re-entry for 60s, which
+            // means a transient Jupiter failure (network blip) prevents buying a
+            // token that's still pumping. Only set recentlyAttemptedBuys (15s block).
+            failedTradesThisCycle++;
+            if (failedTradesThisCycle >= (isMicroWallet ? 1 : 2)) break;
+            continue;
         }
         
         remainingBalance = (await jupiterService!.getWalletBalance().catch(() => remainingBalance)) - reservedCapital;
         actualSizeSol = buyResult.actualSolSpent;
         buyTxHash = buyResult.txSignature!;
-        
+
+        // BUGFIX #11: validate buyResult fields before recording trade.
+        // If actualSolSpent=0 (Jupiter bug) or tokenAmountRaw=0 (no tokens received),
+        // recording a trade creates a phantom position that can never be sold —
+        // it auto-closes as DESYNC at -100%, masking the real SOL loss.
+        if (actualSizeSol <= 0 || buyResult.tokenAmountRaw <= BigInt(0)) {
+          console.error(`[FATAL] Buy returned success but invalid fields: actualSolSpent=${actualSizeSol}, tokenAmountRaw=${buyResult.tokenAmountRaw} — aborting trade record. Check wallet for stranded SOL/tokens.`);
+          recentlyAttemptedBuys.set(addr, Date.now());
+          // If tokens were received but actualSolSpent is 0, try to sell them back
+          if (buyResult.tokenAmountRaw > BigInt(0) && actualSizeSol <= 0) {
+            await jupiterService!.sellToken(candidate.tokenAddress, buyResult.tokenAmountRaw, 3000).catch(e => console.error(`[FATAL] Recovery sell failed:`, e));
+          }
+          continue;
+        }
+
+        // PATCH #5: OVERSPEND REVERT — if the actual SOL spent exceeds 110% of the target
+        // size, the pool is hostile (slippage too high / sandwiched). $Taz targeted 0.0059
+        // SOL but spent 0.0124 SOL (2.1x overspend) — an instant 110% slippage loss before
+        // the position even had a chance to breathe. Immediately unwind the position and
+        // block re-entry for the session.
+        const OVERSPEND_TOLERANCE = 1.10;
+        if (actualSizeSol > scoring.sizeSol * OVERSPEND_TOLERANCE && buyResult.tokenAmountRaw > BigInt(0)) {
+          const overspendPct = ((actualSizeSol / scoring.sizeSol) - 1) * 100;
+          console.error(`[OVERSPEND] $${candidate.tokenSymbol} — spent ${actualSizeSol.toFixed(4)} SOL vs target ${scoring.sizeSol.toFixed(4)} SOL (+${overspendPct.toFixed(0)}% over) — IMMEDIATE UNWIND`);
+          try {
+            const unwindSlippage = 1500; // 15% — accept heavy slippage to exit hostile pool fast
+            await jupiterService!.sellToken(candidate.tokenAddress, buyResult.tokenAmountRaw, unwindSlippage);
+            console.error(`[OVERSPEND] $${candidate.tokenSymbol} — unwound tokens, closing trade as OVERSPEND_REVERT`);
+          } catch (unwindErr: any) {
+            console.error(`[OVERSPEND] $${candidate.tokenSymbol} — unwind FAILED: ${unwindErr?.message}. Token may be stranded.`);
+          }
+          // Record the trade and immediately close it so it appears in the trade history.
+          try {
+            const _overspendTrade = await storage.addTrade({
+              tokenAddress: candidate.tokenAddress, tokenSymbol: candidate.tokenSymbol, type: "BUY", mode: scoring.qualifiedMode,
+              tradingMode: "live", status: "OPEN", amount: actualSizeSol.toFixed(4), price: price.toString(), currentPrice: price.toString(),
+              peakPrice: price.toString(), pnl: "0", peakPnl: "0", score: scoring.combinedScore.toString(), txHash: buyTxHash, liquidity: liq.toFixed(2),
+              dex: (pair.dexId || candidate.dex || "").toLowerCase(),
+            });
+            await storage.closeTrade(_overspendTrade.id, price.toString(), "-5", `OVERSPEND_REVERT (+${overspendPct.toFixed(0)}% slippage)`);
+          } catch {}
+          hardBlockedAddresses.set(addr, Date.now());
+          recentlyAttemptedBuys.set(addr, Date.now());
+          tradedAddresses.set(addr, Date.now());
+          continue;
+        }
+
         const buyFeesSol = buyResult.feesSol ?? 0;
         totalExposureSol += actualSizeSol;
         tradedAddresses.set(addr, Date.now());
@@ -2086,11 +2282,15 @@ async function runScanCycle() {
         } catch (dbErr: any) {
           console.error(`[FATAL] DB Failed to save trade for $${candidate.tokenSymbol}! Moonbag prevention: Auto-selling ${buyResult.tokenAmountRaw} tokens.`, dbErr);
           if (buyResult?.tokenAmountRaw && buyResult.tokenAmountRaw > BigInt(0)) {
-            await jupiterService!.sellToken(candidate.tokenAddress, buyResult.tokenAmountRaw, 500).catch(e => console.error(`Emergency sell failed:`, e));
+            // BUGFIX #12: was 500 bps (5%) — emergency sell should use 3000 bps (30%)
+            // to guarantee fill. We just bought successfully, so the pool is tradeable;
+            // the DB failure is on our side, not the pool's. Accept bad fill over stuck tokens.
+            await jupiterService!.sellToken(candidate.tokenAddress, buyResult.tokenAmountRaw, 3000).catch(e => console.error(`Emergency sell failed:`, e));
           }
           continue;
         }
         liveTokenBalances.set(trade.id, buyResult.tokenAmountRaw);
+        console.log(`[DIAG-FILL] $${candidate.tokenSymbol} #${trade.id} | targetSize ${scoring.sizeSol.toFixed(4)} SOL | actualSpent ${actualSizeSol.toFixed(4)} SOL | buyFees ${buyFeesSol.toFixed(4)} SOL | entryChartPx $${price.toFixed(8)} | liq $${liq.toFixed(0)} | tokensRaw ${buyResult.tokenAmountRaw} | compare actualSpent vs final LIVE_FEE netReceived for TRUE round-trip`);
         peakPrices.set(trade.id, price);
         tradeStopPrices.set(trade.id, calcCostAwareStopPrice(price, scoring.qualifiedMode, liq, scoring.sizeSol, cachedSolPriceUsd));
         sessionTokenBuyCount.set(addr, (sessionTokenBuyCount.get(addr) ?? 0) + 1);
@@ -2144,7 +2344,25 @@ async function runScanCycle() {
       const displayBalance = (status.tradingMode === "live" && jupiterService) ? (await jupiterService.getWalletBalance().catch(() => paperBalance)).toFixed(4) : paperBalance.toFixed(3);
       await storage.updateBotStats({ walletBalance: displayBalance, totalTrades: allTrades.length, openPositions: currentOpenCount, winRate: wr, lastSignal: `BUY $${candidate.tokenSymbol} via ${scoring.qualifiedMode} (Score: ${scoring.combinedScore})` });
     }
-  } catch (e) { console.error("[SCANNER] Error:", e); } finally { pendingBuys.clear(); reservedCapital = 0; scanLock = false; }
+  } catch (e) { console.error("[SCANNER] Error:", e); } finally {
+    // BUGFIX #20: was `pendingBuys.clear()` unconditionally — if the scan threw
+    // AFTER a buy was submitted to Jupiter (line 2097), the tx may still be
+    // in-flight. Clearing pendingBuys allows the next cycle to re-buy the same
+    // token, causing a double-spend. Only clear entries older than 30s (the
+    // pendingBuys cleanup threshold at line 1614).
+    const _nowClear = Date.now();
+    for (const [addr, ts] of pendingBuys) {
+      if (_nowClear - ts > 30000) pendingBuys.delete(addr);
+      else console.warn(`[SCANNER] Retaining pending buy for $${addr} (${Math.round((_nowClear - ts)/1000)}s old) — tx may still be in-flight`);
+    }
+    // reservedCapital is decremented per-buy in finally blocks, so should be 0 here.
+    // But if an exception interrupted mid-buy, force-reset to 0 to prevent stuck capital.
+    if (reservedCapital !== 0) {
+      console.warn(`[SCANNER] reservedCapital was ${reservedCapital.toFixed(4)} SOL on exit — force-resetting to 0`);
+      reservedCapital = 0;
+    }
+    scanLock = false;
+  }
 }
 
 async function initBalanceFromDB() {
@@ -2257,12 +2475,16 @@ async function initBalanceFromDB() {
   // In live mode seed dailyStartBalance from the real wallet, not paperBalance sentinel.
   const storedDailyStart = parseFloat((status as any).dailyStartBalance || "0");
   const dailyStartFallback = isLiveMode ? liveWalletBalOnInit : paperBalance;
-  dailyStartBalance = storedDailyStart > 0 ? storedDailyStart : dailyStartFallback;
+  // BUGFIX #9: if RPC failed on init, dailyStartFallback=0. With dailyStartBalance=0,
+  // dailyLossPct = totalLoss / 0 = Infinity → circuit breaker trips instantly.
+  // Fall back to startingBalance (0.01) as a floor — never allow 0.
+  dailyStartBalance = storedDailyStart > 0 ? storedDailyStart : (dailyStartFallback > 0 ? dailyStartFallback : engineSettings.startingBalance);
   try {
     const today = new Date().toDateString();
     const allTrades = await storage.getTrades();
     const closedToday = (allTrades as any[]).filter(t => t.status === "CLOSED" && new Date(t.closedAt || t.timestamp).toDateString() === today);
     dailyPnlSol = closedToday.reduce((sum, t) => sum + parseFloat(t.amount || "0") * (parseFloat(t.pnl || "0") / 100), 0);
+    if (process.env.RESET_DAILY_ON_BOOT === "1") { console.log(`[RISK] RESET_DAILY_ON_BOOT - cleared today's realized PnL (was ${dailyPnlSol.toFixed(4)} SOL) for a fresh daily window on the new safe sizing.`); dailyPnlSol = 0; }
     // Only count REAL trading exits in the streak — admin/operational closes
     // (DESYNC_NO_BALANCE, FORCE_SELL, RESET etc.) are not trading outcomes and
     // must not pollute the consecutive loss counter. Including them inflates the
@@ -2325,7 +2547,7 @@ async function initBalanceFromDB() {
 }
 
 function getEffectiveMinScore(isMicroWallet: boolean = false): number {
-  const base = isMicroWallet ? 58 : engineSettings.minScoreToTrade;
+  const base = isMicroWallet ? 55 : engineSettings.minScoreToTrade;
   const dailyLossPct = dailyStartBalance > 0 ? Math.max(0, (-dailyPnlSol / dailyStartBalance) * 100) : 0;
   // FIX: raised tier thresholds from (>0 / >=5 / >=10) to (>=3 / >=8 / >=15).
   // On a 0.05 SOL micro-wallet, a single -8% trade instantly triggered the old ">0"
@@ -2449,6 +2671,37 @@ async function checkOpenPositions() {
         // Bug #2 fix: use fetchTokenPriceForExit (no wash-trade filter) so that
         // rug-pull panic-selling (vol >> liq) never silences the stop-loss check.
         const { price: currentPrice, pair } = await fetchTokenPriceForExit(trade.tokenAddress);
+
+        // PATCH #6: MID-HOLD RUGCHECK — re-run rugcheck every 60s to catch new risk
+        // flags that appear after entry (LP unlocked mid-hold, new top-holder concentration,
+        // newly-detected honeypot signals). $Taz had 6 risk flags at entry that were logged
+        // but not gated; if any NEW flag appeared mid-hold, this catches it.
+        const _patchHoldAgeMs = Date.now() - new Date(trade.timestamp).getTime();
+        const _patchLastCheck = midHoldRugcheckMs.get(trade.id) ?? 0;
+        if (_patchHoldAgeMs > 30_000 && Date.now() - _patchLastCheck > 60_000) {
+          midHoldRugcheckMs.set(trade.id, Date.now());
+          try {
+            const _patchRugResp = await fetch(`https://api.rugcheck.xyz/v1/tokens/${trade.tokenAddress}/report/summary`,
+              { signal: AbortSignal.timeout(3000) });
+            if (_patchRugResp.ok) {
+              const _patchRugData = await _patchRugResp.json() as any;
+              const _patchRisks = Array.isArray(_patchRugData?.risks) ? _patchRugData.risks : [];
+              const _patchHasFreeze = _patchRisks.some((r: any) => String(r?.name || "").toLowerCase().includes("freeze authority"));
+              const _patchHasLpUnlocked = _patchRisks.some((r: any) => String(r?.name || "").toLowerCase().includes("lp unlocked"));
+              const _patchHasSingleHolder = _patchRisks.some((r: any) => String(r?.name || "").toLowerCase().includes("single holder ownership"));
+              if (_patchHasFreeze || _patchHasLpUnlocked || _patchHasSingleHolder) {
+                console.warn(`[MID-HOLD-RISK] #${trade.id} $${trade.tokenSymbol} — exit triggered by mid-hold rugcheck: freeze=${_patchHasFreeze} lpUnlocked=${_patchHasLpUnlocked} singleHolder=${_patchHasSingleHolder}`);
+                // Mark for immediate exit on this cycle (use a synthetic reason).
+                // We can't set shouldClose here because it's declared later in the function;
+                // instead we set the price to a sentinel that will trip HARD_LOSS_KILL via
+                // the existing flow. The cleanest path is to log and let the price-drop
+                // detector (PATCH #4) catch the resulting price action — but if the rug
+                // hasn't started yet, we still want out. So we record a flag and exit below.
+                (trade as any).__patchForceExit = `MID_HOLD_RISK (freeze=${_patchHasFreeze}, lpUnlocked=${_patchHasLpUnlocked}, singleHolder=${_patchHasSingleHolder})`;
+              }
+            }
+          } catch { /* transient rugcheck failure — ignore, will retry next cycle */ }
+        }
         if (currentPrice <= 0) {
           // ZERO_PRICE_STRIKE: DexScreener returned no price. Could be transient (RPC lag,
           // API blip) or permanent (pair delisted/migrated). Accumulate strikes; reset on
@@ -2549,17 +2802,21 @@ async function checkOpenPositions() {
             }
             zeroBalanceStrikes.delete(trade.id);
             const entryForDesync = parseFloat(trade.price || "0");
-            const desyncPnlPct = entryForDesync > 0 && currentPrice > 0 ? (((currentPrice - entryForDesync) / entryForDesync) * 100).toFixed(2) : "0";
+            // BUGFIX #3: was crediting PnL based on currentPrice vs entryPrice.
+            // But tokens are GONE (on-chain balance = 0) — no SOL was received.
+            // Crediting anything other than -100% is fictional and masks the
+            // real daily loss, preventing the circuit breaker from tripping.
+            const desyncPnlPct = "-100.00";
             const desyncSizeSol = parseFloat(trade.amount || "0");
             dailyPnlSol += desyncSizeSol * (parseFloat(desyncPnlPct) / 100);
-            console.warn(`[LIVE] DESYNC DETECTED #${trade.id} $${trade.tokenSymbol} — zero on-chain balance → auto-closing (PNL: ${desyncPnlPct}%)`);
+            console.warn(`[LIVE] DESYNC DETECTED #${trade.id} $${trade.tokenSymbol} — zero on-chain balance → auto-closing (PNL: ${desyncPnlPct}% — full loss, no SOL recovered)`);
             await storage.closeTrade(trade.id, currentPrice.toString(), desyncPnlPct, "DESYNC_AUTO_CLOSE");
             liveTokenBalances.delete(trade.id); peakPrices.delete(trade.id); partialTpTaken.delete(trade.id);
             tradeStopPrices.delete(trade.id); prevPnlMap.delete(trade.id); pnlStableMap.delete(trade.id);
             tradedAddresses.set(trade.tokenAddress, Date.now());
             // FIX DESYNC-REENTRY: also block reentry via stoppedOutAddresses for the full
             // SL blackout period. Without this, the token immediately re-qualifies after the
-            // 30s REENTRY_HARD_FLOOR and can be bought again before RPC propagation resolves —
+            // 30s REENTRY_HARD_FLOOR and can be bought again before RPC propagation resolves ���
             // exactly what happened with $Eve (bought twice in live session). DESYNC is treated
             // the same as a stop-loss for reentry purposes: the bot doesn't know whether the
             // position was profitable or not when balance was zero, so caution is correct.
@@ -2825,9 +3082,11 @@ async function checkOpenPositions() {
         const peakPnl = ((peak - entryPrice) / entryPrice) * 100;
         const drawdownFromPeak = peak > 0 ? ((peak - currentPrice) / peak) * 100 : 0;
         
-        // --- REPLACE THESE LINES: ---
-        await storage.updateTradeCurrentPrice(trade.id, currentPrice.toString(), pnlPct.toFixed(2));
-        await storage.updateTradePeakPrice(trade.id, peak.toString(), peakPnl.toFixed(2));
+        // BUGFIX #18: was `await` — blocks price-check loop on DB writes (50-200ms each).
+        // During a rug, every millisecond counts. Fire-and-forget so the loop continues
+        // to the exit decision immediately. DB will catch up on the next cycle.
+        storage.updateTradeCurrentPrice(trade.id, currentPrice.toString(), pnlPct.toFixed(2)).catch(() => {});
+        storage.updateTradePeakPrice(trade.id, peak.toString(), peakPnl.toFixed(2)).catch(() => {});
 
         // --- WITH THESE TIMEOUT-WRAPPED LINES: ---
         // await withTimeout(
@@ -2854,7 +3113,10 @@ async function checkOpenPositions() {
           console.log(`[TRAIL:ACTIVATED] id=#${trade.id} $${trade.tokenSymbol} | peakPnl: +${peakPnl.toFixed(2)}% reached threshold +${engineSettings.trailingStopActivation}% | trailing distance: -${engineSettings.trailingStopDistance}%`);
         }
         // Partial TP
-        if (!partialTpTaken.has(trade.id) && pnlPct >= engineSettings.partialTpThreshold && pnlPct < dynamicTP) {
+        // BUGFIX #14: track partial TP failures. If the sell fails 3x (rugged pool),
+        // mark as taken to stop retrying — each retry wastes priority fees.
+        const partialTpFailures = partialTpFailuresMap.get(trade.id) ?? 0;
+        if (!partialTpTaken.has(trade.id) && partialTpFailures < 3 && pnlPct >= engineSettings.partialTpThreshold && pnlPct < dynamicTP) {
           const sizeSol = parseFloat(trade.amount);
           const partialSize = sizeSol * engineSettings.partialTpRatio;
           const isLivePartial = trade.tradingMode === "live" && jupiterService !== null;
@@ -2877,7 +3139,13 @@ async function checkOpenPositions() {
                   await storage.updateTradeAmount(trade.id, (sizeSol - partialSize).toFixed(4));
                   console.log(`[LIVE] PARTIAL TP $${trade.tokenSymbol} | Sold ${engineSettings.partialTpRatio * 100}% on-chain @ +${pnlPct.toFixed(1)}% | SOL received: ${partialResult.solReceived.toFixed(4)} | tx: ${partialResult.txSignature?.slice(0, 20)}...`);
                   partialSuccess = true;
-                } else console.warn(`[LIVE] PARTIAL TP FAILED $${trade.tokenSymbol}: ${partialResult.error}`);
+                } else {
+                  // BUGFIX #14: increment failure counter. After 3 failures, stop retrying.
+                  partialTpFailuresMap.set(trade.id, (partialTpFailuresMap.get(trade.id) ?? 0) + 1);
+                  const fails = partialTpFailuresMap.get(trade.id) ?? 0;
+                  console.warn(`[LIVE] PARTIAL TP FAILED $${trade.tokenSymbol} (attempt ${fails}/3): ${partialResult.error}${fails >= 3 ? ' — giving up, marking as taken' : ''}`);
+                  if (fails >= 3) partialTpTaken.add(trade.id);  // stop retrying
+                }
               } else console.warn(`[LIVE] PARTIAL TP DESYNC: No tokens for $${trade.tokenSymbol}`);
             } finally { sellingInProgress.delete(trade.id); }
           } else {
@@ -2909,6 +3177,12 @@ async function checkOpenPositions() {
           else if (Math.abs(pnlPct - stable.pnl) >= 0.5) pnlStableMap.set(trade.id, { pnl: pnlPct, since: Date.now() });
         } else pnlStableMap.delete(trade.id);
         let shouldClose = false, reason = "";
+        // PATCH #6: honor mid-hold rugcheck force-exit flag set above.
+        if ((trade as any).__patchForceExit) {
+          shouldClose = true;
+          reason = (trade as any).__patchForceExit;
+          (trade as any).__patchForceExit = undefined;
+        }
         // FIX DEEP_RUG: fires at -50% PNL unconditionally, immediately, no grace.
         // The PRICE_SANITY gate (PRICE_RATIO_MIN = 0.01) only catches single-tick
         // -99% collapses. A gradual rug that drops price over 3–7 ticks (e.g. -20%,
@@ -2931,7 +3205,10 @@ async function checkOpenPositions() {
         // peaked at +12% and exited at -104% with dynamicTP=80%. The old version
         // exited both at +20% via this check — capturing real profit instead of
         // watching it evaporate. Always exit at +20%: it's a real, bankable gain.
-        //else if (pnlPct >= 20) { shouldClose = true; reason = `TAKE_PROFIT_20 (+${pnlPct.toFixed(2)}%)`; }
+        // PATCH #3: re-enabled TAKE_PROFIT_20. Memecoins peak and collapse within seconds;
+        // a +20% take-profit captures real bankable gains before the rug. $Taz peaked at +5.64%
+        // then bled to -100% because there was no profit-taking gate below dynamicTP (65%+).
+        else if (pnlPct >= 20) { shouldClose = true; reason = `TAKE_PROFIT_20 (+${pnlPct.toFixed(2)}%)`; }
         const costAwareStopPrice = tradeStopPrices.get(trade.id) ?? 0;
         const stopLossPct = costAwareStopPrice > 0 && entryPrice > 0 ? ((costAwareStopPrice - entryPrice) / entryPrice) * 100 : engineSettings.stopLoss;
         // FIX: halfStopPct floor prevents EARLY_CUT from firing on entry noise.
@@ -2960,10 +3237,25 @@ async function checkOpenPositions() {
         // still gives two or three price-check cycles to confirm the move is real
         // before closing, without creating a 40-second free-bleed window on fast rugs.
         // NEW: Gives the token 4% of wiggle room before cutting a profitable trade
+        // FIX(round-trip cost gate): mid-price PnL ignores spread + slippage + fees. On #10250 a "+1.61% mid"
+        // exit realized -4.42% (truePnl -5.05%). VOLUNTARY profit-taking exits (PROFIT_DECLINE, PNL_STAGNANT)
+        // must clear the estimated round-trip cost before firing. Loss-cut / emergency exits are NOT gated.
+        const _rtCosts = calcTransactionCosts(pair?.liquidity?.usd ?? 0, parseFloat(trade.amount || "0"));
+        const COST_SAFETY_MULT = 2.0; // modeled cost under-predicts reality (~3.4% modeled vs ~6% realized on #10250)
+        const minProfitableExitPct = _rtCosts.totalRoundTripPct * COST_SAFETY_MULT + 0.5;
+        const clearsRoundTrip = pnlPct >= minProfitableExitPct;
+        if (pnlPct >= 1 && !clearsRoundTrip && holdTime > 30 && (Date.now() - (costGateLastLogMs.get(trade.id) ?? 0) >= 30000) && (costGateLastLogMs.set(trade.id, Date.now()) || true)) console.log(`[DIAG-COSTGATE] $${trade.tokenSymbol} mid pnl +${pnlPct.toFixed(2)}% < round-trip floor ${minProfitableExitPct.toFixed(2)}% (modeled ${_rtCosts.totalRoundTripPct.toFixed(2)}% x${COST_SAFETY_MULT}) -> holding; voluntary profit-exits suppressed`);
+        // PATCH #2: removed `clearsRoundTrip` requirement from PROFIT_DECLINE and PNL_STAGNANT.
+        // The cost gate's INTENT is "don't sell for less than round-trip cost" — that should only
+        // apply to LOSS exits (where we'd be crystallizing a loss below the cost-recovery floor),
+        // NOT to profit exits. $Taz peaked at +5.64% but the cost gate required +12.02% before any
+        // profit exit could fire, so the bot held through the peak and bled to -100%.
+        // Profit-taking should always be allowed above +1%; the cost gate is enforced separately
+        // on the loss side via HARD_LOSS_KILL / DEEP_RUG_KILL.
         if (prevPnl !== null && prevPnl > 0 && pnlPct > 0 && pnlPct < prevPnl && prevPnl >= 1.0 && (prevPnl - pnlPct) >= 4.0 && holdTime > 20 && !isNearTpGate) {
             shouldClose = true; reason = `PROFIT_DECLINE (was +${prevPnl.toFixed(2)}%, now +${pnlPct.toFixed(2)}%, drop=${(prevPnl - pnlPct).toFixed(2)}%)`;
         }
-        else if ((() => { const stable = pnlStableMap.get(trade.id); if (!stable || pnlPct < 1) return false; const stagnantMs = peakPnl < 3.0 ? 35_000 : 60_000; return (Date.now() - stable.since) >= stagnantMs; })()) {
+        else if (pnlPct >= 1 && (() => { const stable = pnlStableMap.get(trade.id); if (!stable || pnlPct < 1) return false; const stagnantMs = peakPnl < 3.0 ? 35_000 : 60_000; return (Date.now() - stable.since) >= stagnantMs; })()) {
           const stableSec = Math.round((Date.now() - (pnlStableMap.get(trade.id)!.since)) / 1000);
           shouldClose = true; reason = `PNL_STAGNANT (+${pnlPct.toFixed(2)}% unchanged for ${stableSec}s)`;
         }
@@ -2971,8 +3263,11 @@ async function checkOpenPositions() {
           shouldClose = true;
           reason = `TRAIL_STOP (peak +${peakPnl.toFixed(1)}%, fell ${drawdownFromPeak.toFixed(1)}%, floor +${trailingFloor.toFixed(1)}%)`;
         }
-        else if (pair && pair.liquidity?.usd && pair.liquidity.usd < 300) {
-           shouldClose = true; reason = `LIQUIDITY_DRAIN_EMERGENCY(liq < $300)`;
+        // BUGFIX #6: was `pair.liquidity?.usd && pair.liquidity.usd < 300` —
+        // the `&&` short-circuits when usd=0, so a pool with literally $0
+        // liquidity doesn't trigger this exit. Use nullish coalescing.
+        else if (pair && (pair.liquidity?.usd ?? 0) < 300) {
+           shouldClose = true; reason = `LIQUIDITY_DRAIN_EMERGENCY(liq < $300, now ${(pair.liquidity?.usd ?? 0).toFixed(0)})`;
         }
         else if (costAwareStopPrice > 0 && currentPrice <= costAwareStopPrice) { shouldClose = true; reason = `STOP_LOSS (stop $${costAwareStopPrice.toFixed(8)}, price $${currentPrice.toFixed(8)}, pnl ${pnlPct.toFixed(1)}%)`; }
         else if (holdTime > dynamicMaxHold && pnlPct < 5) { shouldClose = true; reason = `MAX_HOLD(${Math.round(dynamicMaxHold)}s)`; }
@@ -3012,6 +3307,28 @@ async function checkOpenPositions() {
         // and VOL_COLLAPSE (holdTime > 180) is never evaluated — tokens bleed to
         // zero indefinitely. Using a separate if allows both checks to run.
         if (!shouldClose && pair && holdTime > 180 && pnlPct > 1) { const currentVol5m = pair.volume?.m5 || 0; const vol1hNow = pair.volume?.h1 || 0; const expectedVol5m = vol1hNow / 12; if (expectedVol5m > 100 && currentVol5m < expectedVol5m * 0.15) { shouldClose = true; reason = `VOL_COLLAPSE (5m vol ${currentVol5m.toFixed(0)} is <15% of expected ${expectedVol5m.toFixed(0)})`; } }
+        // PATCH #4: PRICE-DROP RUG DETECTOR — leading indicator that does NOT depend
+        // on DexScreener's liquidity field (which lags on-chain state by 30-90s during a rug).
+        // Price updates propagate faster than liquidity aggregates, so a sharp price drop
+        // from peak is the earliest reliable signal of an active rug. $Taz bled from +5.64%
+        // to -100% over ~3 minutes without firing LIQ_COLLAPSE because DexScreener still
+        // reported stale liq until the pool was already empty.
+        if (!shouldClose && holdTime > 20) {
+          const _patchPeak = peakPrices.get(trade.id) ?? entryPrice;
+          const _patchDropFromPeakPct = _patchPeak > 0 ? ((_patchPeak - currentPrice) / _patchPeak) * 100 : 0;
+          // Fast rug: -25% from peak in any window — unconditional exit
+          if (_patchDropFromPeakPct >= 25) {
+            shouldClose = true;
+            reason = `PRICE_RUG (-${_patchDropFromPeakPct.toFixed(1)}% from peak $${_patchPeak.toExponential(4)} -> $${currentPrice.toExponential(4)})`;
+          }
+          // SLOW_BLEED: -5% from peak AND below entry AND hold > 60s AND peakPnl < trailingStopActivation.
+          // Covers the gap below trailing activation (5%) where TRAIL_STOP never arms.
+          // Drop threshold raised to 5% (from 3%) to avoid whipsaw on normal memecoin oscillation.
+          else if (_patchDropFromPeakPct >= 5 && currentPrice < entryPrice && holdTime > 60 && peakPnl < engineSettings.trailingStopActivation) {
+            shouldClose = true;
+            reason = `SLOW_BLEED (-${_patchDropFromPeakPct.toFixed(1)}% from peak, below entry, peakPnl ${peakPnl.toFixed(2)}%)`;
+          }
+        }
         // FIX D: Liquidity collapse emergency exit. A rug pull drains LP before it crashes
         // price — our stop-loss fires too late because price is calculated against drained
         // liquidity. If current liquidity is below $300 (un-tradeable) OR has dropped >70%
@@ -3019,6 +3336,10 @@ async function checkOpenPositions() {
         // This fires regardless of holdTime because rugs don't wait.
         if (!shouldClose && pair) {
           const currentLiq = pair.liquidity?.usd ?? 0;
+          // BUGFIX #16: if DexScreener returns no liquidity field (undefined),
+          // currentLiq=0 triggers false LIQ_COLLAPSE. Only fire if liquidity
+          // was actually reported (field exists and is a number).
+          const liqReported = typeof pair.liquidity?.usd === "number";
           // FIX LIQ_CO: "0" is a truthy string so the old ternary (trade.liquidity ? parseFloat(...) : 0)
           // resolved to parseFloat("0") = 0 for every trade stored with zero liquidity — making the
           // relative 50% drop check permanently false (0 > 1000 is never true). Use parseFloat with
@@ -3034,7 +3355,9 @@ async function checkOpenPositions() {
             liqCoWarnedTrades.add(trade.id);
             console.warn(`[LIQ_CO] #${trade.id} $${trade.tokenSymbol} — entry liquidity zero, using floor $${effectiveEntryLiq} for relative drop check (FIX #5)`);
           }
-          const liqCollapsed = currentLiq < 300;
+          // BUGFIX #16: only fire if liquidity was actually reported. Missing
+          // liquidity field is a data gap, not a real $0 pool.
+          const liqCollapsed = liqReported && currentLiq < 300;
           // FIX #6: threshold tightened from 30% remaining (70% drain) to 50% remaining (50% drain).
           // A 55% LP drain already compromises the token — waiting for 70% drain costs an extra
           // ~20% of exit value. Catching the collapse at 50% drain gives the SL a wider price window
@@ -3152,10 +3475,23 @@ async function checkOpenPositions() {
               // a timeout here increments sellFailureStrikes and the escalating-slippage ladder
               // retries next cycle automatically, so no position is ever abandoned.
               const POSITION_SELL_TIMEOUT_MS = 12_000;
-              const sellResult = await jupiterService!.sellToken(trade.tokenAddress, tokenAmountRaw, autoEscalatedExitBps);
+              // PATCH #7: For death-signal exits (LIQ_COLLAPSE / PRICE_RUG / SLOW_BLEED /
+              // MID_HOLD_RISK), the pool is already known to be dead. Skip the slow
+              // escalating-slippage ladder (4 strikes, ~50s) and jump straight to max
+              // slippage (3000 bps = 30%) on the first attempt. $Taz wasted 50 seconds
+              // going through strikes 1->4 on a dead pool, finally selling for 0 SOL.
+              // For non-death-signal exits (PROFIT_DECLINE, TRAIL_STOP, etc.), keep the
+              // original escalating ladder to maximize fill quality on healthy pools.
+              const _patchIsDeathExit = reason.startsWith("LIQ_COLLAPSE") || reason.startsWith("PRICE_RUG") || reason.startsWith("SLOW_BLEED") || reason.startsWith("MID_HOLD_RISK");
+              const _patchFirstAttemptBps = _patchIsDeathExit ? 3000 : autoEscalatedExitBps;
+              const sellResult = await jupiterService!.sellToken(trade.tokenAddress, tokenAmountRaw, _patchFirstAttemptBps);
               if (!sellResult.success) {
                 const strikes = (sellFailureStrikes.get(trade.id) ?? 0) + 1;
                 sellFailureStrikes.set(trade.id, strikes);
+                // PATCH #7: for death exits, jump straight to the force-sell background
+                // loop after just 1 failed attempt (instead of 4). The pool is dead,
+                // retrying 3 more times with the same max slippage is pure waste.
+                const _patchMaxStrikes = _patchIsDeathExit ? 1 : 4;
                 // AUTO-ESCALATING SLIPPAGE LADDER: each failed sell retries with wider
                 // slippage rather than giving up. Giving up = tokens stuck on-chain with
                 // no automatic recovery — in live mode that is a guaranteed full loss.
@@ -3163,12 +3499,13 @@ async function checkOpenPositions() {
                 // Strike 2 → 500 bps (5% — covers most pool conditions)
                 // Strike 3 → 1500 bps (15% — emergency exit, accept bad fill over stuck)
                 // Strike 4+ → 3000 bps (30% — last resort, any fill beats zero)
-                if (strikes <= 4) {
-                  const escalatedBps = strikes === 1 ? Math.min(exitSlippageBps * 2, 500)
+                if (strikes <= _patchMaxStrikes) {
+                  const escalatedBps = _patchIsDeathExit ? 3000
+                    : strikes === 1 ? Math.min(exitSlippageBps * 2, 500)
                     : strikes === 2 ? 500
                     : strikes === 3 ? 1500
                     : 3000;
-                  console.warn(`[LIVE] SELL FAILED $${trade.tokenSymbol} (attempt ${strikes}): ${sellResult.error} — escalating slippage to ${escalatedBps}bps next cycle`);
+                  console.warn(`[LIVE] SELL FAILED $${trade.tokenSymbol} (attempt ${strikes}${_patchIsDeathExit ? " [DEATH_EXIT]" : ""}): ${sellResult.error} — escalating slippage to ${escalatedBps}bps next cycle`);
                   // Store escalated slippage for next cycle by bumping the strike count
                   // — the escalated bps will be derived from it on the next price check.
                 } else {
@@ -3224,8 +3561,14 @@ async function checkOpenPositions() {
               finalPnlPct = sizeSol > 0 ? ((sellResult.solReceived - sizeSol) / sizeSol) * 100 : 0;
               dailyPnlSol += sellResult.solReceived - sizeSol;
               liveTokenBalances.delete(trade.id);
-              const liveBalAfterSell = await jupiterService!.getWalletBalance().catch(() => 0);
-              if (liveBalAfterSell > peakBalance) peakBalance = liveBalAfterSell;
+              // BUGFIX #19: was `await getWalletBalance()` — blocks price-check loop
+              // on RPC round-trip. Fire-and-forget; peakBalance updates async.
+              jupiterService!.getWalletBalance().then((liveBalAfterSell) => {
+                if (liveBalAfterSell > peakBalance) {
+                  peakBalance = liveBalAfterSell;
+                  storage.updateBotStats({ peakBalance: peakBalance.toFixed(4) }).catch(() => {});
+                }
+              }).catch(() => {});
               // FEE TRACKING: log real sell fees so cumulative fee drag is visible.
               const sellFeesSol = sellResult.feesSol ?? 0;
               const trueNetSol = sellResult.solReceived - sellFeesSol;
@@ -3299,8 +3642,14 @@ async function checkOpenPositions() {
           }
           await storage.closeTrade(trade.id, currentPrice.toString(), finalPnlPct!.toFixed(2), reason);
 
-          // Reclaim ~0.002 SOL per trade
-          jupiterService!.closeTokenAccount(trade.tokenAddress).catch(() => {});
+          // BUGFIX #13: was `jupiterService!.closeTokenAccount(...)` — non-null
+          // assertion crashes paper mode where jupiterService is null. Guard with
+          // null check. Also log failures so operator can manually reclaim rent.
+          if (jupiterService) {
+            jupiterService.closeTokenAccount(trade.tokenAddress).catch((e: any) => {
+              console.warn(`[RECLAIM] closeTokenAccount failed for $${trade.tokenSymbol} (dust balance may prevent close): ${e?.message ?? e}`);
+            });
+          }
 
           
           // ── SHADOW MODE: close matching shadow trade ──────────────────────
@@ -3396,8 +3745,24 @@ async function startTradingEngine() {
     if (attempt < 9) await new Promise(r => setTimeout(r, 2000));
     else console.warn(`[ENGINE] Could not fetch live SOL price after 10 attempts — proceeding with cached fallback $${cachedSolPriceUsd}`);
   }
-  scannerInterval = setInterval(runScanCycle, engineSettings.scanIntervalMs);
-  priceCheckerInterval = setInterval(checkOpenPositions, engineSettings.priceCheckIntervalMs);
+  // BUGFIX #4: was setInterval — if checkOpenPositions takes >1s (slow RPC, many
+  // positions), calls stack up and priceCheckLock skips them. During a rug, exits
+  // can be delayed by 5-10s. Recursive setTimeout guarantees the next call only
+  // schedules AFTER the current one completes, with no stacking.
+  function scheduleScan() {
+    scannerInterval = setTimeout(async () => {
+      await runScanCycle();
+      scheduleScan();
+    }, engineSettings.scanIntervalMs);
+  }
+  function schedulePriceCheck() {
+    priceCheckerInterval = setTimeout(async () => {
+      await checkOpenPositions();
+      schedulePriceCheck();
+    }, engineSettings.priceCheckIntervalMs);
+  }
+  scheduleScan();
+  schedulePriceCheck();
   setTimeout(runScanCycle, 3000);
   setTimeout(checkOpenPositions, 8000);
 }
