@@ -40,15 +40,13 @@ export class RpcRotator {
     setInterval(() => this.runHealthChecks(), 30_000);
   }
 
-  private keys: string[] = [
-    "8e13f606-8149-4964-8047-fc5bd4cdc569",
-    "2eb86432-fcc5-4a70-b661-c53e557a218c",
-    "77cb15bb-36b1-4ee9-87f3-ce862b223a29",
-    "000e36a8-650d-4e8c-b411-b965ee310fa1",
-    "0e688ee2-b196-434d-ac10-a7fda13c8c5e",
-    "be7e351c-ecce-49ec-87c8-fc4ff33cd2a8",
-    "7ec9b032-92a2-4fd5-9e19-deeb235f5a6e"
-  ];
+  // Helius API key rotation pool — loaded from env. Accepts HELIUS_API_KEYS or HELIUS_KEYS
+  // (comma-separated). No keys are hardcoded; if unset, the pool is empty and only the full
+  // RPC URL(s) from SOLANA_RPC_URL/_BACKUP_URL/_TERTIARY_URL are used.
+  private keys: string[] = (process.env.HELIUS_API_KEYS ?? process.env.HELIUS_KEYS ?? "")
+    .split(",")
+    .map(k => k.trim())
+    .filter(k => k.length > 0);
 
   add(url: string, fullUrl?: string) {
     // Track the very first full URL as the primary (used for TX send/confirm)

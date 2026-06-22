@@ -180,7 +180,10 @@ if (-not $SkipBuild) {
     Write-Step "Phase 3: Rebuild TypeScript (npm run build)"
 
     Write-Host "  Building..." -ForegroundColor DarkGray
-    $buildOutput = npm run build 2>&1
+    $oldErrorPref = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $buildOutput = cmd.exe /c "npm run build 2>&1"
+    $ErrorActionPreference = $oldErrorPref
 
     # Check for build errors (ignore module-not-found since they are expected)
     $buildErrors = $buildOutput | Where-Object { $_ -match "error TS" -and $_ -notmatch "Cannot find module" -and $_ -notmatch "Cannot find name" }

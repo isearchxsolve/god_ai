@@ -2405,93 +2405,19 @@ async function initBalanceFromDB() {
   // drawdown = (0.056-0.040)/0.056 = 28.6% → circuit breaker trips before trade #1.
   // With the live wallet balance as reference (0.040*1.2=0.048 < 0.056) the guard fires
   // and resets peakBalance to the real wallet amount, giving 0% drawdown on startup.
-  //
-  // BOOT_BALANCE_RECONCILE: Always fetch on-chain balance when jupiterService is
-  // available, regardless of trading mode. Previously this fetch was gated by
-  // `if (isLiveMode)`, which left paper mode blind to the real wallet state when
-  // a wallet key was loaded — producing the misleading log sequence:
-  //   [ENGINE] Live trading ENABLED | balance: 0.0000 SOL  (real, from startTradingEngine)
-  //   [ENGINE] Restored wallet balance from DB: 0.010 SOL   (DB override, below)
-  // The DB value comes from the PROTOCOL reset above (line ~2374) which forces
-  // walletBalance = startingBalance on every restart. So in paper mode with an
-  // empty live wallet, paperBalance silently became 0.010 SOL — a simulated
-  // baseline decoupled from reality. In live mode this is FATAL: the engine
-  // would attempt real on-chain buys against a 0-SOL wallet and waste priority
-  // fees on every attempt. This block makes the engine always know the on-chain
-  // truth at boot; the phantom-balance handling below refuses to trade in live
-  // mode when the wallet is empty.
   let liveWalletBalOnInit = 0;
-  if (jupiterService) {
+  if (isLiveMode) {
     for (let attempt = 0; attempt < 3 && liveWalletBalOnInit <= 0; attempt++) {
       liveWalletBalOnInit = await jupiterService!.getWalletBalance().catch(() => 0);
       if (liveWalletBalOnInit <= 0 && attempt < 2) await new Promise(r => setTimeout(r, 800));
     }
-  }
-
-  // Phantom-balance detection: on-chain says ~0 but DB says >0. The DB is stale
-  // (carried over from a prior funded session via the PROTOCOL reset above).
-  // Threshold of 0.0001 SOL avoids false positives from dust / rent-bearing ATAs.
-  const PHANTOM_BALANCE_THRESHOLD_SOL = 0.0001;
-  const isPhantomBalance = liveWalletBalOnInit <= PHANTOM_BALANCE_THRESHOLD_SOL
-    && storedBalance > PHANTOM_BALANCE_THRESHOLD_SOL;
-
-  if (isLiveMode) {
     if (liveWalletBalOnInit > 0) {
       console.log(`[ENGINE] Live mode — fetched on-chain balance: ${liveWalletBalOnInit.toFixed(4)} SOL`);
-    } else if (isPhantomBalance) {
-      // FATAL: chain says 0, DB says >0. Refuse to enter live mode.
-      // The previous code fell back to `storedBalance` here — that was the bug:
-      // it let the engine trade against a stale DB balance while the real wallet
-      // was empty, causing every buy to fail on-chain and waste priority fees.
-      console.error(`[FATAL] BOOT_BALANCE_RECONCILE: on-chain balance is 0 but DB walletBalance=${storedBalance.toFixed(4)} SOL (stale from prior session). Refusing to enter live mode — buys would fail on-chain and waste priority fees.`);
-      console.error(`[FATAL] To fix: (1) fund the wallet with at least ${engineSettings.startingBalance} SOL, OR (2) run the dashboard Reset button / 'npm run reset' to clear the stale DB balance, then restart.`);
-      // Zero out all balance state so the scan loop's getEffectiveBalance() returns 0
-      // and every buy path's `safeBalance < maxPossibleSpend` gate skips naturally.
-      // This is softer than process.exit — the engine keeps running so the operator
-      // can see the warning in the dashboard and fix it without a restart loop.
-      // dailyStartBalance is kept at startingBalance (not 0) so BUGFIX #9's
-      // Infinity-guard still holds; paperBalance=0 is what actually blocks trades.
-      paperBalance = 0;
-      peakBalance = 0;
-      liveStartingBalance = 0;
-      try {
-        await storage.updateBotStats({
-          walletBalance: "0.0000",
-          peakBalance: "0.0000",
-          dailyStartBalance: engineSettings.startingBalance.toFixed(4),
-          lastSignal: `HALTED: phantom DB balance (on-chain=0, DB=${storedBalance.toFixed(4)} SOL) — fund wallet or reset DB before trading`,
-        });
-      } catch {}
-      balanceInitialized = true;
-      return;
     } else {
-      // RPC cold-start (all 3 retries returned 0) AND DB is also ≤ threshold.
-      // Wallet is genuinely empty. Same FATAL condition — refuse to trade.
-      console.error(`[FATAL] BOOT_BALANCE_RECONCILE: live wallet is empty (on-chain=0, DB=${storedBalance.toFixed(4)} SOL). Refusing to enter live mode — fund the wallet before trading.`);
-      paperBalance = 0;
-      peakBalance = 0;
-      liveStartingBalance = 0;
-      try {
-        await storage.updateBotStats({
-          walletBalance: "0.0000",
-          peakBalance: "0.0000",
-          dailyStartBalance: engineSettings.startingBalance.toFixed(4),
-          lastSignal: `HALTED: live wallet empty — fund before trading`,
-        });
-      } catch {}
-      balanceInitialized = true;
-      return;
+      // RPC cold-start: fall back to DB walletBalance, then startingBalance.
+      liveWalletBalOnInit = storedBalance > 0 ? storedBalance : engineSettings.startingBalance;
+      console.warn(`[ENGINE] Live mode — RPC returned 0 on init, using fallback balance: ${liveWalletBalOnInit.toFixed(4)} SOL`);
     }
-  } else if (jupiterService && liveWalletBalOnInit > 0) {
-    // Paper mode with a funded live wallet — log the real balance for visibility.
-    console.log(`[ENGINE] Paper mode — on-chain wallet balance: ${liveWalletBalOnInit.toFixed(4)} SOL (paper simulation uses the DB/startingBalance baseline, NOT the live wallet)`);
-  } else if (jupiterService && isPhantomBalance) {
-    // Paper mode + wallet key loaded + on-chain empty + DB has stale balance.
-    // Not fatal (paper mode simulates regardless), but log clearly so the
-    // operator knows the displayed paperBalance is a simulated baseline, not
-    // the real wallet balance. Switching to live mode in this state would
-    // trigger the FATAL branch above.
-    console.warn(`[ENGINE] BOOT_BALANCE_RECONCILE: on-chain wallet is empty but DB walletBalance=${storedBalance.toFixed(4)} SOL. Paper mode will simulate against the PROTOCOL baseline (${engineSettings.startingBalance} SOL) — switching to live mode would be refused until the wallet is funded or the DB is reset.`);
   }
 
   if (isLiveMode) {
@@ -2511,10 +2437,7 @@ async function initBalanceFromDB() {
     }
   } else if (storedBalance > 0 && !isAnomalous) {
     paperBalance = storedBalance;
-    // BOOT_BALANCE_RECONCILE: clarify that this is a paper-simulation baseline,
-    // not the real wallet balance. The on-chain truth was logged above (either
-    // "Paper mode — on-chain wallet balance: X SOL" or the phantom-balance WARN).
-    console.log(`[ENGINE] Restored paper baseline from DB: ${paperBalance.toFixed(3)} SOL (simulated — real on-chain wallet: ${liveWalletBalOnInit.toFixed(4)} SOL)`);
+    console.log(`[ENGINE] Restored wallet balance from DB: ${paperBalance.toFixed(3)} SOL`);
   } else if (isAnomalous) {
     paperBalance = engineSettings.startingBalance;
     console.warn(`[ENGINE] DB walletBalance ${storedBalance.toFixed(3)} SOL exceeds ${PLAUSIBILITY_MULTIPLIER}× startingBalance — likely feed anomaly. Resetting to ${paperBalance.toFixed(3)} SOL. Use Reset button to confirm.`);
@@ -2523,8 +2446,7 @@ async function initBalanceFromDB() {
     // DB walletBalance is 0 (e.g. after a reset that saved 0.0000).
     // Fall back to startingBalance so the UI shows the correct paper baseline.
     paperBalance = engineSettings.startingBalance;
-    // BOOT_BALANCE_RECONCILE: same clarification — simulated baseline, not real wallet.
-    console.log(`[ENGINE] DB walletBalance is 0 — using startingBalance: ${paperBalance.toFixed(3)} SOL (simulated — real on-chain wallet: ${liveWalletBalOnInit.toFixed(4)} SOL)`);
+    console.log(`[ENGINE] DB walletBalance is 0 — using startingBalance: ${paperBalance.toFixed(3)} SOL`);
     // Persist immediately so UI reads the correct value
     await storage.updateBotStats({ walletBalance: paperBalance.toFixed(4) });
   }
@@ -4296,12 +4218,12 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
    app.post("/api/bot/reset-streak", (req, res) => {
-          if (!requireAdmin(req, res)) return;
-          consecutiveLosses = 0;
-          consecutiveWins = 0;
-          console.log("[ENGINE] Streak manually reset — consecutiveLosses=0");
-          res.json({ success: true });
-        });
+	  if (!requireAdmin(req, res)) return;
+	  consecutiveLosses = 0;
+	  consecutiveWins = 0;
+	  console.log("[ENGINE] Streak manually reset — consecutiveLosses=0");
+	  res.json({ success: true });
+	});
   app.get("/api/wallet", async (_req, res) => {
     if (!jupiterService) return res.json({ connected: false, address: null, balanceSol: null, liveTradesActive: 0, message: "WALLET_PRIVATE_KEY not set — live trading disabled" });
     try {

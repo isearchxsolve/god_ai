@@ -60,12 +60,17 @@ function getEdgeParams(isMicroWallet: boolean): EdgeParams {
 }
 
 function requireAdmin(req: any, res: any): boolean {
-  if (!ADMIN_SECRET) {
+  // Read at REQUEST time, not module-load time. dotenv.config() in index.ts runs after
+  // routes.ts top-level evaluates (esbuild hoists the ./routes import above the config
+  // statement), so the module-level ADMIN_SECRET const is null even when .env defines it.
+  // By the time an HTTP request hits this, dotenv has populated process.env.
+  const adminSecret = process.env.ADMIN_SECRET?.trim() || null;
+  if (!adminSecret) {
     res.status(500).json({ error: "Server Misconfiguration: ADMIN_SECRET is not set in .env" });
     return false;
   }
   const provided = req.headers["x-admin-secret"] ?? req.body?.adminSecret;
-  if (provided !== ADMIN_SECRET) {
+  if (provided !== adminSecret) {
     res.status(403).json({ error: "Forbidden — invalid admin secret" });
     return false;
   }
@@ -182,17 +187,24 @@ let engineSettings = {
   // PATCH #3: lowered from 15/8 to 5/3. Memecoin pumps rarely reach +15% in a single
   // push; they spike +5-8% then crash. With activation at 15, trailing never armed on
   // real pumps. $Taz peaked at +5.64% and never had its trailing stop armed.
-  trailingStopActivation: 5,    // Arm trailing stop as soon as we have +5% profit
-  trailingStopDistance: 3,      // Tighter floor once armed (was 8 — too loose for fast rugs)
+  trailingStopActivation: 12,   // FIX(exit-vs-cost): was +5% — that armed AT break-even, so the trail exited ~+2% (below the ~6% modeled round-trip cost = net loss). +12% only arms once clearly past round-trip cost.
+  trailingStopDistance: 4,      // FIX(exit-vs-cost): was 3 — with activation +12%, a -4% trail locks in ~+8% (net positive after costs) while still cutting genuine reversals.
   hardTakeProfit: 200,          // Aggressive 200% TP for 100 SOL path
   stopLoss: -10,                 // 10% SL to match hard loss kill
 
   // -- Conviction Gates --
-  minScoreToTrade: 75,          // Lowered for higher trade frequency — historical WR 91.6% supports this
+  minScoreToTrade: 65,          // Non-micro wallets only. FIX(frequency): 75→65. The MG max-age cap
+                                // (2400s) handles the stale-token problem the score gate was indirectly
+                                // filtering, so the gate can be more permissive without quality loss.
+  microMinScoreToTrade: 55,     // FIX(score-floor): micro wallets (< ~0.1 SOL) use THIS floor instead of
+                                // minScoreToTrade. Previously getEffectiveMinScore() hardcoded a magic 55,
+                                // which made minScoreToTrade a silent no-op for the live 0.05 SOL wallet.
+                                // Now explicit + tunable: raise toward 65 to tighten micro entry quality,
+                                // lower for more candidates. (Mode gates age/bp5m/liq still apply on top.)
   
   // -- SNIPER Mode Calibration --
   sniperMinScore: 70,
-  sniperMinBuyPressure: 0.58,   // Was 0.65 — too strict for current flat market; 0.58 still buyer-dominant
+  sniperMinBuyPressure: 0.58,   // Restored from paper-test 0.54 — higher buy-pressure floor = stronger momentum, fewer immediate reversals.
   // -- Core Exit & Speed Strategy --
   // trailingStopActivation: 5, 
   // trailingStopDistance: 2.5, 
@@ -200,7 +212,7 @@ let engineSettings = {
   // stopLoss: -6,
   maxHoldSeconds: 420, 
     maxOpenPositions: 1,          // MANDATORY: Only 1 position at a time
-    startingBalance: 0.01,        // PROTOCOL: 0.01 SOL starting balance
+    startingBalance: 0.05,        // Paper-mode starting balance: 0.05 SOL
   scanIntervalMs: 30000, 
   priceCheckIntervalMs: 1000,   // ACCELERATED: Catch peaks faster to offset fees
 
@@ -212,7 +224,10 @@ let engineSettings = {
   dailyLossLimitPct: 10,
   microDailyLossLimitPct: 10, // FIX(daily-loss-micro): micro wallets (<0.10 SOL) use a wider daily-loss cap aligned with maxDrawdownPct. A 10% cap on a sub-0.10 SOL wallet = ~0.006 SOL, smaller than one trade's round-trip cost, so it trips after ~1 trade and then DEADLOCKS the bot (can't trade to recover) until the calendar date rolls over. 
   maxDrawdownPct: 25,
-  lossCooldownMs: 600000, 
+  lossCooldownMs: 300000, // FIX(frequency): reduced 600→300s (5min). The MG max-age cap and
+                          // SLOW_BLEED stoppedOut block now prevent stale-token re-entry at the source.
+                          // The 10min cooldown was needed because old code kept re-buying the same dead
+                          // tokens; with the age cap that can't happen. 5min is enough for market reset.
   partialTpRatio: 0.5, 
   partialTpThreshold: 15, 
 
@@ -224,29 +239,39 @@ let engineSettings = {
   // sniperMinScore: 60,
   sniperMaxAge: 900,            // Was 300 — too tight; in a flat market the best 58–59 candidates are 5–15 min old and were stuck at "Mode: none". 900s (15 min) lets them qualify for SNIPER (still gated by bp5m, liq).
   // sniperMinBuyPressure: 0.55, 
-  sniperMinLiquidity: 50000, 
+  sniperMinLiquidity: 25000, // RE-LOOSENED from 50000: for ~$0.37 paper orders, pool depth barely affects slippage — the real round-trip cost is fees/spread, now handled by the +12% trailing-stop activation. The $50k floor starved the bot in this market (every clean token is <$50k; the only >$50k tokens are all rug-vetoed for unlocked LP). $25k stays above the BioCraft $21k disaster line; downside is protected by rugcheck + the fixed exit economics, not by pool depth.
   sniperMaxSize: 0.003,      
   mgMinScore: 75,            
   mgMaxSize: 0.004, 
   hwrMinScore: 75,           
-  hwrMinLiquidity: 50000,    
+  hwrMinLiquidity: 25000, // RE-LOOSENED to match sniperMinLiquidity — see rationale on that line.    
   hwrMaxSize: 0.004,
+  hwrMaxAge: 7200,           // FIX(hwr-stale-entry): 7200s = 2h. Parallel to mgMaxAge. After the MG cap shipped,
+                             // stale zombie tokens (Jetchua ~12h/43.6k s, WCT/RDR2/MYLOO 2.6-4.9h) simply re-entered
+                             // via HWR, which had NO age gate, and bled out (Jetchua HWR entry: peak only +5.5%,
+                             // exit -7.85% SLOW_BLEED). HWR targets mature-but-LIVE tokens; 2h still admits those
+                             // while blocking multi-hour zombies whose momentum already exited.
 
   // -- Mode Classifier Thresholds (MG / HWR gates) --
   mgMinVolMomentum: 0.7,    // Was 1.0 — required rising volume; 0.7 admits steady (not just accelerating) volume
   mgMinPriceChange5m: 1.5,  // Was 3 — required strong 5m pump; 1.5 admits early/mild momentum
   mgMinTxVelocity: 8,       // Was 10 — minor relax for thinner-but-active pairs
+  mgMaxAge: 2400,           // FIX(mg-stale-entry): 2400s = 40min. Every MG winner was < 36min old (WCT 2153s).
+                            // Every MG loss on aged tokens (RDR2 8.4k-10.6k, MYLOO 9.7k-11.2k, MrAsteroid 3.2k+)
+                            // was on a stale token whose momentum had already exited. Caps MG to live momentum only.
+  maxEntryPriceChange5m: 25, // ANTI-CHASE: skip MG/HWR entries on tokens already up >25% in 5m — high mean-reversion risk ($MYLOO +27.83% on a 98-min-old token -> instant -17.76% stop in 4s). SNIPER (fresh launches) is intentionally exempt; chasing brand-new launches is its job, and rugcheck + the +12% trail handle its downside.
   hwrMinBuyPressure5m: 0.55,
   hwrMinBuyPressure1h: 0.50,
 
   // -- Operational Safety & Discovery --
   maxTradesPerCycle: 1, 
-  reentryDelayMs: 60000, 
+  reentryDelayMs: 300000, // RE-ENTRY CHURN FIX: was 60s. After a flat/stagnant exit (no SL, so no 15min SL blackout) the bot re-bought the SAME token ~60-120s later as it rolled over ($Jetchua: WIN +1.96% -> re-entry #10259 -> SLOW_BLEED -9.65%, peak 0.00%). 5min lets a stalled token either resume a real trend (re-qualifies fresh) or drop off the candidate set. Score>=85 still bypasses (genuine renewed strength).
   slReentryDelayMs: 900000, 
   txCostsEnabled: 1,
   safetyChecksEnabled: 1,
   txFeePercent: 1.5, // Bumped from 0.5 for high volatility priority
-  rugcheckMinScore: 400, 
+  rugcheckMinScore: 400, // DEPRECATED: inverted gate replaced by rugcheckMaxRiskNormalised below.
+  rugcheckMaxRiskNormalised: 60, // RugCheck score_normalised 0-100 (higher=riskier); >60 = danger -> block.
 
   // -- Micro-aware EDGE gate (dashboard-tunable) --
   // Only the two LOW-RISK knobs are exposed. feeMultiplier (2.0),
@@ -299,7 +324,7 @@ export interface ShadowTrade {
   quoteDurationMs:  number;          // how long the quote took
   quoteAgeAtBuyMs:  number;          // quote age when "buy" was placed
   routeHops:        number;          // number of hops in Jupiter route
-  routeLabel:       string;          // e.g. "Raydium→Orca"
+  routeLabel:       string;          // e.g. "Raydium���Orca"
   sizeSol:          number;
   openedAt:         number;          // timestamp
   closedAt?:        number;
@@ -684,6 +709,10 @@ const PRICE_SANITY_FORCE_CLOSE_CYCLES = 7;                // FIX #1: reduced 30�
 // Separate from tokenSymbolLastLossMs (which covers all losses at SYMBOL_LOSS_COOLDOWN_MS).
 const tokenSymbolSlBlockMs = new Map<string, number>(); // symbol → timestamp of last SL/LIQ exit
 const SYMBOL_SL_COOLDOWN_MS = 15 * 60_000; // mirrors slReentryDelayMs
+// FIX(mg-stale-entry): tracks trades that were underwater on the very first price check.
+// If a position opens red (peakPnl=0% at age 1s), the entry price was already stale.
+// If still underwater at 30s, force exit — these positions almost never recover.
+const firstTickRedTrades = new Set<number>();
 
 const tokenPriceCache = new Map<string, { price: number; pair: DexScreenerPair | null; ts: number }>();
 const jupiterQuoteCache = new Map<string, { quote: any; ts: number }>();
@@ -933,7 +962,7 @@ function sanitizeNum(v: any, fallback = 0): number { const n = Number(v); return
  */
 function getTieredSizing(totalPortfolioSol: number): { pct: number; boost: number; tier: string } {
   // Micro-stage boost: helps the 0.01 SOL wallet escape dust-trade floor.
-  // Capped at 1.5x — enough to clear MIN_TRADE_SIZE_SOL on the first few
+  // Capped at 1.5x ��� enough to clear MIN_TRADE_SIZE_SOL on the first few
   // trades without taking on the geometric risk of the old 10x uncapped boost.
   let boost = 1.0;
   if (engineSettings.compoundBoostEnabled && totalPortfolioSol < 0.05) {
@@ -1130,12 +1159,12 @@ function scoreToken(
   if (combinedScore >= effSniperScore && ageSeconds <= engineSettings.sniperMaxAge && bp5m >= engineSettings.sniperMinBuyPressure && liq >= effSniperLiq) {
     candidates.push({ mode: "SNIPER", minScore: effSniperScore, sizeSol: sizeForMode(engineSettings.sniperMaxSize, effSniperScore), slippage: liq < 3000 ? 8 : liq < 10000 ? 5 : 3 });
   }
-  if (combinedScore >= effMgScore && volMomentum >= engineSettings.mgMinVolMomentum && priceChange5m >= engineSettings.mgMinPriceChange5m && txVelocity5m >= engineSettings.mgMinTxVelocity && liq >= engineSettings.sniperMinLiquidity) {
+  if (combinedScore >= effMgScore && volMomentum >= engineSettings.mgMinVolMomentum && priceChange5m >= engineSettings.mgMinPriceChange5m && priceChange5m <= engineSettings.maxEntryPriceChange5m && txVelocity5m >= engineSettings.mgMinTxVelocity && liq >= engineSettings.sniperMinLiquidity && ageSeconds <= engineSettings.mgMaxAge) {
     candidates.push({ mode: "MG", minScore: effMgScore, sizeSol: sizeForMode(engineSettings.mgMaxSize, effMgScore), slippage: liq < 5000 ? 6 : liq < 20000 ? 4 : 2.5 });
   }
 
   // HWR: if metrics are met, optionally reduce score gate with strong 5m buy pressure
-  const meetsHwrMetrics = bp5m >= engineSettings.hwrMinBuyPressure5m && bp1h >= engineSettings.hwrMinBuyPressure1h && liq >= effHwrLiq;
+  const meetsHwrMetrics = bp5m >= engineSettings.hwrMinBuyPressure5m && bp1h >= engineSettings.hwrMinBuyPressure1h && liq >= effHwrLiq && priceChange5m <= engineSettings.maxEntryPriceChange5m && ageSeconds <= engineSettings.hwrMaxAge;
   const adjustedHwrScore = (meetsHwrMetrics && bp5m > 0.65) ? effHwrScore - 5 : effHwrScore;
 
   if (combinedScore >= adjustedHwrScore && meetsHwrMetrics) {
@@ -1154,11 +1183,14 @@ function scoreToken(
     if (liq < effSniperLiq) reasons.push("liq < " + effSniperLiq);
     if (volMomentum < engineSettings.mgMinVolMomentum) reasons.push("volMom < " + engineSettings.mgMinVolMomentum);
     if (priceChange5m < engineSettings.mgMinPriceChange5m) reasons.push("px5m < " + engineSettings.mgMinPriceChange5m);
+    if (priceChange5m > engineSettings.maxEntryPriceChange5m) reasons.push("px5m > " + engineSettings.maxEntryPriceChange5m + " (chase)");
     if (txVelocity5m < engineSettings.mgMinTxVelocity) reasons.push("tx5m < " + engineSettings.mgMinTxVelocity);
+    if (ageSeconds > engineSettings.mgMaxAge) reasons.push("MG age > " + engineSettings.mgMaxAge);
     // HWR-specific gates (previously unlogged — HWR failures showed as silent "Mode: none")
     if (bp5m < engineSettings.hwrMinBuyPressure5m) reasons.push("hwrBp5m < " + engineSettings.hwrMinBuyPressure5m);
     if (bp1h < engineSettings.hwrMinBuyPressure1h) reasons.push("bp1h < " + engineSettings.hwrMinBuyPressure1h);
     if (liq < effHwrLiq) reasons.push("hwrLiq < " + effHwrLiq);
+    if (ageSeconds > engineSettings.hwrMaxAge) reasons.push("HWR age > " + engineSettings.hwrMaxAge);
     rejectionReason = reasons.join(", ");
   }
   return { score, mlScore, combinedScore, breakdown: {}, metrics, qualifiedMode, sizeSol, slippage, rejectionReason };
@@ -1593,7 +1625,12 @@ async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair): Pr
 
   const liq = pair.liquidity?.usd || 0;
   const m5sells = pair.txns?.m5?.sells || 0;
-  if (m5sells < 10) return { safe: false, reason: "insufficient_sell_activity_honeypot_risk" };
+  // AGE-SCALED honeypot gate: brand-new launches legitimately have few sells in their first
+  // minutes, so a flat `<10` floor blocked most SNIPER-age candidates before RugCheck ran.
+  // Scale required sells with pair age (a true 0-sell honeypot is still caught at every age).
+  const _ageSecSells = (Date.now() - (pair.pairCreatedAt || Date.now())) / 1000;
+  const _minSells = _ageSecSells < 120 ? 2 : _ageSecSells < 300 ? 5 : _ageSecSells < 900 ? 8 : 10;
+  if (m5sells < _minSells) return { safe: false, reason: `insufficient_sell_activity_honeypot_risk(${m5sells}/${_minSells}@${Math.round(_ageSecSells)}s)` };
 
   try {
     const resp = await fetch(`https://api.rugcheck.xyz/v1/tokens/${tokenAddress}/report/summary`, { signal: AbortSignal.timeout(5000) });
@@ -1640,8 +1677,8 @@ async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair): Pr
     const _vetoRisk = _risks.find((r: any) =>
       HARD_VETO_RISK_KEYWORDS.some(kw => String(r?.name || "").toLowerCase().includes(kw))
     );
-    // TEMP DIAG-AUTH: confirm the real RugCheck shape on live data (dev sandbox has no network). Remove after confirming.
-    console.log(`[DIAG-AUTH] $${pair.baseToken?.symbol || tokenAddress} keys=[${Object.keys(data || {}).join(",")}] risks=[${_risks.map((r: any) => r?.name).join(" | ")}] freezeActive=${_freezeActive} mintActive=${_mintActive} vetoRisk=${_vetoRisk?.name || "none"}`);
+    // Concise safety-decision log (retains RugCheck score visibility for scale verification).
+    console.log(`[SAFETY] $${pair.baseToken?.symbol || tokenAddress} rugScore=${data?.score} rugScoreNorm=${data?.score_normalised} freeze=${_freezeActive} mint=${_mintActive} veto=${_vetoRisk?.name || "none"}`);
     if (_freezeActive) {
         // FIX: FREEZE authority = honeypot (dev can freeze your account so you cannot sell) -> hard block, non-negotiable.
         safe = false; reason = "freeze_authority_active_honeypot_risk";
@@ -1656,8 +1693,16 @@ async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair): Pr
       // Allow the trade (safe stays true) but log it for monitoring. Honeypot (freeze) is already blocked above,
       // and position size is capped by the micro-wallet sizing + fast take-profit ladder.
       console.log(`[SAFETY] $${pair.baseToken?.symbol || tokenAddress} mint_authority_active_ALLOWED (freeze=null, rugcheckScore=${data.score})`);
-    } else if (data.score < engineSettings.rugcheckMinScore) {
-      safe = false; reason = `rugcheck_score_low(${data.score})`;
+    } else {
+      // SCALE FIX: RugCheck `score` / `score_normalised` are RISK scores (higher = riskier).
+      // The previous gate `data.score < rugcheckMinScore` was INVERTED — it blocked the
+      // SAFEST tokens (low risk) and admitted risky ones, starving the bot of entries.
+      // Use score_normalised (0-100; >60 = danger) when present; if absent, defer to the
+      // freeze/mint/LP-pull flag vetoes above rather than guessing a raw-score cutoff.
+      const _norm = typeof data?.score_normalised === "number" ? data.score_normalised : null;
+      if (_norm !== null && _norm > engineSettings.rugcheckMaxRiskNormalised) {
+        safe = false; reason = `rugcheck_risk_high(norm=${_norm})`;
+      }
     }
     const result = { safe, reason };
     safetyCache.set(tokenAddress, { ...result, timestamp: Date.now() });
@@ -1667,6 +1712,7 @@ async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair): Pr
   }
 }
 
+let lastIdleLogTs = 0;
 async function runScanCycle() {
   if (scanLock) return;
   scanLock = true;
@@ -1697,9 +1743,16 @@ async function runScanCycle() {
     for (const [addr, ts] of pendingBuys) if (now - ts > 30000) pendingBuys.delete(addr);
 
     const status = await storage.getBotStatus();
-    if (!status.isRunning) return;
+    if (!status.isRunning) {
+      const _nowIdle = Date.now();
+      if (_nowIdle - lastIdleLogTs > 30000) {
+        console.log('[IDLE] Engine alive but NOT trading — bot isRunning=false. Press Start in the dashboard (or POST /api/bot/toggle {"isRunning":true}).');
+        lastIdleLogTs = _nowIdle;
+      }
+      return;
+    }
     const riskCheck = await checkCircuitBreakers();
-    if (!riskCheck.canTrade) return;
+    if (!riskCheck.canTrade) { console.log(`[IDLE] Engine alive but paused by risk guard — ${(riskCheck as any).reason || "circuit breaker / daily-loss / drawdown guard active"}. Skipping cycle.`); return; }
 
     const currentBalance = await getEffectiveBalance();
     const isMicroWallet = currentBalance < 0.10;
@@ -1711,7 +1764,7 @@ async function runScanCycle() {
     const openTrades = await storage.getOpenTrades();
     const candidates = await fetchDexScreenerCandidates(isMicroWallet);
     const top10 = candidates.slice(0, 10);
-    if (top10.length === 0) return;
+    if (top10.length === 0) { console.log("[SCAN] No tradeable candidates from DexScreener this cycle — waiting for fresh pairs."); return; }
     
     const momentumCandidates = top10.filter(c => parseFloat(c.volume5m as string || "0") > 0);
     const pauseSample = momentumCandidates.length >= 5 ? momentumCandidates : top10;
@@ -2002,7 +2055,7 @@ async function runScanCycle() {
       const safety = await checkTokenSafety(candidate.tokenAddress, pair);
       if (!safety.safe) {
         console.log(`[SAFETY] BLOCKED $${candidate.tokenSymbol} — ${safety.reason}`);
-        if (safety.reason.startsWith("rugcheck_danger") || safety.reason.startsWith("rugcheck_score_low") || safety.reason.startsWith("insider_ownership_detected") || safety.reason.startsWith("low_liq_depth_ratio")) {
+        if (safety.reason.startsWith("rugcheck_danger") || safety.reason.startsWith("rugcheck_risk_high") || safety.reason.startsWith("rugcheck_veto") || safety.reason.startsWith("insider_ownership_detected") || safety.reason.startsWith("low_liq_depth_ratio")) {
             hardBlockedAddresses.set(addr, Date.now());
         }
         continue;
@@ -2369,7 +2422,7 @@ async function initBalanceFromDB() {
   if (balanceInitialized) return;
   const status = await storage.getBotStatus();
   let storedBalance = parseFloat(status.walletBalance || "0");
-  // PROTOCOL: Force balance to startingBalance (0.01 SOL) on every restart
+  // PROTOCOL: Force balance to startingBalance (0.05 SOL) on every restart
   // to ensure consistent 1000x ROI calculations from the correct baseline.
   if (storedBalance !== engineSettings.startingBalance) {
     console.log(`[ENGINE] PROTOCOL: Resetting wallet balance from ${storedBalance.toFixed(3)} SOL to ${engineSettings.startingBalance} SOL`);
@@ -2547,7 +2600,7 @@ async function initBalanceFromDB() {
 }
 
 function getEffectiveMinScore(isMicroWallet: boolean = false): number {
-  const base = isMicroWallet ? 55 : engineSettings.minScoreToTrade;
+  const base = isMicroWallet ? engineSettings.microMinScoreToTrade : engineSettings.minScoreToTrade;
   const dailyLossPct = dailyStartBalance > 0 ? Math.max(0, (-dailyPnlSol / dailyStartBalance) * 100) : 0;
   // FIX: raised tier thresholds from (>0 / >=5 / >=10) to (>=3 / >=8 / >=15).
   // On a 0.05 SOL micro-wallet, a single -8% trade instantly triggered the old ">0"
@@ -2579,7 +2632,7 @@ const MAX_FORCE_SELL_TIME_MS  = 5 * 60_000;       // FIX 5: max 5-minute liquida
 // for up to MAX_FORCE_SELL_TIME_MS at 30 % slippage (survival mode: any fill > nothing).
 //
 // Worst case outcome: bad fill price.  NOT: stuck funds.
-// ────────────���────────────────────────────────────────────────────────────────
+// ��───────────���─────────────��──────────────────────────────────────────────────
 async function forceSellPosition(
   trade: any,
   fallbackPrice: number
@@ -3112,6 +3165,13 @@ async function checkOpenPositions() {
           trailActivatedLogged.add(trade.id);
           console.log(`[TRAIL:ACTIVATED] id=#${trade.id} $${trade.tokenSymbol} | peakPnl: +${peakPnl.toFixed(2)}% reached threshold +${engineSettings.trailingStopActivation}% | trailing distance: -${engineSettings.trailingStopDistance}%`);
         }
+        // FIX(mg-stale-entry): first-tick red detection. Every SLOW_BLEED loser in the
+        // validation sample went red on tick one (peakPnl=0.00% at age≤1s). If a position
+        // is underwater on its very first price check, the entry was stale. Mark it. If
+        // still underwater at 30s, force exit — these positions almost never recover.
+        if (holdTime <= 2 && pnlPct < 0 && !firstTickRedTrades.has(trade.id)) {
+          firstTickRedTrades.add(trade.id);
+        }
         // Partial TP
         // BUGFIX #14: track partial TP failures. If the sell fails 3x (rugged pool),
         // mark as taken to stop retrying — each retry wastes priority fees.
@@ -3244,7 +3304,7 @@ async function checkOpenPositions() {
         const COST_SAFETY_MULT = 2.0; // modeled cost under-predicts reality (~3.4% modeled vs ~6% realized on #10250)
         const minProfitableExitPct = _rtCosts.totalRoundTripPct * COST_SAFETY_MULT + 0.5;
         const clearsRoundTrip = pnlPct >= minProfitableExitPct;
-        if (pnlPct >= 1 && !clearsRoundTrip && holdTime > 30 && (Date.now() - (costGateLastLogMs.get(trade.id) ?? 0) >= 30000) && (costGateLastLogMs.set(trade.id, Date.now()) || true)) console.log(`[DIAG-COSTGATE] $${trade.tokenSymbol} mid pnl +${pnlPct.toFixed(2)}% < round-trip floor ${minProfitableExitPct.toFixed(2)}% (modeled ${_rtCosts.totalRoundTripPct.toFixed(2)}% x${COST_SAFETY_MULT}) -> holding; voluntary profit-exits suppressed`);
+        if (pnlPct >= 1 && !clearsRoundTrip && holdTime > 30 && (Date.now() - (costGateLastLogMs.get(trade.id) ?? 0) >= 30000) && (costGateLastLogMs.set(trade.id, Date.now()) || true)) console.log(`[DIAG-COSTGATE] $${trade.tokenSymbol} mid pnl +${pnlPct.toFixed(2)}% < round-trip floor ${minProfitableExitPct.toFixed(2)}% (modeled ${_rtCosts.totalRoundTripPct.toFixed(2)}% x${COST_SAFETY_MULT}) -> INFO ONLY: below modeled round-trip cost, but profit exits (TRAIL_STOP/PROFIT_DECLINE/PNL_STAGNANT) remain ACTIVE per PATCH #2 — NOT suppressed`);
         // PATCH #2: removed `clearsRoundTrip` requirement from PROFIT_DECLINE and PNL_STAGNANT.
         // The cost gate's INTENT is "don't sell for less than round-trip cost" — that should only
         // apply to LOSS exits (where we'd be crystallizing a loss below the cost-recovery floor),
@@ -3307,6 +3367,22 @@ async function checkOpenPositions() {
         // and VOL_COLLAPSE (holdTime > 180) is never evaluated — tokens bleed to
         // zero indefinitely. Using a separate if allows both checks to run.
         if (!shouldClose && pair && holdTime > 180 && pnlPct > 1) { const currentVol5m = pair.volume?.m5 || 0; const vol1hNow = pair.volume?.h1 || 0; const expectedVol5m = vol1hNow / 12; if (expectedVol5m > 100 && currentVol5m < expectedVol5m * 0.15) { shouldClose = true; reason = `VOL_COLLAPSE (5m vol ${currentVol5m.toFixed(0)} is <15% of expected ${expectedVol5m.toFixed(0)})`; } }
+        // FIX(mg-stale-entry): IMMEDIATE_UNDERWATER exit — cut stale entries that go red on
+        // entry and never recover, instead of waiting 60s for SLOW_BLEED.
+        // FIX(immediate-underwater-spread): every position opens at the modeled entry/exit spread
+        // (~-1.19%), so "red on tick 1" alone flags essentially EVERY trade and the rule degenerated
+        // to "be green by 30s or get cut" — which can clip a slow-developing winner. Three guards now
+        // make it precise:
+        //   1) grace extended 30s -> 45s (more time to turn);
+        //   2) only fire if currently bled BELOW the spread floor (pnlPct < -2.5%), i.e. genuinely
+        //      falling — not just sitting at the static entry spread;
+        //   3) only fire if it never showed real momentum (peakPnl < 3%); anything that pumped is left
+        //      to the trail / profit-decline logic so early-pumpers aren't clipped.
+        const IMMEDIATE_UNDERWATER_FLOOR_PCT = -2.5; // clearly beyond the ~-1.19% entry spread
+        if (!shouldClose && firstTickRedTrades.has(trade.id) && peakPnl < 3 && holdTime > 45 && pnlPct < IMMEDIATE_UNDERWATER_FLOOR_PCT) {
+          shouldClose = true;
+          reason = `IMMEDIATE_UNDERWATER (no momentum: peak +${peakPnl.toFixed(1)}%, bled to ${pnlPct.toFixed(1)}% by ${Math.round(holdTime)}s)`;
+        }
         // PATCH #4: PRICE-DROP RUG DETECTOR — leading indicator that does NOT depend
         // on DexScreener's liquidity field (which lags on-chain state by 30-90s during a rug).
         // Price updates propagate faster than liquidity aggregates, so a sharp price drop
@@ -3381,10 +3457,20 @@ async function checkOpenPositions() {
           // meaningful peak — applying the floor there would be misleading.
           const isHardLoss = reason.startsWith("STOP_LOSS") || reason.startsWith("HARD_LOSS_KILL") ||
                              reason.startsWith("DEEP_RUG_KILL") ||
-                             reason.startsWith("EARLY_CUT") || reason.startsWith("FAST_CUT");
-          if (!isHardLoss && pnlPct < trailingFloor && trailingFloor > 0) {
-            console.log(`[EXIT:FLOOR] $${trade.tokenSymbol} | ${reason.split(" ")[0]} | raw pnl ${pnlPct.toFixed(2)}% → floor locked at +${trailingFloor.toFixed(2)}% (peak was +${peakPnl.toFixed(1)}%)`);
+                             reason.startsWith("EARLY_CUT") || reason.startsWith("FAST_CUT") ||
+                             reason.startsWith("IMMEDIATE_UNDERWATER");
+          // FIX (paper inflation): trailingFloor only represents an achievable exit if the
+          // trailing stop was actually ARMED (peakPnl >= trailingStopActivation). Below
+          // activation there is NO protective stop, so flooring fabricates wins on trades
+          // that really bled out — e.g. $MYLOO #10262 peak +4.7% -> real -6.0% booked as
+          // +0.71%; shadow proved it (paper beat shadow by +6.83%). Only floor when the
+          // trail was live; otherwise record the true fill so paper/daily PnL stay honest.
+          const trailWasArmed = peakPnl >= engineSettings.trailingStopActivation;
+          if (!isHardLoss && trailWasArmed && pnlPct < trailingFloor && trailingFloor > 0) {
+            console.log(`[EXIT:FLOOR] $${trade.tokenSymbol} | ${reason.split(" ")[0]} | raw pnl ${pnlPct.toFixed(2)}% → floor locked at +${trailingFloor.toFixed(2)}% (peak was +${peakPnl.toFixed(1)}%, trail armed)`);
             pnlPct = trailingFloor;
+          } else if (!isHardLoss && !trailWasArmed && trailingFloor > 0 && pnlPct < trailingFloor) {
+            console.log(`[EXIT:NOFLOOR] $${trade.tokenSymbol} | ${reason.split(" ")[0]} | raw pnl ${pnlPct.toFixed(2)}% recorded as-is — peak +${peakPnl.toFixed(1)}% never armed trail @ ${engineSettings.trailingStopActivation}% (no paper inflation)`);
           }
           console.log(`[LIFECYCLE:EXIT] id=#${trade.id} $${trade.tokenSymbol} | reason: ${reason} | pnl: ${pnlPct.toFixed(2)}% | peakPnl: ${peakPnl.toFixed(2)}% | holdTime: ${Math.round(holdTime)}s | mode: ${trade.tradingMode}`);
           lifecycleLastLogMs.delete(trade.id);
@@ -3599,7 +3685,11 @@ async function checkOpenPositions() {
             // accounting device to prevent gap-through trail exits from tripping the
             // circuit breaker on sessions that peaked positive — it must survive costs.
             // isHardLoss and trailingFloor are both in scope from the shouldClose block.
-            if (!isHardLoss && trailingFloor > 0 && exitPnlPct < trailingFloor) {
+            // FIX (paper inflation): only honor the floor when the trailing stop was actually
+            // ARMED (peakPnl >= trailingStopActivation). Below activation there was no real
+            // protective stop, so flooring here would re-inflate a true loss after costs.
+            const trailWasArmedPaper = peakPnl >= engineSettings.trailingStopActivation;
+            if (!isHardLoss && trailWasArmedPaper && trailingFloor > 0 && exitPnlPct < trailingFloor) {
               exitPnlPct = trailingFloor;
             }
             const MAX_RETURN_MULTIPLIER = 6; // 500% gain = 6× return — hard ceiling matches pnlPct cap
@@ -3652,17 +3742,20 @@ async function checkOpenPositions() {
           }
 
           
-          // ── SHADOW MODE: close matching shadow trade ──────────────────────
+          // ── SHADOW MODE: close matching shadow trade ───────────��──────────
           if (trade.tradingMode !== "live") {
             closeShadowTrade(trade.tokenAddress, currentPrice, finalPnlPct!, reason).catch(() => {});
           }
           // ─────────────────────────────────────────────────────────────────
           tradedAddresses.set(trade.tokenAddress, Date.now());
-          if (reason.startsWith("STOP_LOSS") || reason.startsWith("HARD_LOSS_KILL") || reason.startsWith("DEEP_RUG_KILL") || reason.startsWith("EARLY_CUT") || reason.startsWith("FAST_CUT") || reason.startsWith("LIQ_COLLAPSE") || reason.startsWith("VOL_COLLAPSE")) {
+          if (reason.startsWith("STOP_LOSS") || reason.startsWith("HARD_LOSS_KILL") || reason.startsWith("DEEP_RUG_KILL") || reason.startsWith("EARLY_CUT") || reason.startsWith("FAST_CUT") || reason.startsWith("LIQ_COLLAPSE") || reason.startsWith("VOL_COLLAPSE") || reason.startsWith("SLOW_BLEED") || reason.startsWith("IMMEDIATE_UNDERWATER")) {
             stoppedOutAddresses.set(trade.tokenAddress, Date.now());
             // Block re-entry on ANY new contract with the same symbol for the full slReentryDelayMs.
             // Fixes $SOS re-entering 11m47s after LIQ_COLLAPSE via a new contract address —
             // stoppedOutAddresses is address-keyed so the new address bypassed it; this closes the gap.
+            // FIX(mg-stale-entry): SLOW_BLEED added — RDR2 re-entered 3 times in one session,
+            // each time SLOW_BLEEDing out. These tokens already had their move; the residual
+            // bp5m/volMom passes MG gates but the momentum is gone. Full slReentryDelayMs block.
             tokenSymbolSlBlockMs.set(trade.tokenSymbol, Date.now());
             // FIX B: increment repeat-loser strike counter and extend block for chronic losers.
             // Two stops on the same token in a session = the market has rejected this token twice.
@@ -3685,6 +3778,7 @@ async function checkOpenPositions() {
           sellFailureStrikes.delete(trade.id);
           zeroBalanceStrikes.delete(trade.id);
           liqCoWarnedTrades.delete(trade.id);
+          firstTickRedTrades.delete(trade.id);
           const allTrades = await storage.getTrades();
           const closedTrades = allTrades.filter((t: any) => t.status === "CLOSED");
           const winsCount = closedTrades.filter((t: any) => parseFloat(t.pnl || "0") > 0).length;
@@ -3712,9 +3806,26 @@ async function startTradingEngine() {
   liqCoWarnedTrades.clear();           // FIX: warn-once guard reset on engine start
   priceSanityRejections.clear();       // FIX: rejection counters reset on engine start
   priceSanityWarnOnce.clear();         // FIX: warn-once guard reset on engine start
+  firstTickRedTrades.clear();          // FIX(mg-stale-entry): reset first-tick tracking on engine start
   consecutiveWins = 0;
   consecutiveLosses = 0;
   console.log("==================== 1000x ROI TRADING BOT ====================");
+  // ENV WIRING: honor .env MODE + PAPER_SEED at boot (previously these were ignored).
+  // MODE=paper|live is persisted to the DB tradingMode so the engine routes accordingly.
+  const _envMode = (process.env.MODE || "").trim().toLowerCase();
+  if (_envMode === "paper" || _envMode === "live") {
+    await storage.updateTradingMode(_envMode).catch((e: any) => console.warn(`[CONFIG] Failed to apply MODE=${_envMode} from .env: ${e?.message || e}`));
+    console.log(`[CONFIG] MODE=${_envMode} from .env applied to trading mode.`);
+  }
+  // PAPER_SEED overrides the paper starting balance (live mode reads the real on-chain balance).
+  const _envSeed = parseFloat(process.env.PAPER_SEED || "");
+  if (Number.isFinite(_envSeed) && _envSeed > 0) {
+    engineSettings.startingBalance = _envSeed;
+    paperBalance = _envSeed;
+    dailyStartBalance = _envSeed;
+    peakBalance = _envSeed;
+    console.log(`[CONFIG] PAPER_SEED=${_envSeed} SOL from .env applied to paper starting balance.`);
+  }
   const _bootStatus = await storage.getBotStatus().catch(() => ({ tradingMode: "paper" }));
   const _bootMode = _bootStatus.tradingMode === "live" ? "live" : "paper";
   console.log(`[CONFIG] Mode: ${_bootMode === "live" ? "LIVE (on-chain trading)" : "paper + moonbag + shadow"}`);
@@ -4006,7 +4117,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (!updates || typeof updates !== "object") return res.status(400).json({ message: "Invalid settings payload" });
       const validKeys = Object.keys(engineSettings) as (keyof typeof engineSettings)[];
       let restartIntervals = false;
-      const minValues: Record<string, number> = { scanIntervalMs: 1000, priceCheckIntervalMs: 1000, reentryDelayMs: 0, slReentryDelayMs: 0, lossCooldownMs: 0, maxHoldSeconds: 10, maxOpenPositions: 1, maxTradesPerCycle: 1, minScoreToTrade: 0, startingBalance: 0.1, minPositionSize: 0.01, maxPositionSize: 0.01, txFeePercent: 0, rugcheckMinScore: 0, maxVolLiqRatioNewToken: 1, maxDiscoveryAgeSeconds: 60, dynamicHoldMaxSeconds: 60, txCostsEnabled: 0, safetyChecksEnabled: 0, dynamicHoldEnabled: 0, compoundBoostEnabled: 0, compoundRefSol: 0.1, compoundPower: 0.5, compoundMaxMultiplier: 1.0, compoundAbsCapSol: 0.1, minEdgePct: 0, edgeBuffer: 0, microMinEdgePct: 0, microEdgeBuffer: 0 };
+      const minValues: Record<string, number> = { scanIntervalMs: 1000, priceCheckIntervalMs: 1000, reentryDelayMs: 0, slReentryDelayMs: 0, lossCooldownMs: 0, maxHoldSeconds: 10, maxOpenPositions: 1, maxTradesPerCycle: 1, minScoreToTrade: 0, microMinScoreToTrade: 0, startingBalance: 0.1, minPositionSize: 0.01, maxPositionSize: 0.01, txFeePercent: 0, rugcheckMinScore: 0, maxVolLiqRatioNewToken: 1, maxDiscoveryAgeSeconds: 60, dynamicHoldMaxSeconds: 60, txCostsEnabled: 0, safetyChecksEnabled: 0, dynamicHoldEnabled: 0, compoundBoostEnabled: 0, compoundRefSol: 0.1, compoundPower: 0.5, compoundMaxMultiplier: 1.0, compoundAbsCapSol: 0.1, minEdgePct: 0, edgeBuffer: 0, microMinEdgePct: 0, microEdgeBuffer: 0 };
       const maxValues: Record<string, number> = { mlWeight: 1, scoreWeight: 1, partialTpRatio: 1, dailyLossLimitPct: 100, maxDrawdownPct: 100, txFeePercent: 5, rugcheckMinScore: 1000, maxVolLiqRatioNewToken: 50, maxDiscoveryAgeSeconds: 86400, dynamicHoldMaxSeconds: 7200, txCostsEnabled: 1, safetyChecksEnabled: 1, dynamicHoldEnabled: 1, compoundBoostEnabled: 1, compoundRefSol: 100.0, compoundPower: 5.0, compoundMaxMultiplier: 10.0, compoundAbsCapSol: 10.0, minEdgePct: 20, edgeBuffer: 10, microMinEdgePct: 20, microEdgeBuffer: 10 };
       for (const key of validKeys) {
         if (key in updates) {
@@ -4218,12 +4329,12 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
    app.post("/api/bot/reset-streak", (req, res) => {
-	  if (!requireAdmin(req, res)) return;
-	  consecutiveLosses = 0;
-	  consecutiveWins = 0;
-	  console.log("[ENGINE] Streak manually reset — consecutiveLosses=0");
-	  res.json({ success: true });
-	});
+          if (!requireAdmin(req, res)) return;
+          consecutiveLosses = 0;
+          consecutiveWins = 0;
+          console.log("[ENGINE] Streak manually reset — consecutiveLosses=0");
+          res.json({ success: true });
+        });
   app.get("/api/wallet", async (_req, res) => {
     if (!jupiterService) return res.json({ connected: false, address: null, balanceSol: null, liveTradesActive: 0, message: "WALLET_PRIVATE_KEY not set — live trading disabled" });
     try {
