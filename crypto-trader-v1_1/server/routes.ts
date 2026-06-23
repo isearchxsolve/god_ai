@@ -188,7 +188,7 @@ let engineSettings = {
   // push; they spike +5-8% then crash. With activation at 15, trailing never armed on
   // real pumps. $Taz peaked at +5.64% and never had its trailing stop armed.
   trailingStopActivation: 15, // old profitable: let winners run before trailing   // FIX(geometry): restored 12 — the 3% activation + 2.5% distance combo capped winners at +0.5% net of costs, creating structural negative expectancy. 12% gives meme pumps room to actually run before the trail arms.
-  trailingStopDistance: 8, // old profitable: wider breathing room      // FIX(geometry): restored 4 — paired with 12% activation, locks in a meaningful win (+8% min) on any token that pumps.
+  trailingStopDistance: 6, // AI-TUNE(2026-06-23): 8->6 — banks gains sooner once the trail is armed, cutting give-back on fast reversals; still wide enough to avoid memecoin whipsaw. // old profitable: wider breathing room      // FIX(geometry): restored 4 — paired with 12% activation, locks in a meaningful win (+8% min) on any token that pumps.
   hardTakeProfit: 80, // old profitable          // OLD PROFITABLE: 80% TP
   stopLoss: -8, // old profitable: avoid wick-outs                 // OLD PROFITABLE: 6% SL
 
@@ -229,7 +229,7 @@ let engineSettings = {
                           // The 10min cooldown was needed because old code kept re-buying the same dead
                           // tokens; with the age cap that can't happen. 5min is enough for market reset.
   partialTpRatio: 0.5, // old profitable 
-  partialTpThreshold: 15, // old profitable         // FIX(banking): lowered 15 -> 8. With trail armed at +12% and avg memecoin pump topping ~+15% before reversal, partials at +15 rarely filled — most winners gapped back through the band without banking. Partial at +8% secures a confirmed fill on half the position BEFORE the trail-arming window, locking in a real win that survives shadow-ledger accounting. Other half rides under the +12% trail for upside.
+  partialTpThreshold: 8, // AI-TUNE(2026-06-23): applied the author's own intended 15->8 — banks 50% at +8% before the volatile peak, locking a real win on winners that otherwise round-trip back through the band. // old profitable         // FIX(banking): lowered 15 -> 8. With trail armed at +12% and avg memecoin pump topping ~+15% before reversal, partials at +15 rarely filled — most winners gapped back through the band without banking. Partial at +8% secures a confirmed fill on half the position BEFORE the trail-arming window, locking in a real win that survives shadow-ledger accounting. Other half rides under the +12% trail for upside.
   partialTpCostMargin: 4,        // PAPER-TEST(cost-relative): profit cushion in % added on top of the modeled round-trip cost when computing the effective partial-TP trigger. effectivePartialTp = max(partialTpThreshold, modeledRoundTrip + this). Keeps the partial from firing until it nets real profit above the trade's actual exit cost.
 
   // -- Sizing Strategy (Calibrated for 1000x compounding) --
@@ -644,6 +644,9 @@ let paperBalance = engineSettings.startingBalance;
 let balanceInitialized = false;
 let peakPrices = new Map<number, number>();
 let prevPnlMap = new Map<number, number>();
+// AI-TUNE(2026-06-23): records the realized partial-TP leg (fraction + net pnl%) per trade so the
+// shadow ledger can blend it with the final-exit leg instead of discarding banked partial profits.
+let partialLegMap = new Map<number, { fraction: number; pnlPct: number }>();
 let pnlStableMap = new Map<number, { pnl: number; since: number }>();
 let tradeStopPrices = new Map<number, number>();
 let partialTpTaken = new Set<number>();
@@ -2145,6 +2148,29 @@ async function runScanCycle() {
         console.log(`[SCORE_GATE] SKIP $${candidate.tokenSymbol} — Score: ${scoring.combinedScore} (Min: ${effectiveMinScore}) | Mode: ${scoring.qualifiedMode ?? "none (Reason: " + (scoring.rejectionReason || "failed strict gates") + ")"} | Size: ${scoring.sizeSol.toFixed(4)} (Min: ${cycleMinSize})`);
         continue;
       }
+      // AI-EDGE(2026-06-23): Evidence-based entry filter derived from shadow-ledger segmentation of 113 trades.
+      // Per analyze-shadow.cjs:
+      //   - SNIPER mode:  n=63, avgShadow +3.06%, growth +159.80%  (the only mode carrying real edge)
+      //   - MG mode:      n=20, avgShadow -0.50%, growth  -51.18%  (net-losing)
+      //   - HWR mode:     n=30, avgShadow -1.71%, growth  -51.06%  (net-losing)
+      // Within SNIPER, score >=80 is where the edge concentrates:
+      //   - SNIPER/80-84: n=13, avgShadow +4.71%, growth +66.24%
+      //   - SNIPER/85-89: n=14, avgShadow +1.31% (kept; n too small to confidently exclude)
+      //   - SNIPER/90+:  n=31, avgShadow +2.20%, growth +58.87%
+      // Set EDGE_FILTER_ENABLED=false in .env to disable and revert to old behavior.
+      // Set EDGE_FILTER_MIN_SCORE in .env to override the 80 threshold (e.g. 85 for tighter filter).
+      const _edgeFilterEnabled = (process.env.EDGE_FILTER_ENABLED || "true").toLowerCase() !== "false";
+      const _edgeFilterMinScore = parseInt(process.env.EDGE_FILTER_MIN_SCORE || "80", 10);
+      const _edgeFilterAllowedModes = (process.env.EDGE_FILTER_ALLOWED_MODES || "SNIPER").split(",").map(s => s.trim().toUpperCase());
+      if (_edgeFilterEnabled) {
+        const _passesMode = _edgeFilterAllowedModes.includes(String(scoring.qualifiedMode).toUpperCase());
+        const _passesScore = scoring.combinedScore >= _edgeFilterMinScore;
+        if (!_passesMode || !_passesScore) {
+          console.log(`[EDGE_GATE] SKIP $${candidate.tokenSymbol} — mode=${scoring.qualifiedMode} score=${scoring.combinedScore} | rule: mode in [${_edgeFilterAllowedModes.join(",")}] AND score >= ${_edgeFilterMinScore} | reason: ${!_passesMode ? "mode-not-in-edge-pocket" : ""}${!_passesMode && !_passesScore ? " + " : ""}${!_passesScore ? "score-below-edge-threshold" : ""}`);
+          continue;
+        }
+        console.log(`[EDGE_GATE] PASS $${candidate.tokenSymbol} — mode=${scoring.qualifiedMode} score=${scoring.combinedScore} (in edge pocket)`);
+      }
       if (status.mode !== "AUTO" && scoring.qualifiedMode !== status.mode) {
           console.log(`[GATE] SKIP $${candidate.tokenSymbol} — Mode mismatch (${scoring.qualifiedMode} != ${status.mode})`);
           continue;
@@ -3432,6 +3458,7 @@ async function checkOpenPositions() {
             const partialReturn = partialSize * (1 + netPartialPnlPct / 100);
             paperBalance += partialReturn;
             partialTpTaken.add(trade.id);
+            partialLegMap.set(trade.id, { fraction: engineSettings.partialTpRatio, pnlPct: netPartialPnlPct }); // AI-TUNE: record banked leg for honest shadow accounting
             dailyPnlSol += partialReturn - partialSize;
             await storage.updateTradeAmount(trade.id, (sizeSol - partialSize).toFixed(4));
             console.log(`[PAPER] PARTIAL TP $${trade.tokenSymbol} | Sold ${engineSettings.partialTpRatio * 100}% @ +${pnlPct.toFixed(1)}% (trigger +${effectivePartialTpThreshold.toFixed(1)}%, rt-cost ${_partialRtCosts.totalRoundTripPct.toFixed(1)}%) | ExitCost: -${partialExitCostPct.toFixed(1)}% | Secured: ${partialReturn.toFixed(4)} SOL`);
@@ -3495,7 +3522,7 @@ async function checkOpenPositions() {
         const halfStopPct = trade.mode === "HWR" ? Math.min(rawHalfStop, -4.0) :
                             trade.mode === "MG"  ? Math.min(rawHalfStop, -3.5) :
                             rawHalfStop;
-        const trailingFloor = peakPnl > 30 ? peakPnl * 0.50 : peakPnl > 15 ? peakPnl * 0.38 : peakPnl > 8 ? peakPnl * 0.25 : peakPnl > 3 ? peakPnl * 0.15 : 0;
+        const trailingFloor = peakPnl > 30 ? peakPnl * 0.60 : peakPnl > 15 ? peakPnl * 0.50 : peakPnl > 8 ? peakPnl * 0.40 : peakPnl > 3 ? peakPnl * 0.20 : 0; // AI-TUNE(2026-06-23): raised lock-in ratios to capture more of each runner's peak.
         // NOTE: HARD_TP (pnlPct >= dynamicTP) is removed. dynamicTP minimum is 65%
         // but TAKE_PROFIT_20 above always fires at +20%, so HARD_TP was unreachable.
         // dynamicTP is still used as the upper-bound guard for partial TP above.
@@ -3965,7 +3992,18 @@ async function checkOpenPositions() {
           
           // ── SHADOW MODE: close matching shadow trade ──────��────��──────────
           if (trade.tradingMode !== "live") {
-            closeShadowTrade(trade.tokenAddress, currentPrice, finalPnlPct!, reason).catch(() => {});
+            // AI-TUNE(2026-06-23): blend any banked partial-TP leg with the final-exit leg so the
+            // shadow ledger reflects the TRUE realized paper PnL of the whole position, not just the
+            // last slice. Previously a +15% partial followed by a +6% final logged only +6%, which
+            // understated every winner that took a partial and corrupted the avgPaper/inflation figures.
+            const _partialLeg = partialLegMap.get(trade.id);
+            const _blendedPaperPnl = _partialLeg
+              ? _partialLeg.pnlPct * _partialLeg.fraction + finalPnlPct! * (1 - _partialLeg.fraction)
+              : finalPnlPct!;
+            partialLegMap.delete(trade.id);
+            closeShadowTrade(trade.tokenAddress, currentPrice, _blendedPaperPnl, reason).catch(() => {});
+          } else {
+            partialLegMap.delete(trade.id);
           }
           // ─────────────────────────────────────────────────────────────────
           tradedAddresses.set(trade.tokenAddress, Date.now());
