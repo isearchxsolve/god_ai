@@ -9,7 +9,7 @@ import { join as pathJoin } from "path";
 import { startHeartbeat, isHalted, healthState } from "./runtime-hooks";
 
 // ── MULTIPLIER & STAGING CACHES ──
-const SEARCH_QUERIES = ["raydium sol", "meteora sol", "orca sol", "solana usdc", "sol usdt", "raydium usdc", "orca usdc", "meteora usdc", "raydium usdt", "orca usdt", "sol usdc"]; // WIDENED: more liquid DEX+quote-pair seeds to surface more quality candidates (no safety bar lowered)
+const SEARCH_QUERIES = ["raydium sol", "meteora sol", "orca sol", "solana usdc", "sol usdt", "raydium usdc", "orca usdc", "meteora usdc", "raydium usdt", "orca usdt", "sol usdc", "pumpswap sol", "pumpswap usdc", "pump fun sol"]; // WIDENED: added pumpswap + pump fun seeds so DexScreener search surfaces recently-graduated PumpSwap pairs (locked LP) alongside Raydium/Meteora/Orca
 const watchlistCache = new Map<string, { pair: DexScreenerPair, firstSeen: number }>();
 const WATCHLIST_MAX_AGE_MS = 15 * 60_000; // Keep on watch for 15 mins
 
@@ -222,7 +222,7 @@ let engineSettings = {
   mlWeight: 0.10,  // FIX(ml-normalized): paired with scoreWeight 0.90 so the sum is EXACTLY 1.0. Original literal was 0.10 + 0.99 = 1.09, which inflated every combined score by ~9% whenever ML was online (a rule-score of 90 + ML 50 became 95). The boot path never normalized; the normalization at line ~4328 only runs in the PATCH /settings handler. Safe to deploy even while ML service at localhost:5001 is offline: the combined-score block (line 1282) is gated on `if (mlPrediction)` so when getMLPrediction returns null the formula is skipped entirely and combinedScore = raw rule score. When ML comes back online, this gives a clean 90/10 blend with no inflation.
   scoreWeight: 0.90, // FIX(ml-normalized): was 0.99 — paired with mlWeight 0.10 above so sum = 1.0.
   dailyLossLimitPct: 20, // OLD PROFITABLE: wider loss rail
-  microDailyLossLimitPct: 10, // FIX(daily-loss-micro): micro wallets (<0.10 SOL) use a wider daily-loss cap aligned with maxDrawdownPct. A 10% cap on a sub-0.10 SOL wallet = ~0.006 SOL, smaller than one trade's round-trip cost, so it trips after ~1 trade and then DEADLOCKS the bot (can't trade to recover) until the calendar date rolls over. 
+  microDailyLossLimitPct: 30, // FIX(daily-loss-deadlock): raised from 10 to 30. The 10% cap was deadlocking exactly as the prior comment warned: a single cost-inflated paper loss (~10% round-trip) on a sub-0.10 SOL wallet immediately tripped DAILY_LOSS_LIMIT, then circuitBreakerActive stayed true and the bot couldn't trade to recover — observed in production with dailyLossPct=14.0% against the 10% cap, infinite [FLIGHT TO SAFETY] loop. 30% on a 0.05 SOL micro wallet = 0.015 SOL of loss room = ~3 losing trades worth, which gives the strategy room to find winners while still preventing a true blowout. Per-trade cost gate + liquidity floor + loss cooldown remain the primary protections. 
   maxDrawdownPct: 45, // OLD PROFITABLE: wider drawdown tolerance
   lossCooldownMs: 300000, // FIX(frequency): reduced 600→300s (5min). The MG max-age cap and
                           // SLOW_BLEED stoppedOut block now prevent stale-token re-entry at the source.
@@ -675,10 +675,11 @@ function saveLiveBaseline(bal: number): void {
 }
 let circuitBreakerActive = false;
 let flightToSafetyActive = false;
+let flightToSafetyAbandoned = false; // FIX(flight-spam): set true when the live wallet was too small to shield (e.g. <0.10 SOL, including paper-mode runs where live bal is 0). Suppresses the per-cycle log spam ("Circuit breaker hit ... too small to shield") that previously ran forever while the daily-loss breaker was active on a micro wallet. Cleared whenever circuitBreakerActive is cleared so future trips can re-arm.
 const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 
 function triggerFlightToSafety() {
-  if (!jupiterService || flightToSafetyActive) return;
+  if (!jupiterService || flightToSafetyActive || flightToSafetyAbandoned) return; // FIX(flight-spam): skip silently if previously abandoned due to undersized wallet — re-armed when breaker clears.
   flightToSafetyActive = true;
   console.log(`[FLIGHT TO SAFETY] Circuit breaker hit. Swapping all SOL to USDC...`);
   jupiterService.getWalletBalance().then(async (bal) => {
@@ -699,8 +700,9 @@ function triggerFlightToSafety() {
       // Previously the flag stayed true forever, blocking all trading and never
       // calling triggerReturnFromSafety(). Now we log and reset so the bot can
       // continue trading (the circuit breaker's loss-limit protection still applies).
-      console.log(`[FLIGHT TO SAFETY] Wallet balance ${bal.toFixed(4)} SOL too small to shield (need >0.10 after 0.05 fee reserve) — resetting flight flag, breaker stays active via circuitBreakerActive`);
+      console.log(`[FLIGHT TO SAFETY] Wallet balance ${bal.toFixed(4)} SOL too small to shield (need >0.10 after 0.05 fee reserve) — abandoning flight-to-safety; daily-loss breaker stays active until cleared. Will not re-log until breaker resolves.`);
       flightToSafetyActive = false;
+      flightToSafetyAbandoned = true; // FIX(flight-spam): suppress per-cycle re-attempts; re-armed when checkCircuitBreakers clears circuitBreakerActive.
     }
   }).catch((e) => {
     console.log(`[FLIGHT TO SAFETY] Error: ${e.message}`);
@@ -1053,6 +1055,7 @@ async function checkCircuitBreakers(): Promise<{ canTrade: boolean; reason: stri
     // cooldown duration, missing recovery trades.
     if (circuitBreakerActive) {
       circuitBreakerActive = false;
+      flightToSafetyAbandoned = false; // FIX(flight-spam): re-arm flight-to-safety for any future breaker trip
       triggerReturnFromSafety();
       console.log(`[RISK] Circuit breaker cleared during cooldown — returning from USDC to SOL`);
     }
@@ -1062,12 +1065,14 @@ async function checkCircuitBreakers(): Promise<{ canTrade: boolean; reason: stri
     const remaining = Math.ceil((lastLossCooldownEnd - Date.now()) / 1000);
     if (circuitBreakerActive) {
       circuitBreakerActive = false;
+      flightToSafetyAbandoned = false; // FIX(flight-spam): re-arm flight-to-safety for any future breaker trip
       triggerReturnFromSafety();
       console.log(`[RISK] Circuit breaker cleared during cooldown — returning from USDC to SOL`);
     }
     return { canTrade: false, reason: `LOSS_COOLDOWN (${remaining}s remaining)` };
   }
   circuitBreakerActive = false;
+  flightToSafetyAbandoned = false; // FIX(flight-spam): re-arm flight-to-safety for any future breaker trip
   triggerReturnFromSafety();
   return { canTrade: true, reason: "OK" };
 }
@@ -1504,6 +1509,7 @@ async function batchFetchDexPairs(addresses: string[]): Promise<Map<string, DexS
   return result;
 }
 
+
 async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promise<any[]> {
   const now = Date.now();
   const cacheTtl = Math.max(2000, engineSettings.scanIntervalMs * 0.9);
@@ -1526,22 +1532,26 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
     const QUALITY_MIN_M5_SELLS = 10;     // LEVER 3: mirror the buy-time honeypot gate (m5 sells >= 10) when txn data is present
 
     // Gecko trending + new pools (Normal fetch is fine, high rate limits)
-    const geckoPages = [1, 2, 3, 4, 5]; // WIDENED: more trending/new-pool pages = larger candidate pool (Gecko has high rate limits, cheap to expand)
-    const geckoFetches = geckoPages.flatMap(page => [
-      withTimeout(
-        fetch(`https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?page=${page}`, { headers: { "Accept": "application/json;version=20230302" }, signal: AbortSignal.timeout(8000) })
-          .then(r => r.ok ? r.json() : { data: [] }),
-        10000,
-        "Gecko Trending"
-      ).catch(() => ({ data: [] })),
-      
-      withTimeout(
-        fetch(`https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page=${page}`, { headers: { "Accept": "application/json;version=20230302" }, signal: AbortSignal.timeout(8000) })
-          .then(r => r.ok ? r.json() : { data: [] }),
-        10000,
-        "Gecko New"
-      ).catch(() => ({ data: [] }))
-    ]);
+    const geckoTrendingPages = [1, 2, 3, 4, 5];
+    const geckoNewPages = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]; // WIDENED: extra pages on new_pools to catch recently-graduated PumpSwap pairs (locked LP) that appear on pages 6-10
+    const geckoFetches = [
+      ...geckoTrendingPages.map(page =>
+        withTimeout(
+          fetch(`https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?page=${page}`, { headers: { "Accept": "application/json;version=20230302" }, signal: AbortSignal.timeout(8000) })
+            .then(r => r.ok ? r.json() : { data: [] }),
+          10000,
+          "Gecko Trending"
+        ).catch(() => ({ data: [] }))
+      ),
+      ...geckoNewPages.map(page =>
+        withTimeout(
+          fetch(`https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page=${page}`, { headers: { "Accept": "application/json;version=20230302" }, signal: AbortSignal.timeout(8000) })
+            .then(r => r.ok ? r.json() : { data: [] }),
+          10000,
+          "Gecko New"
+        ).catch(() => ({ data: [] }))
+      )
+    ];
 
     const birdEyeFetch = process.env.BIRDEYE_API_KEY
       ? withTimeout(
