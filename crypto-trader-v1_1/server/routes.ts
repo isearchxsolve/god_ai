@@ -14,7 +14,7 @@ const watchlistCache = new Map<string, { pair: DexScreenerPair, firstSeen: numbe
 const WATCHLIST_MAX_AGE_MS = 15 * 60_000; // Keep on watch for 15 mins
 
 const MIN_VIABLE_TRADE_SOL  = 0.001; // Force-lowered to allow <0.003 SOL trades
-const MIN_TRADE_SIZE_SOL    = 0.001; // Force-lowered to allow <0.003 SOL trades
+const MIN_TRADE_SIZE_SOL     = 0.003; // restored from old profitable routes.ts // Force-lowered to allow <0.003 SOL trades
 const EXECUTION_TIMEOUT_MS  = 60_000; // Increased from 30,000 for network stability
 
 const ADMIN_SECRET = process.env.ADMIN_SECRET?.trim() || null;
@@ -187,13 +187,13 @@ let engineSettings = {
   // PATCH #3: lowered from 15/8 to 5/3. Memecoin pumps rarely reach +15% in a single
   // push; they spike +5-8% then crash. With activation at 15, trailing never armed on
   // real pumps. $Taz peaked at +5.64% and never had its trailing stop armed.
-  trailingStopActivation: 12,   // FIX(geometry): restored 12 — the 3% activation + 2.5% distance combo capped winners at +0.5% net of costs, creating structural negative expectancy. 12% gives meme pumps room to actually run before the trail arms.
-  trailingStopDistance: 4,      // FIX(geometry): restored 4 — paired with 12% activation, locks in a meaningful win (+8% min) on any token that pumps.
-  hardTakeProfit: 80,          // OLD PROFITABLE: 80% TP
-  stopLoss: -6,                 // OLD PROFITABLE: 6% SL
+  trailingStopActivation: 15, // old profitable: let winners run before trailing   // FIX(geometry): restored 12 — the 3% activation + 2.5% distance combo capped winners at +0.5% net of costs, creating structural negative expectancy. 12% gives meme pumps room to actually run before the trail arms.
+  trailingStopDistance: 8, // old profitable: wider breathing room      // FIX(geometry): restored 4 — paired with 12% activation, locks in a meaningful win (+8% min) on any token that pumps.
+  hardTakeProfit: 80, // old profitable          // OLD PROFITABLE: 80% TP
+  stopLoss: -8, // old profitable: avoid wick-outs                 // OLD PROFITABLE: 6% SL
 
   // -- Conviction Gates --
-  minScoreToTrade: 52,          // OLD PROFITABLE: was 65 — too restrictive, starved the bot of candidates
+  minScoreToTrade: 90, // old profitable global conviction gate          // OLD PROFITABLE: was 65 — too restrictive, starved the bot of candidates
                                 // (2400s) handles the stale-token problem the score gate was indirectly
                                 // filtering, so the gate can be more permissive without quality loss.
   microMinScoreToTrade: 55,     // FIX(score-floor): micro wallets (< ~0.1 SOL) use THIS floor instead of
@@ -203,18 +203,18 @@ let engineSettings = {
                                 // lower for more candidates. (Mode gates age/bp5m/liq still apply on top.)
   
   // -- SNIPER Mode Calibration --
-  sniperMinScore: 60,   // OLD PROFITABLE: was 999 (disabled) — re-enabled at 60
-  sniperMinBuyPressure: 0.58,   // Restored from paper-test 0.54 — higher buy-pressure floor = stronger momentum, fewer immediate reversals.
+  sniperMinScore: 70, // old profitable non-micro setting   // OLD PROFITABLE: was 999 (disabled) — re-enabled at 60
+  sniperMinBuyPressure: 0.65, // old profitable: stronger buyer control   // Restored from paper-test 0.54 — higher buy-pressure floor = stronger momentum, fewer immediate reversals.
   // -- Core Exit & Speed Strategy --
   // trailingStopActivation: 5, 
   // trailingStopDistance: 2.5, 
   // hardTakeProfit: 80, 
   // stopLoss: -6,
-  maxHoldSeconds: 420, 
-    maxOpenPositions: 1,          // MANDATORY: Only 1 position at a time
+  maxHoldSeconds: 420, // old profitable 
+    maxOpenPositions: 1, // old profitable: one position at a time          // MANDATORY: Only 1 position at a time
     startingBalance: 0.05,        // Paper-mode starting balance: 0.05 SOL
-  scanIntervalMs: 5000,   // OLD PROFITABLE: 5s scan for faster entry
-  priceCheckIntervalMs: 3000,   // OLD PROFITABLE: 3s price check
+  scanIntervalMs: 30000, // old profitable: slower scan / less churn   // OLD PROFITABLE: 5s scan for faster entry
+  priceCheckIntervalMs: 1000, // old profitable: faster exit checks   // OLD PROFITABLE: 3s price check
 
   // -- Conviction Gates (Lowered for current market) --
   // minScoreToTrade: 85,          // was 85 → matches actual B+ setups
@@ -228,25 +228,25 @@ let engineSettings = {
                           // SLOW_BLEED stoppedOut block now prevent stale-token re-entry at the source.
                           // The 10min cooldown was needed because old code kept re-buying the same dead
                           // tokens; with the age cap that can't happen. 5min is enough for market reset.
-  partialTpRatio: 0.5, 
-  partialTpThreshold: 8,         // FIX(banking): lowered 15 -> 8. With trail armed at +12% and avg memecoin pump topping ~+15% before reversal, partials at +15 rarely filled — most winners gapped back through the band without banking. Partial at +8% secures a confirmed fill on half the position BEFORE the trail-arming window, locking in a real win that survives shadow-ledger accounting. Other half rides under the +12% trail for upside.
+  partialTpRatio: 0.5, // old profitable 
+  partialTpThreshold: 15, // old profitable         // FIX(banking): lowered 15 -> 8. With trail armed at +12% and avg memecoin pump topping ~+15% before reversal, partials at +15 rarely filled — most winners gapped back through the band without banking. Partial at +8% secures a confirmed fill on half the position BEFORE the trail-arming window, locking in a real win that survives shadow-ledger accounting. Other half rides under the +12% trail for upside.
   partialTpCostMargin: 4,        // PAPER-TEST(cost-relative): profit cushion in % added on top of the modeled round-trip cost when computing the effective partial-TP trigger. effectivePartialTp = max(partialTpThreshold, modeledRoundTrip + this). Keeps the partial from firing until it nets real profit above the trade's actual exit cost.
 
   // -- Sizing Strategy (Calibrated for 1000x compounding) --
-  minPositionSize: 0.003,       // OLD PROFITABLE: 0.003 for micro-wallet
-  maxPositionSize: 0.008,      // OLD PROFITABLE: 0.008 cap for micro-wallet safety
+  minPositionSize: 0.003, // old profitable       // OLD PROFITABLE: 0.003 for micro-wallet
+  maxPositionSize: 0.015, // old profitable cap      // OLD PROFITABLE: 0.008 cap for micro-wallet safety
   
   // -- SNIPER Mode Calibration --
   // sniperMinScore: 60,
-  sniperMaxAge: 900,            // Was 300 — too tight; in a flat market the best 58–59 candidates are 5–15 min old and were stuck at "Mode: none". 900s (15 min) lets them qualify for SNIPER (still gated by bp5m, liq).
+  sniperMaxAge: 300, // old profitable            // Was 300 — too tight; in a flat market the best 58–59 candidates are 5–15 min old and were stuck at "Mode: none". 900s (15 min) lets them qualify for SNIPER (still gated by bp5m, liq).
   // sniperMinBuyPressure: 0.55, 
-  sniperMinLiquidity: 700, // OLD PROFITABLE: was 25000 — too restrictive, starved SNIPER of fresh launches for ~$0.37 paper orders, pool depth barely affects slippage — the real round-trip cost is fees/spread, now handled by the +12% trailing-stop activation. The $50k floor starved the bot in this market (every clean token is <$50k; the only >$50k tokens are all rug-vetoed for unlocked LP). $25k stays above the BioCraft $21k disaster line; downside is protected by rugcheck + the fixed exit economics, not by pool depth.
-  sniperMaxSize: 0.25,      // OLD PROFITABLE: was 0.003 — normal sizing restored    
-  mgMinScore: 60,            // OLD PROFITABLE: was 75
-  mgMaxSize: 0.5, // OLD PROFITABLE: was 0.004
-  hwrMinScore: 62,           // OLD PROFITABLE: was 75
-  hwrMinLiquidity: 8000, // FIX(cost-geometry): raised 1500 -> 8000. Pools <$8k carry 5-8% entry slippage + 6.5-10% exit slippage = 11-18% round-trip cost. With the trailing stop now armed at +12%, an 11% cost floor means even winners book net losses. $8k floor keeps round-trip cost <5% so trades have positive expectancy when the strategy works as intended.
-  hwrMaxSize: 0.6, // OLD PROFITABLE: was 0.004
+  sniperMinLiquidity: 10000, // old profitable non-micro setting // OLD PROFITABLE: was 25000 — too restrictive, starved SNIPER of fresh launches for ~$0.37 paper orders, pool depth barely affects slippage — the real round-trip cost is fees/spread, now handled by the +12% trailing-stop activation. The $50k floor starved the bot in this market (every clean token is <$50k; the only >$50k tokens are all rug-vetoed for unlocked LP). $25k stays above the BioCraft $21k disaster line; downside is protected by rugcheck + the fixed exit economics, not by pool depth.
+  sniperMaxSize: 0.006, // old profitable      // OLD PROFITABLE: was 0.003 — normal sizing restored    
+  mgMinScore: 55, // old profitable            // OLD PROFITABLE: was 75
+  mgMaxSize: 0.008, // old profitable // OLD PROFITABLE: was 0.004
+  hwrMinScore: 55, // old profitable           // OLD PROFITABLE: was 75
+  hwrMinLiquidity: 5000, // old profitable non-micro setting // FIX(cost-geometry): raised 1500 -> 8000. Pools <$8k carry 5-8% entry slippage + 6.5-10% exit slippage = 11-18% round-trip cost. With the trailing stop now armed at +12%, an 11% cost floor means even winners book net losses. $8k floor keeps round-trip cost <5% so trades have positive expectancy when the strategy works as intended.
+  hwrMaxSize: 0.008, // old profitable // OLD PROFITABLE: was 0.004
   hwrMaxAge: 21600,          // FIX(no-trades): raised 7200s(2h) -> 21600s(6h). ROOT CAUSE: every mode (SNIPER<=900s, MG<=2400s, HWR<=7200s) only traded tokens <2h old, but tokens <2h old almost always have UNLOCKED LP -> blocked by the (correct) hard LP-unlock veto. The LP-LOCKED tokens that pass the veto are OLDER than 2h, so the safe set was empty by construction. The 24h discovery funnel already surfaces them; this lets HWR (sustained buy-pressure mode) actually reach the older, LP-locked, trending tokens. Safe: veto stays hard, so any still-unlocked token is still blocked; locked-LP tokens have no one-block-LP-pull death mode, so the 1s-poll exits are adequate. PAPER-test before considering live. Parallel to mgMaxAge. After the MG cap shipped,
                              // stale zombie tokens (Jetchua ~12h/43.6k s, WCT/RDR2/MYLOO 2.6-4.9h) simply re-entered
                              // via HWR, which had NO age gate, and bled out (Jetchua HWR entry: peak only +5.5%,
@@ -263,23 +263,23 @@ let engineSettings = {
                              // age >7200s — if those specifically underperform younger HWR fills, revert to 7200.
 
   // -- Mode Classifier Thresholds (MG / HWR gates) --
-  mgMinVolMomentum: 1.5,    // OLD PROFITABLE: was 0.7
-  mgMinPriceChange5m: 1.5,  // same
-  mgMinTxVelocity: 10,       // OLD PROFITABLE: was 8
+  mgMinVolMomentum: 1.35, // old profitable    // OLD PROFITABLE: was 0.7
+  mgMinPriceChange5m: 1.2, // old profitable  // same
+  mgMinTxVelocity: 8, // old profitable       // OLD PROFITABLE: was 8
   mgMaxAge: 2400,           // FIX(mg-stale-entry): 2400s = 40min. Every MG winner was < 36min old (WCT 2153s).
                             // Every MG loss on aged tokens (RDR2 8.4k-10.6k, MYLOO 9.7k-11.2k, MrAsteroid 3.2k+)
                             // was on a stale token whose momentum had already exited. Caps MG to live momentum only.
   maxEntryPriceChange5m: 25, // OLD PROFITABLE: was 10 — 25 admits more momentum tokens ANTI-CHASE: skip MG/HWR entries on tokens already up >25% in 5m — high mean-reversion risk ($MYLOO +27.83% on a 98-min-old token -> instant -17.76% stop in 4s). SNIPER (fresh launches) is intentionally exempt; chasing brand-new launches is its job, and rugcheck + the +12% trail handle its downside.
-  hwrMinBuyPressure5m: 0.57, // OLD PROFITABLE: was 0.55
-  hwrMinBuyPressure1h: 0.53, // OLD PROFITABLE: was 0.50
+  hwrMinBuyPressure5m: 0.70, // old profitable: strict HWR buyer control // OLD PROFITABLE: was 0.55
+  hwrMinBuyPressure1h: 0.51, // old profitable // OLD PROFITABLE: was 0.50
 
   // -- Operational Safety & Discovery --
-  maxTradesPerCycle: 1, 
-  reentryDelayMs: 300000, // RE-ENTRY CHURN FIX: was 60s. After a flat/stagnant exit (no SL, so no 15min SL blackout) the bot re-bought the SAME token ~60-120s later as it rolled over ($Jetchua: WIN +1.96% -> re-entry #10259 -> SLOW_BLEED -9.65%, peak 0.00%). 5min lets a stalled token either resume a real trend (re-qualifies fresh) or drop off the candidate set. Score>=85 still bypasses (genuine renewed strength).
-  slReentryDelayMs: 900000, 
-  txCostsEnabled: 1,
-  safetyChecksEnabled: 1,
-  txFeePercent: 0.5, // OLD PROFITABLE: was 1.5
+  maxTradesPerCycle: 1, // old profitable 
+  reentryDelayMs: 60000, // old profitable // RE-ENTRY CHURN FIX: was 60s. After a flat/stagnant exit (no SL, so no 15min SL blackout) the bot re-bought the SAME token ~60-120s later as it rolled over ($Jetchua: WIN +1.96% -> re-entry #10259 -> SLOW_BLEED -9.65%, peak 0.00%). 5min lets a stalled token either resume a real trend (re-qualifies fresh) or drop off the candidate set. Score>=85 still bypasses (genuine renewed strength).
+  slReentryDelayMs: 900000, // old profitable 
+  txCostsEnabled: 1, // old profitable
+  safetyChecksEnabled: 1, // old profitable
+  txFeePercent: 0.5, // old profitable // OLD PROFITABLE: was 1.5
   rugcheckMinScore: 100, // OLD PROFITABLE: was 400 — too restrictive
   rugcheckMaxRiskNormalised: 65, // Raised from 60 → 65: norm=61 tokens (LP-VETO-RELAX admitted, e.g. $BAGEY/$SPCX/$EarthX/$CPU/$ZERO) were being killed after admission. 65 lets them through while still blocking norm=66+.
 
@@ -293,11 +293,11 @@ let engineSettings = {
   microMinEdgePct:  0.3,   // OLD PROFITABLE: was 0.5 — relaxed for micro-wallet
   microEdgeBuffer:  0.5,   // micro-wallet flat cushion, pct
 
-  maxVolLiqRatioNewToken: 20, // OLD PROFITABLE: was 14
-  maxDiscoveryAgeSeconds: 7200, // OLD PROFITABLE: was 86400
+  maxVolLiqRatioNewToken: 14, // old profitable // OLD PROFITABLE: was 14
+  maxDiscoveryAgeSeconds: 10800, // old profitable // OLD PROFITABLE: was 86400
   
-  dynamicHoldEnabled: 1, 
-  dynamicHoldMaxSeconds: 1800, // OLD PROFITABLE: was 2100
+  dynamicHoldEnabled: 1, // old profitable 
+  dynamicHoldMaxSeconds: 2100, // old profitable // OLD PROFITABLE: was 2100
   
   // -- Compound Boost --
   // When enabled, position sizes scale super-linearly as the portfolio grows past
@@ -306,11 +306,11 @@ let engineSettings = {
   //   portfolio = 1.0 SOL         → multiplier ≈ 1.8x
   //   portfolio = 2.0 SOL         → multiplier ≈ 3.2x  (capped at 5x)
   // Keep DISABLED until avgShadow turns consistently positive. Flip to 1 to activate.
-  compoundBoostEnabled: 0,      // 0 = off (safe default), 1 = on
-  compoundRefSol: 0.5,          // Baseline — matches your paper starting balance
-  compoundPower: 1.35,          // Super-linear growth shape
-  compoundMaxMultiplier: 5.0,   // Hard cap: never more than 5× base size
-  compoundAbsCapSol: 1.0,       // Absolute SOL ceiling per trade
+  compoundBoostEnabled: 0, // old profitable: disabled for micro wallet      // 0 = off (safe default), 1 = on
+  compoundRefSol: 0.5, // old profitable          // Baseline — matches your paper starting balance
+  compoundPower: 1.35, // old profitable          // Super-linear growth shape
+  compoundMaxMultiplier: 5.0, // old profitable   // Hard cap: never more than 5× base size
+  compoundAbsCapSol: 1.0, // old profitable       // Absolute SOL ceiling per trade
 };
 
 let liveCandidatesCache: any[] = [], lastScanTime = 0;
@@ -619,6 +619,8 @@ async function closeShadowTrade(
     `paper:${paperPnlPct.toFixed(2)}% shadow:${shadowPnlPct.toFixed(2)}% | ${gapStr} | ${exitReason}`
   );
 }
+const MAX_SINGLE_TRADE_PCT  = 0.55;
+const MIN_EDGE_PCT          = 5.0;
 // ─────────────────────────────────────────────────────────────────────────────
 let tradedAddresses = new Map<string, number>();
 let stoppedOutAddresses = new Map<string, number>();
@@ -1531,10 +1533,12 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
     let funnelSeen = 0, cutLiq = 0, cutVol = 0, cutAge = 0, cutPrice = 0, cutVolZero = 0, cutHoneypot = 0, cutTooNew = 0;
     
     // UPDATED: Loosened funnel to let micro-caps into the scanner
-    const QUALITY_LIQ_FLOOR = 1500;      // LEVER 4: raised 800->1500 to bias toward higher-liquidity pairs (also clears the $1k micro buy floor with margin)
-    const QUALITY_VOL_5M_MIN = 250;
-    const QUALITY_MIN_AGE_SEC = 120;     // LEVER 1: skip freshest tokens (<2m) where mint/freeze authority is usually still active
-    const QUALITY_MIN_M5_SELLS = 10;     // LEVER 3: mirror the buy-time honeypot gate (m5 sells >= 10) when txn data is present
+    const QUALITY_LIQ_FLOOR = 800;       // FETCHER OLD-PROFIT: restored old routes.ts early micro-cap floor
+    const QUALITY_VOL_5M_MIN = 250;      // FETCHER OLD-PROFIT: keep old routes.ts 5m volume floor
+    const QUALITY_MIN_AGE_SEC = 0;       // FETCHER OLD-PROFIT: old routes.ts did NOT pre-cut <2m tokens
+    const QUALITY_MIN_M5_SELLS = 2;      // FETCHER OLD-PROFIT: old routes.ts required only 2 sells at safety stage, not 10 at discovery
+
+    console.log(`[FETCHER-PATCH] old-profit funnel active | liq>=${QUALITY_LIQ_FLOOR} vol5m>=${QUALITY_VOL_5M_MIN} minAge=${QUALITY_MIN_AGE_SEC}s minSells=${QUALITY_MIN_M5_SELLS}`);
 
     // Gecko trending + new pools (Normal fetch is fine, high rate limits)
     const geckoTrendingPages = [1, 2, 3, 4, 5];
@@ -1619,7 +1623,7 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
           funnelSeen++; if (liq < QUALITY_LIQ_FLOOR) { cutLiq++; continue; }
           if (vol5m < QUALITY_VOL_5M_MIN) { cutVol++; continue; }
           if (age > maxAgeMs) { cutAge++; continue; }
-          if (pair.pairCreatedAt && age < QUALITY_MIN_AGE_SEC * 1000) { cutTooNew++; continue; }
+          if (QUALITY_MIN_AGE_SEC > 0 && pair.pairCreatedAt && age < QUALITY_MIN_AGE_SEC * 1000) { cutTooNew++; continue; }
           if (!pair.priceUsd || isNaN(Number(pair.priceUsd)) || Number(pair.priceUsd) <= 0) { cutPrice++; continue; }
           if (vol5m === 0) { cutVolZero++; continue; }
 
@@ -1631,7 +1635,7 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
             const hpBuys = pair.txns?.m5?.buys || 0;
             const hpSells = pair.txns?.m5?.sells || 0;
             const hpFdv = pair.fdv || 0;
-            if ((hpBuys + hpSells) > 0 && hpSells < QUALITY_MIN_M5_SELLS) { cutHoneypot++; continue; }
+            if ((hpBuys + hpSells) > 0 && hpSells < QUALITY_MIN_M5_SELLS) { cutHoneypot++; continue; } // old-profit: 2-sell minimum, not 10
             if (hpFdv > 0 && liq / hpFdv < 0.003) { cutHoneypot++; continue; }
           }
 
@@ -1649,7 +1653,7 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
           funnelSeen++; if (liq < QUALITY_LIQ_FLOOR) { cutLiq++; continue; }
           if (vol5m < QUALITY_VOL_5M_MIN) { cutVol++; continue; }
           if (ageSec > engineSettings.maxDiscoveryAgeSeconds) { cutAge++; continue; }
-          if (bToken.first_seen && ageSec < QUALITY_MIN_AGE_SEC) { cutTooNew++; continue; }
+          if (QUALITY_MIN_AGE_SEC > 0 && bToken.first_seen && ageSec < QUALITY_MIN_AGE_SEC) { cutTooNew++; continue; }
           const priceUsd = bToken.price?.toString();
           if (!priceUsd || isNaN(Number(priceUsd)) || Number(priceUsd) <= 0) { cutPrice++; continue; }
 
