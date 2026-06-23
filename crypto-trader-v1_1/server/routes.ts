@@ -203,7 +203,7 @@ let engineSettings = {
                                 // lower for more candidates. (Mode gates age/bp5m/liq still apply on top.)
   
   // -- SNIPER Mode Calibration --
-  sniperMinScore: 70,
+  sniperMinScore: 999,   // SAFE-BUILD: SNIPER disabled by default (0W/4L, avg -10.6%). Re-enable via POST /api/settings {"sniperMinScore":70}
   sniperMinBuyPressure: 0.58,   // Restored from paper-test 0.54 — higher buy-pressure floor = stronger momentum, fewer immediate reversals.
   // -- Core Exit & Speed Strategy --
   // trailingStopActivation: 5, 
@@ -213,7 +213,7 @@ let engineSettings = {
   maxHoldSeconds: 420, 
     maxOpenPositions: 1,          // MANDATORY: Only 1 position at a time
     startingBalance: 0.05,        // Paper-mode starting balance: 0.05 SOL
-  scanIntervalMs: 30000, 
+  scanIntervalMs: 10000,   // SAFE-BUILD: faster scan (was 30000) to reduce entry latency / chasing
   priceCheckIntervalMs: 1000,   // ACCELERATED: Catch peaks faster to offset fees
 
   // -- Conviction Gates (Lowered for current market) --
@@ -229,7 +229,8 @@ let engineSettings = {
                           // The 10min cooldown was needed because old code kept re-buying the same dead
                           // tokens; with the age cap that can't happen. 5min is enough for market reset.
   partialTpRatio: 0.5, 
-  partialTpThreshold: 15, 
+  partialTpThreshold: 10,        // PAPER-TEST(early-profit): was 15. $Sakana peaked +12.02% then gapped to ~0 in one 1s poll; nothing banked between trail-arm (12%) and partial-TP (15%), so the trade booked only the +3% floor (real fill -0.16% per shadow). Banking half at +10% on the way up secures a REAL fill before the reversal on the HWR / older-LP-locked token class — and on a $29k pool the half-size exit cost is small. Caveat: caps upside on half the position; paper assumes a +10% fill that a fast live token may gap through. Revert to 15 if win-quality/expectancy drops.
+  partialTpCostMargin: 4,        // PAPER-TEST(cost-relative): profit cushion in % added on top of the modeled round-trip cost when computing the effective partial-TP trigger. effectivePartialTp = max(partialTpThreshold, modeledRoundTrip + this). Keeps the partial from firing until it nets real profit above the trade's actual exit cost.
 
   // -- Sizing Strategy (Calibrated for 1000x compounding) --
   minPositionSize: 0.004,       // Raised from 0.001: floor-size trades bled fees as a huge % of position. 0.004 keeps fee drag sane while staying small on a ~0.07 SOL wallet.
@@ -246,11 +247,20 @@ let engineSettings = {
   hwrMinScore: 75,           
   hwrMinLiquidity: 25000, // RE-LOOSENED to match sniperMinLiquidity — see rationale on that line.    
   hwrMaxSize: 0.004,
-  hwrMaxAge: 7200,           // FIX(hwr-stale-entry): 7200s = 2h. Parallel to mgMaxAge. After the MG cap shipped,
+  hwrMaxAge: 21600,          // FIX(no-trades): raised 7200s(2h) -> 21600s(6h). ROOT CAUSE: every mode (SNIPER<=900s, MG<=2400s, HWR<=7200s) only traded tokens <2h old, but tokens <2h old almost always have UNLOCKED LP -> blocked by the (correct) hard LP-unlock veto. The LP-LOCKED tokens that pass the veto are OLDER than 2h, so the safe set was empty by construction. The 24h discovery funnel already surfaces them; this lets HWR (sustained buy-pressure mode) actually reach the older, LP-locked, trending tokens. Safe: veto stays hard, so any still-unlocked token is still blocked; locked-LP tokens have no one-block-LP-pull death mode, so the 1s-poll exits are adequate. PAPER-test before considering live. Parallel to mgMaxAge. After the MG cap shipped,
                              // stale zombie tokens (Jetchua ~12h/43.6k s, WCT/RDR2/MYLOO 2.6-4.9h) simply re-entered
                              // via HWR, which had NO age gate, and bled out (Jetchua HWR entry: peak only +5.5%,
-                             // exit -7.85% SLOW_BLEED). HWR targets mature-but-LIVE tokens; 2h still admits those
-                             // while blocking multi-hour zombies whose momentum already exited.
+                             // exit -7.85% SLOW_BLEED). HWR targets mature-but-LIVE tokens; 2h blocked those zombies.
+                             // ===> VERIFIED against current code (not just this comment): a 6h cap does NOT
+                             // mechanically re-admit dead zombies. The scorer zero-weights age past 3600s
+                             // (ageScore=0, see scoreToken), so a >1h token must earn >=75 from liq+bp+vol+price+tx
+                             // alone; AND HWR entry requires bp5m>=0.55 + bp1h>=0.50 + chase guard (px5m<=25).
+                             // bp5m DEFAULTS to 0.5 when 5m txns are absent (< the 0.55 gate), so a dead-flow token
+                             // fails automatically. Only a mature-but-ACTIVELY-BOUGHT token can qualify. The old
+                             // WCT/RDR2/MYLOO bleed was under the prior NO-age-gate regime, not today's gates.
+                             // Residual risk is generic fade-AFTER-entry (exists at any age; handled by
+                             // MOMENTUM_FADE/SLOW_BLEED/EARLY_CUT). Still PAPER-test; watch HWR fills with entry
+                             // age >7200s — if those specifically underperform younger HWR fills, revert to 7200.
 
   // -- Mode Classifier Thresholds (MG / HWR gates) --
   mgMinVolMomentum: 0.7,    // Was 1.0 — required rising volume; 0.7 admits steady (not just accelerating) volume
@@ -259,7 +269,7 @@ let engineSettings = {
   mgMaxAge: 2400,           // FIX(mg-stale-entry): 2400s = 40min. Every MG winner was < 36min old (WCT 2153s).
                             // Every MG loss on aged tokens (RDR2 8.4k-10.6k, MYLOO 9.7k-11.2k, MrAsteroid 3.2k+)
                             // was on a stale token whose momentum had already exited. Caps MG to live momentum only.
-  maxEntryPriceChange5m: 25, // ANTI-CHASE: skip MG/HWR entries on tokens already up >25% in 5m — high mean-reversion risk ($MYLOO +27.83% on a 98-min-old token -> instant -17.76% stop in 4s). SNIPER (fresh launches) is intentionally exempt; chasing brand-new launches is its job, and rugcheck + the +12% trail handle its downside.
+  maxEntryPriceChange5m: 10, // SAFE-BUILD: tightened anti-chase (was 25). ANTI-CHASE: skip MG/HWR entries on tokens already up >25% in 5m — high mean-reversion risk ($MYLOO +27.83% on a 98-min-old token -> instant -17.76% stop in 4s). SNIPER (fresh launches) is intentionally exempt; chasing brand-new launches is its job, and rugcheck + the +12% trail handle its downside.
   hwrMinBuyPressure5m: 0.55,
   hwrMinBuyPressure1h: 0.50,
 
@@ -332,7 +342,9 @@ export interface ShadowTrade {
   shadowExitPrice?: number;
   paperPnlPct?:     number;
   shadowPnlPct?:    number;
+  shadowPnlGrossPct?: number;        // Edit B (revised): pre-fee gross for transparency
   pnlGapPct?:       number;          // paperPnlPct - shadowPnlPct = your paper inflation
+  shadowFeeBreakdownPct?: { jitoTip: number; priorityFee: number; baseFee: number; total: number }; // Edit B (revised): live-honest fee components as % of position
   exitReason?:      string;
   outAmountRaw?:    string;   // Jupiter buy-quote outAmount (raw token units) — used for shadow exit quote
 }
@@ -342,6 +354,98 @@ let shadowTradeIdSeq  = 0;
 const shadowOpenTrades = new Map<number, ShadowTrade>();
 const shadowClosedTrades: ShadowTrade[] = [];
 const MAX_SHADOW_HISTORY = 200;
+
+// ── PERSISTENT SHADOW LEDGER (proving ground; survives restarts) ─────────────
+// Every shadow CLOSE is committed to disk so the REAL (shadow) edge can be
+// judged across many trades AND across restarts — the in-memory history above
+// is capped at 200 and resets on reboot, which is useless for proving an edge.
+//   shadow-stats.json   → rolling aggregate (the number you actually read)
+//   shadow-trades.jsonl → one JSON line per closed trade (full raw history)
+// This measures honesty, not paper fantasy. A 0.05 SOL wallet can only grow if
+// avgShadowPnlPct is genuinely positive across >=20 trades. Until then: do not
+// add capital.
+interface ShadowLedger {
+  totalTrades:    number;
+  wins:           number;   // shadowPnlPct > 0
+  losses:         number;   // shadowPnlPct <= 0
+  sumShadowPnl:   number;   // additive sum of per-trade REAL (shadow) PnL %
+  sumPaperPnl:    number;   // additive sum of per-trade paper PnL %
+  sumInflation:   number;   // sum of (paper - shadow): how much paper lies
+  compoundedMult: number;   // product of (1 + shadowPnl/100): full-size growth multiple
+  bestPct:        number;
+  worstPct:       number;
+  firstAt:        number | null;
+  lastAt:         number | null;
+}
+function shadowStatsFile():  string { return pathJoin(process.cwd(), "shadow-stats.json"); }
+function shadowTradesFile(): string { return pathJoin(process.cwd(), "shadow-trades.jsonl"); }
+function freshShadowLedger(): ShadowLedger {
+  return { totalTrades: 0, wins: 0, losses: 0, sumShadowPnl: 0, sumPaperPnl: 0,
+           sumInflation: 0, compoundedMult: 1, bestPct: -Infinity, worstPct: Infinity,
+           firstAt: null, lastAt: null };
+}
+function loadShadowLedger(): ShadowLedger {
+  try {
+    const f = shadowStatsFile();
+    if (existsSync(f)) return { ...freshShadowLedger(), ...JSON.parse(readFileSync(f, "utf8")) };
+  } catch (e: any) { console.warn(`[SHADOW-TALLY] ledger load failed: ${e.message}`); }
+  return freshShadowLedger();
+}
+let shadowLedger: ShadowLedger = loadShadowLedger();
+function shadowLedgerSummary(): Record<string, number | string | null> {
+  const n = shadowLedger.totalTrades;
+  const avgShadow = n ? shadowLedger.sumShadowPnl / n : 0;
+  const avgPaper  = n ? shadowLedger.sumPaperPnl  / n : 0;
+  const avgInfl   = n ? shadowLedger.sumInflation / n : 0;
+  const winRate   = n ? (shadowLedger.wins / n) * 100 : 0;
+  const growthPct = (shadowLedger.compoundedMult - 1) * 100;
+  let verdict: string;
+  if (n < 20)                              verdict = `Need ${20 - n} more trades before the edge is meaningful (have ${n}/20). Keep it on paper.`;
+  else if (avgShadow > 0 && growthPct > 0) verdict = `REAL POSITIVE EDGE so far: +${avgShadow.toFixed(2)}%/trade net of real execution across ${n} trades. This is the signal that funding more capital is justified.`;
+  else                                     verdict = `NO real edge yet: ${avgShadow.toFixed(2)}%/trade after real execution across ${n} trades. Do NOT add capital — tune the strategy until this turns positive.`;
+  return {
+    totalTrades: n, wins: shadowLedger.wins, losses: shadowLedger.losses,
+    winRatePct: +winRate.toFixed(1),
+    avgShadowPnlPct: +avgShadow.toFixed(2),
+    avgPaperPnlPct:  +avgPaper.toFixed(2),
+    avgPaperInflationPct: +avgInfl.toFixed(2),
+    compoundedShadowGrowthPct: +growthPct.toFixed(2),
+    bestPct:  n ? +shadowLedger.bestPct.toFixed(2)  : 0,
+    worstPct: n ? +shadowLedger.worstPct.toFixed(2) : 0,
+    firstAt: shadowLedger.firstAt ? new Date(shadowLedger.firstAt).toISOString() : null,
+    lastAt:  shadowLedger.lastAt  ? new Date(shadowLedger.lastAt).toISOString()  : null,
+    verdict,
+  };
+}
+function recordShadowLedger(closed: ShadowTrade): void {
+  const s = closed.shadowPnlPct ?? 0;
+  shadowLedger.totalTrades   += 1;
+  if (s > 0) shadowLedger.wins += 1; else shadowLedger.losses += 1;
+  shadowLedger.sumShadowPnl  += s;
+  shadowLedger.sumPaperPnl   += closed.paperPnlPct ?? 0;
+  shadowLedger.sumInflation  += closed.pnlGapPct ?? 0;
+  shadowLedger.compoundedMult *= (1 + s / 100);
+  shadowLedger.bestPct  = Math.max(shadowLedger.bestPct,  s);
+  shadowLedger.worstPct = Math.min(shadowLedger.worstPct, s);
+  if (shadowLedger.firstAt === null) shadowLedger.firstAt = closed.openedAt ?? closed.closedAt ?? Date.now();
+  shadowLedger.lastAt = closed.closedAt ?? Date.now();
+  try {
+    writeFileSync(shadowStatsFile(), JSON.stringify(shadowLedger, null, 2));
+    const line = JSON.stringify({
+      id: closed.id, ts: closed.closedAt, token: closed.tokenSymbol, mode: closed.mode,
+      score: closed.score, sizeSol: closed.sizeSol,
+      paperPnlPct: closed.paperPnlPct, shadowPnlPct: closed.shadowPnlPct,
+      gapPct: closed.pnlGapPct, exitReason: closed.exitReason,
+    });
+    writeFileSync(shadowTradesFile(), line + "\n", { flag: "a" });
+  } catch (e: any) { console.warn(`[SHADOW-TALLY] persist failed: ${e.message}`); }
+  const sum = shadowLedgerSummary();
+  console.log(
+    `[SHADOW-TALLY] n=${sum.totalTrades} | win ${sum.winRatePct}% | ` +
+    `avgShadow ${sum.avgShadowPnlPct}% | avgPaper ${sum.avgPaperPnlPct}% | ` +
+    `inflation ${sum.avgPaperInflationPct}% | growth ${sum.compoundedShadowGrowthPct}% | ${sum.verdict}`
+  );
+}
 
 export function getShadowTrades(): { open: ShadowTrade[]; closed: ShadowTrade[] } {
   return {
@@ -451,7 +555,43 @@ async function closeShadowTrade(
     shadowExitPrice = paperExitPrice * (1 - exitImpactPct / 100);
   }
 
-  const shadowPnlPct    = ((shadowExitPrice - match.shadowEntryPrice) / match.shadowEntryPrice) * 100;
+  // ── EDIT B (REVISED): Jito-aware shadow PnL ────────────────────────────────
+  // Models the real round-trip cost the live engine would pay, using the SAME
+  // env-var default-resolution logic as jupiter.ts (L937-943). Without this,
+  // shadow PnL flatters live performance by ~5.75pp/trade when env vars are unset
+  // (because the old default JITO_TIP_LAMPORTS=0 misses the 30k fallback jupiter
+  // uses when JITO_ENGINE_URL is configured).
+  //
+  // Cost components (per round-trip = 2 legs):
+  //   Jito tip:        JITO_TIP_LAMPORTS x 2 (flat transfer, only when JITO_ENGINE_URL set)
+  //   Priority fee:    (PRIORITY_FEE_LAMPORTS microLamports/CU x ~30k CU / 1e6) x 2 legs
+  //                    (field is named "lamports" in jupiter.ts:221 but value is µLamports/CU — see H2)
+  //   Base TX fee:     5000 lamports/signature x 2 legs (Solana base fee, legacy tx)
+  //
+  // AMM/LP swap fees (~0.25%/leg) are NOT modeled here — they're already captured
+  // in shadowExitPrice via Jupiter's priceImpactPct field (L545). Do not double-count.
+  const _jitoEngineUrl = (process.env.JITO_ENGINE_URL ?? "").trim();
+  const _DEFAULT_JITO_TIP = _jitoEngineUrl ? 30_000 : 0;        // matches jupiter.ts:937
+  const _DEFAULT_PRIORITY_FEE = 100_000;                         // matches jupiter.ts:941
+  const _ESTIMATED_SWAP_CU = 30_000;                             // conservative swap compute budget
+  const rawJitoTip = parseInt(process.env.JITO_TIP_LAMPORTS ?? String(_DEFAULT_JITO_TIP), 10);
+  const rawPriorityFeeMicroLamports = parseInt(process.env.PRIORITY_FEE_LAMPORTS ?? String(_DEFAULT_PRIORITY_FEE), 10);
+  const jitoTipLamports = isNaN(rawJitoTip) ? _DEFAULT_JITO_TIP : rawJitoTip;
+  const priorityFeeLamportsPerLeg = Math.round((rawPriorityFeeMicroLamports * _ESTIMATED_SWAP_CU) / 1_000_000);
+  const baseFeeLamportsPerLeg = 5_000;                           // Solana legacy base fee
+  const roundTripFeeLamports = (priorityFeeLamportsPerLeg + jitoTipLamports + baseFeeLamportsPerLeg) * 2;
+  const positionLamports = Math.max(1, Math.floor((match.sizeSol ?? 0) * 1e9));
+  const roundTripFeePct = (roundTripFeeLamports / positionLamports) * 100;
+  const shadowPnlGrossPct = ((shadowExitPrice - match.shadowEntryPrice) / match.shadowEntryPrice) * 100;
+  const shadowPnlPct = shadowPnlGrossPct - roundTripFeePct;
+  const shadowFeeBreakdownPct = {
+    jitoTip:      ((jitoTipLamports * 2) / positionLamports) * 100,
+    priorityFee:  ((priorityFeeLamportsPerLeg * 2) / positionLamports) * 100,
+    baseFee:      ((baseFeeLamportsPerLeg * 2) / positionLamports) * 100,
+    total:        roundTripFeePct,
+  };
+  // ── END EDIT B (REVISED) ───────────────────────────────────────────────────
+
   const pnlGapPct       = paperPnlPct - shadowPnlPct;
 
   const closed: ShadowTrade = {
@@ -461,11 +601,14 @@ async function closeShadowTrade(
     shadowExitPrice,
     paperPnlPct,
     shadowPnlPct,
+    shadowPnlGrossPct,            // Edit B (revised): pre-fee gross for transparency
+    shadowFeeBreakdownPct,        // Edit B (revised): per-component fee breakdown as % of position
     pnlGapPct,
     exitReason,
   };
   shadowClosedTrades.push(closed);
   if (shadowClosedTrades.length > MAX_SHADOW_HISTORY) shadowClosedTrades.shift();
+  recordShadowLedger(closed);   // persist to disk + update the cross-restart proving-ground tally
 
   const gapStr = pnlGapPct >= 0
     ? `paper beats shadow by +${pnlGapPct.toFixed(2)}% (paper inflation)`
@@ -1144,7 +1287,7 @@ function scoreToken(
   const metrics = { liq, ageSeconds, bp5m, bp1h, volMomentum, priceChange5m, priceChange1h, txVelocity5m, vol5m, vol1h, fdv, h1buys: h1b, h1sells: h1s, m5buys: m5b, m5sells: m5s, buyPressure5m: bp5m, buyPressure1h: bp1h };
 
   // Micro‑wallet mode: lower score thresholds slightly to allow recovery trades
-  const effSniperScore = isMicroWallet ? 58 : engineSettings.sniperMinScore;
+  const effSniperScore = engineSettings.sniperMinScore >= 999 ? 999 : (isMicroWallet ? 58 : engineSettings.sniperMinScore);   // SAFE-BUILD: honor 999 kill-value even in micro-wallet mode
   const effMgScore     = isMicroWallet ? 58 : engineSettings.mgMinScore;
   const effHwrScore    = isMicroWallet ? 60 : engineSettings.hwrMinScore;
   const effSniperLiq   = engineSettings.sniperMinLiquidity /* FIX(liq-floor): removed micro-wallet $1k discount that let the bot buy un-tradeable thin tokens (BioCraft $21k -> ~35% real round-trip loss). Restored $50k floor. */;
@@ -1674,9 +1817,32 @@ async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair): Pr
       "lp unlocked",            // LP can be pulled anytime — direct rug predictor
       "single holder ownership" // one wallet can dump everything — concentration rug
     ];
-    const _vetoRisk = _risks.find((r: any) =>
-      HARD_VETO_RISK_KEYWORDS.some(kw => String(r?.name || "").toLowerCase().includes(kw))
-    );
+    // PATCH #3 (lp-veto-precision): the HARD_VETO_RISK_KEYWORDS list above matched "lp unlocked"
+    // as a SUBSTRING, so the graded RugCheck flag "Large Amount of LP Unlocked" (a partial-LP
+    // signal) tripped the same ABSOLUTE veto written for the literal "LP Unlocked" full-pull flag
+    // ($Taz -101%). In the current market ~100% of liquid fresh launches carry the graded flag, so
+    // it became a 100% kill switch and the bot took zero entries. Split the two:
+    //   ABSOLUTE (hard-veto in ALL modes): literal "LP Unlocked" full-pull + "single holder ownership".
+    //   GRADED ("Large Amount of LP Unlocked"): still hard-veto in LIVE (never relax real-money rug
+    //     protection), but ALLOW in PAPER, tagged, to measure the real post-entry rug rate at zero risk.
+    const _vetoNameLc = (r: any) => String(r?.name || "").toLowerCase();
+    const _absoluteVetoRisk = _risks.find((r: any) => {
+      const n = _vetoNameLc(r);
+      return n.includes("single holder ownership") || (n.includes("lp unlocked") && !n.includes("large amount of lp unlocked"));
+    });
+    const _gradedLpRisk = _risks.find((r: any) => _vetoNameLc(r).includes("large amount of lp unlocked"));
+    const _safetyTradingMode = ((await storage.getBotStatus().catch(() => ({ tradingMode: "paper" })))?.tradingMode === "live") ? "live" : "paper";
+    // PATCH #3b PARITY SWITCH: the graded "Large Amount of LP Unlocked" flag is now HARD-VETOED in
+    // BOTH paper and live by default, so paper selection == live selection (replicable results; the
+    // experiment to measure the graded flag's true rug rate is complete and it DID predict rugs).
+    // Set RELAX_GRADED_LP_VETO_LIVE=true in .env only if you later want to admit these tokens in BOTH
+    // modes together (still in parity). Default (unset or false) keeps the veto hard everywhere.
+    const _relaxGradedLpInLive = String(process.env.RELAX_GRADED_LP_VETO_LIVE || "").toLowerCase() === "true";
+    const _gradedLpAdmit = _relaxGradedLpInLive;
+    const _vetoRisk = _absoluteVetoRisk || ((_gradedLpRisk && !_gradedLpAdmit) ? _gradedLpRisk : undefined);
+    if (_gradedLpRisk && !_absoluteVetoRisk && !_vetoRisk) {
+      console.log(`[LP-VETO-RELAX:${_safetyTradingMode.toUpperCase()}] $${pair.baseToken?.symbol || tokenAddress} ADMITTED (graded "${_gradedLpRisk.name}" via RELAX_GRADED_LP_VETO_LIVE=true; applies to BOTH paper+live for parity) rugScoreNorm=${data?.score_normalised}`);
+    }
     // Concise safety-decision log (retains RugCheck score visibility for scale verification).
     console.log(`[SAFETY] $${pair.baseToken?.symbol || tokenAddress} rugScore=${data?.score} rugScoreNorm=${data?.score_normalised} freeze=${_freezeActive} mint=${_mintActive} veto=${_vetoRisk?.name || "none"}`);
     if (_freezeActive) {
@@ -2623,7 +2789,7 @@ function getEffectiveMinScore(isMicroWallet: boolean = false): number {
 const FORCE_SELL_INTERVAL_MS  = 15_000;          // FIX 5: retry interval for persistent liquidation
 const MAX_FORCE_SELL_TIME_MS  = 5 * 60_000;       // FIX 5: max 5-minute liquidation window
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────��───────────────────────────────────────────────────────────────
 // FIX 5: Persistent forced-liquidation loop.
 //
 // When a normal sell exhausts its retry budget (sellFailureStrikes > MAX_SELL_FAILURES)
@@ -3176,7 +3342,15 @@ async function checkOpenPositions() {
         // BUGFIX #14: track partial TP failures. If the sell fails 3x (rugged pool),
         // mark as taken to stop retrying — each retry wastes priority fees.
         const partialTpFailures = partialTpFailuresMap.get(trade.id) ?? 0;
-        if (!partialTpTaken.has(trade.id) && partialTpFailures < 3 && pnlPct >= engineSettings.partialTpThreshold && pnlPct < dynamicTP) {
+        // PAPER-TEST(cost-relative partial-TP): a static threshold ignores that a thin-liquidity token
+        // needs a bigger move just to clear its round-trip cost. Tie the trigger to the ACTUAL modeled
+        // round-trip (for the partialTpRatio slice being sold), floored at the base partialTpThreshold.
+        // NOTE: deliberately NOT using the 2x-inflated minProfitableExitPct gate (~12.02% on $Sakana's
+        // $29k pool) — that exceeds the +12% peak, so the partial could never fire on exactly the token
+        // class this is built for. We use the raw round-trip + an explicit profit margin instead.
+        const _partialRtCosts = calcTransactionCosts(pair?.liquidity?.usd ?? 0, parseFloat(trade.amount || "0") * engineSettings.partialTpRatio);
+        const effectivePartialTpThreshold = Math.max(engineSettings.partialTpThreshold, _partialRtCosts.totalRoundTripPct + engineSettings.partialTpCostMargin);
+        if (!partialTpTaken.has(trade.id) && partialTpFailures < 3 && pnlPct >= effectivePartialTpThreshold && pnlPct < dynamicTP) {
           const sizeSol = parseFloat(trade.amount);
           const partialSize = sizeSol * engineSettings.partialTpRatio;
           const isLivePartial = trade.tradingMode === "live" && jupiterService !== null;
@@ -3197,7 +3371,7 @@ async function checkOpenPositions() {
                   dailyPnlSol += partialResult.solReceived - partialSize;
                   partialTpTaken.add(trade.id);
                   await storage.updateTradeAmount(trade.id, (sizeSol - partialSize).toFixed(4));
-                  console.log(`[LIVE] PARTIAL TP $${trade.tokenSymbol} | Sold ${engineSettings.partialTpRatio * 100}% on-chain @ +${pnlPct.toFixed(1)}% | SOL received: ${partialResult.solReceived.toFixed(4)} | tx: ${partialResult.txSignature?.slice(0, 20)}...`);
+                  console.log(`[LIVE] PARTIAL TP $${trade.tokenSymbol} | Sold ${engineSettings.partialTpRatio * 100}% on-chain @ +${pnlPct.toFixed(1)}% (trigger +${effectivePartialTpThreshold.toFixed(1)}%, rt-cost ${_partialRtCosts.totalRoundTripPct.toFixed(1)}%) | SOL received: ${partialResult.solReceived.toFixed(4)} | tx: ${partialResult.txSignature?.slice(0, 20)}...`);
                   partialSuccess = true;
                 } else {
                   // BUGFIX #14: increment failure counter. After 3 failures, stop retrying.
@@ -3218,7 +3392,7 @@ async function checkOpenPositions() {
             partialTpTaken.add(trade.id);
             dailyPnlSol += partialReturn - partialSize;
             await storage.updateTradeAmount(trade.id, (sizeSol - partialSize).toFixed(4));
-            console.log(`[PAPER] PARTIAL TP $${trade.tokenSymbol} | Sold ${engineSettings.partialTpRatio * 100}% @ +${pnlPct.toFixed(1)}% | ExitCost: -${partialExitCostPct.toFixed(1)}% | Secured: ${partialReturn.toFixed(4)} SOL`);
+            console.log(`[PAPER] PARTIAL TP $${trade.tokenSymbol} | Sold ${engineSettings.partialTpRatio * 100}% @ +${pnlPct.toFixed(1)}% (trigger +${effectivePartialTpThreshold.toFixed(1)}%, rt-cost ${_partialRtCosts.totalRoundTripPct.toFixed(1)}%) | ExitCost: -${partialExitCostPct.toFixed(1)}% | Secured: ${partialReturn.toFixed(4)} SOL`);
             partialSuccess = true;
           }
           if (partialSuccess) {
@@ -3429,7 +3603,7 @@ async function checkOpenPositions() {
           const effectiveEntryLiq = entryLiqUsd > 0 ? entryLiqUsd : (engineSettings.sniperMinLiquidity ?? 3000);
           if (entryLiqUsd === 0 && !liqCoWarnedTrades.has(trade.id)) {
             liqCoWarnedTrades.add(trade.id);
-            console.warn(`[LIQ_CO] #${trade.id} $${trade.tokenSymbol} — entry liquidity zero, using floor $${effectiveEntryLiq} for relative drop check (FIX #5)`);
+            console.warn(`[LIQ_CO] #${trade.id} $${trade.tokenSymbol} ��� entry liquidity zero, using floor $${effectiveEntryLiq} for relative drop check (FIX #5)`);
           }
           // BUGFIX #16: only fire if liquidity was actually reported. Missing
           // liquidity field is a data gap, not a real $0 pool.
@@ -3742,7 +3916,7 @@ async function checkOpenPositions() {
           }
 
           
-          // ── SHADOW MODE: close matching shadow trade ───────────��──────────
+          // ── SHADOW MODE: close matching shadow trade ──────��────��──────────
           if (trade.tradingMode !== "live") {
             closeShadowTrade(trade.tokenAddress, currentPrice, finalPnlPct!, reason).catch(() => {});
           }
@@ -4046,6 +4220,12 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       open,
       closed: closed.slice(-50), // last 50 only to keep response lean
     });
+  });
+
+  // Persistent proving-ground tally (survives restarts). Read this to decide
+  // whether the strategy has a REAL edge before risking more than 0.05 SOL.
+  app.get("/api/shadow/stats", (_req, res) => {
+    res.json(shadowLedgerSummary());
   });
 
   app.post("/api/shadow/toggle", (req, res) => {
