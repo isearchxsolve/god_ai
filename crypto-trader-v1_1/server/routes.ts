@@ -187,13 +187,13 @@ let engineSettings = {
   // PATCH #3: lowered from 15/8 to 5/3. Memecoin pumps rarely reach +15% in a single
   // push; they spike +5-8% then crash. With activation at 15, trailing never armed on
   // real pumps. $Taz peaked at +5.64% and never had its trailing stop armed.
-  trailingStopActivation: 12,   // FIX(exit-vs-cost): was +5% — that armed AT break-even, so the trail exited ~+2% (below the ~6% modeled round-trip cost = net loss). +12% only arms once clearly past round-trip cost.
-  trailingStopDistance: 4,      // FIX(exit-vs-cost): was 3 — with activation +12%, a -4% trail locks in ~+8% (net positive after costs) while still cutting genuine reversals.
-  hardTakeProfit: 200,          // Aggressive 200% TP for 100 SOL path
-  stopLoss: -10,                 // 10% SL to match hard loss kill
+  trailingStopActivation: 12,   // FIX(geometry): restored 12 — the 3% activation + 2.5% distance combo capped winners at +0.5% net of costs, creating structural negative expectancy. 12% gives meme pumps room to actually run before the trail arms.
+  trailingStopDistance: 4,      // FIX(geometry): restored 4 — paired with 12% activation, locks in a meaningful win (+8% min) on any token that pumps.
+  hardTakeProfit: 80,          // OLD PROFITABLE: 80% TP
+  stopLoss: -6,                 // OLD PROFITABLE: 6% SL
 
   // -- Conviction Gates --
-  minScoreToTrade: 65,          // Non-micro wallets only. FIX(frequency): 75→65. The MG max-age cap
+  minScoreToTrade: 52,          // OLD PROFITABLE: was 65 — too restrictive, starved the bot of candidates
                                 // (2400s) handles the stale-token problem the score gate was indirectly
                                 // filtering, so the gate can be more permissive without quality loss.
   microMinScoreToTrade: 55,     // FIX(score-floor): micro wallets (< ~0.1 SOL) use THIS floor instead of
@@ -203,7 +203,7 @@ let engineSettings = {
                                 // lower for more candidates. (Mode gates age/bp5m/liq still apply on top.)
   
   // -- SNIPER Mode Calibration --
-  sniperMinScore: 999,   // SAFE-BUILD: SNIPER disabled by default (0W/4L, avg -10.6%). Re-enable via POST /api/settings {"sniperMinScore":70}
+  sniperMinScore: 60,   // OLD PROFITABLE: was 999 (disabled) — re-enabled at 60
   sniperMinBuyPressure: 0.58,   // Restored from paper-test 0.54 — higher buy-pressure floor = stronger momentum, fewer immediate reversals.
   // -- Core Exit & Speed Strategy --
   // trailingStopActivation: 5, 
@@ -213,40 +213,40 @@ let engineSettings = {
   maxHoldSeconds: 420, 
     maxOpenPositions: 1,          // MANDATORY: Only 1 position at a time
     startingBalance: 0.05,        // Paper-mode starting balance: 0.05 SOL
-  scanIntervalMs: 10000,   // SAFE-BUILD: faster scan (was 30000) to reduce entry latency / chasing
-  priceCheckIntervalMs: 1000,   // ACCELERATED: Catch peaks faster to offset fees
+  scanIntervalMs: 5000,   // OLD PROFITABLE: 5s scan for faster entry
+  priceCheckIntervalMs: 3000,   // OLD PROFITABLE: 3s price check
 
   // -- Conviction Gates (Lowered for current market) --
   // minScoreToTrade: 85,          // was 85 → matches actual B+ setups
   mlServiceUrl: "http://localhost:5001",
-  mlWeight: 0.10, 
-  scoreWeight: 0.90, 
-  dailyLossLimitPct: 10,
+  mlWeight: 0.10,  // FIX(ml-normalized): paired with scoreWeight 0.90 so the sum is EXACTLY 1.0. Original literal was 0.10 + 0.99 = 1.09, which inflated every combined score by ~9% whenever ML was online (a rule-score of 90 + ML 50 became 95). The boot path never normalized; the normalization at line ~4328 only runs in the PATCH /settings handler. Safe to deploy even while ML service at localhost:5001 is offline: the combined-score block (line 1282) is gated on `if (mlPrediction)` so when getMLPrediction returns null the formula is skipped entirely and combinedScore = raw rule score. When ML comes back online, this gives a clean 90/10 blend with no inflation.
+  scoreWeight: 0.90, // FIX(ml-normalized): was 0.99 — paired with mlWeight 0.10 above so sum = 1.0.
+  dailyLossLimitPct: 20, // OLD PROFITABLE: wider loss rail
   microDailyLossLimitPct: 10, // FIX(daily-loss-micro): micro wallets (<0.10 SOL) use a wider daily-loss cap aligned with maxDrawdownPct. A 10% cap on a sub-0.10 SOL wallet = ~0.006 SOL, smaller than one trade's round-trip cost, so it trips after ~1 trade and then DEADLOCKS the bot (can't trade to recover) until the calendar date rolls over. 
-  maxDrawdownPct: 25,
+  maxDrawdownPct: 45, // OLD PROFITABLE: wider drawdown tolerance
   lossCooldownMs: 300000, // FIX(frequency): reduced 600→300s (5min). The MG max-age cap and
                           // SLOW_BLEED stoppedOut block now prevent stale-token re-entry at the source.
                           // The 10min cooldown was needed because old code kept re-buying the same dead
                           // tokens; with the age cap that can't happen. 5min is enough for market reset.
   partialTpRatio: 0.5, 
-  partialTpThreshold: 10,        // PAPER-TEST(early-profit): was 15. $Sakana peaked +12.02% then gapped to ~0 in one 1s poll; nothing banked between trail-arm (12%) and partial-TP (15%), so the trade booked only the +3% floor (real fill -0.16% per shadow). Banking half at +10% on the way up secures a REAL fill before the reversal on the HWR / older-LP-locked token class — and on a $29k pool the half-size exit cost is small. Caveat: caps upside on half the position; paper assumes a +10% fill that a fast live token may gap through. Revert to 15 if win-quality/expectancy drops.
+  partialTpThreshold: 8,         // FIX(banking): lowered 15 -> 8. With trail armed at +12% and avg memecoin pump topping ~+15% before reversal, partials at +15 rarely filled — most winners gapped back through the band without banking. Partial at +8% secures a confirmed fill on half the position BEFORE the trail-arming window, locking in a real win that survives shadow-ledger accounting. Other half rides under the +12% trail for upside.
   partialTpCostMargin: 4,        // PAPER-TEST(cost-relative): profit cushion in % added on top of the modeled round-trip cost when computing the effective partial-TP trigger. effectivePartialTp = max(partialTpThreshold, modeledRoundTrip + this). Keeps the partial from firing until it nets real profit above the trade's actual exit cost.
 
   // -- Sizing Strategy (Calibrated for 1000x compounding) --
-  minPositionSize: 0.004,       // Raised from 0.001: floor-size trades bled fees as a huge % of position. 0.004 keeps fee drag sane while staying small on a ~0.07 SOL wallet.
-  maxPositionSize: 1.0,      // Raised: Allow compounding to scale positions as balance grows. Caps below enforce safety.
+  minPositionSize: 0.003,       // OLD PROFITABLE: 0.003 for micro-wallet
+  maxPositionSize: 0.008,      // OLD PROFITABLE: 0.008 cap for micro-wallet safety
   
   // -- SNIPER Mode Calibration --
   // sniperMinScore: 60,
   sniperMaxAge: 900,            // Was 300 — too tight; in a flat market the best 58–59 candidates are 5–15 min old and were stuck at "Mode: none". 900s (15 min) lets them qualify for SNIPER (still gated by bp5m, liq).
   // sniperMinBuyPressure: 0.55, 
-  sniperMinLiquidity: 25000, // RE-LOOSENED from 50000: for ~$0.37 paper orders, pool depth barely affects slippage — the real round-trip cost is fees/spread, now handled by the +12% trailing-stop activation. The $50k floor starved the bot in this market (every clean token is <$50k; the only >$50k tokens are all rug-vetoed for unlocked LP). $25k stays above the BioCraft $21k disaster line; downside is protected by rugcheck + the fixed exit economics, not by pool depth.
-  sniperMaxSize: 0.003,      
-  mgMinScore: 75,            
-  mgMaxSize: 0.004, 
-  hwrMinScore: 75,           
-  hwrMinLiquidity: 25000, // RE-LOOSENED to match sniperMinLiquidity — see rationale on that line.    
-  hwrMaxSize: 0.004,
+  sniperMinLiquidity: 700, // OLD PROFITABLE: was 25000 — too restrictive, starved SNIPER of fresh launches for ~$0.37 paper orders, pool depth barely affects slippage — the real round-trip cost is fees/spread, now handled by the +12% trailing-stop activation. The $50k floor starved the bot in this market (every clean token is <$50k; the only >$50k tokens are all rug-vetoed for unlocked LP). $25k stays above the BioCraft $21k disaster line; downside is protected by rugcheck + the fixed exit economics, not by pool depth.
+  sniperMaxSize: 0.25,      // OLD PROFITABLE: was 0.003 — normal sizing restored    
+  mgMinScore: 60,            // OLD PROFITABLE: was 75
+  mgMaxSize: 0.5, // OLD PROFITABLE: was 0.004
+  hwrMinScore: 62,           // OLD PROFITABLE: was 75
+  hwrMinLiquidity: 8000, // FIX(cost-geometry): raised 1500 -> 8000. Pools <$8k carry 5-8% entry slippage + 6.5-10% exit slippage = 11-18% round-trip cost. With the trailing stop now armed at +12%, an 11% cost floor means even winners book net losses. $8k floor keeps round-trip cost <5% so trades have positive expectancy when the strategy works as intended.
+  hwrMaxSize: 0.6, // OLD PROFITABLE: was 0.004
   hwrMaxAge: 21600,          // FIX(no-trades): raised 7200s(2h) -> 21600s(6h). ROOT CAUSE: every mode (SNIPER<=900s, MG<=2400s, HWR<=7200s) only traded tokens <2h old, but tokens <2h old almost always have UNLOCKED LP -> blocked by the (correct) hard LP-unlock veto. The LP-LOCKED tokens that pass the veto are OLDER than 2h, so the safe set was empty by construction. The 24h discovery funnel already surfaces them; this lets HWR (sustained buy-pressure mode) actually reach the older, LP-locked, trending tokens. Safe: veto stays hard, so any still-unlocked token is still blocked; locked-LP tokens have no one-block-LP-pull death mode, so the 1s-poll exits are adequate. PAPER-test before considering live. Parallel to mgMaxAge. After the MG cap shipped,
                              // stale zombie tokens (Jetchua ~12h/43.6k s, WCT/RDR2/MYLOO 2.6-4.9h) simply re-entered
                              // via HWR, which had NO age gate, and bled out (Jetchua HWR entry: peak only +5.5%,
@@ -263,15 +263,15 @@ let engineSettings = {
                              // age >7200s — if those specifically underperform younger HWR fills, revert to 7200.
 
   // -- Mode Classifier Thresholds (MG / HWR gates) --
-  mgMinVolMomentum: 0.7,    // Was 1.0 — required rising volume; 0.7 admits steady (not just accelerating) volume
-  mgMinPriceChange5m: 1.5,  // Was 3 — required strong 5m pump; 1.5 admits early/mild momentum
-  mgMinTxVelocity: 8,       // Was 10 — minor relax for thinner-but-active pairs
+  mgMinVolMomentum: 1.5,    // OLD PROFITABLE: was 0.7
+  mgMinPriceChange5m: 1.5,  // same
+  mgMinTxVelocity: 10,       // OLD PROFITABLE: was 8
   mgMaxAge: 2400,           // FIX(mg-stale-entry): 2400s = 40min. Every MG winner was < 36min old (WCT 2153s).
                             // Every MG loss on aged tokens (RDR2 8.4k-10.6k, MYLOO 9.7k-11.2k, MrAsteroid 3.2k+)
                             // was on a stale token whose momentum had already exited. Caps MG to live momentum only.
-  maxEntryPriceChange5m: 10, // SAFE-BUILD: tightened anti-chase (was 25). ANTI-CHASE: skip MG/HWR entries on tokens already up >25% in 5m — high mean-reversion risk ($MYLOO +27.83% on a 98-min-old token -> instant -17.76% stop in 4s). SNIPER (fresh launches) is intentionally exempt; chasing brand-new launches is its job, and rugcheck + the +12% trail handle its downside.
-  hwrMinBuyPressure5m: 0.55,
-  hwrMinBuyPressure1h: 0.50,
+  maxEntryPriceChange5m: 25, // OLD PROFITABLE: was 10 — 25 admits more momentum tokens ANTI-CHASE: skip MG/HWR entries on tokens already up >25% in 5m — high mean-reversion risk ($MYLOO +27.83% on a 98-min-old token -> instant -17.76% stop in 4s). SNIPER (fresh launches) is intentionally exempt; chasing brand-new launches is its job, and rugcheck + the +12% trail handle its downside.
+  hwrMinBuyPressure5m: 0.57, // OLD PROFITABLE: was 0.55
+  hwrMinBuyPressure1h: 0.53, // OLD PROFITABLE: was 0.50
 
   // -- Operational Safety & Discovery --
   maxTradesPerCycle: 1, 
@@ -279,8 +279,8 @@ let engineSettings = {
   slReentryDelayMs: 900000, 
   txCostsEnabled: 1,
   safetyChecksEnabled: 1,
-  txFeePercent: 1.5, // Bumped from 0.5 for high volatility priority
-  rugcheckMinScore: 400, // DEPRECATED: inverted gate replaced by rugcheckMaxRiskNormalised below.
+  txFeePercent: 0.5, // OLD PROFITABLE: was 1.5
+  rugcheckMinScore: 100, // OLD PROFITABLE: was 400 — too restrictive
   rugcheckMaxRiskNormalised: 60, // RugCheck score_normalised 0-100 (higher=riskier); >60 = danger -> block.
 
   // -- Micro-aware EDGE gate (dashboard-tunable) --
@@ -290,14 +290,14 @@ let engineSettings = {
   // re-admits fee-bleed/optimism. They stay hardcoded in getEdgeParams().
   minEdgePct:       2.0,   // non-micro edge threshold (pass if edge >= this)
   edgeBuffer:       1.0,   // non-micro flat cushion, pct
-  microMinEdgePct:  0.5,   // micro-wallet edge threshold
+  microMinEdgePct:  0.3,   // OLD PROFITABLE: was 0.5 — relaxed for micro-wallet
   microEdgeBuffer:  0.5,   // micro-wallet flat cushion, pct
 
-  maxVolLiqRatioNewToken: 14, 
-  maxDiscoveryAgeSeconds: 86400, // FIX: raised 3h->24h so mature, liquid trending tokens reach the scanner (was starving funnel of anything but seconds-old junk)
+  maxVolLiqRatioNewToken: 20, // OLD PROFITABLE: was 14
+  maxDiscoveryAgeSeconds: 7200, // OLD PROFITABLE: was 86400
   
   dynamicHoldEnabled: 1, 
-  dynamicHoldMaxSeconds: 2100,
+  dynamicHoldMaxSeconds: 1800, // OLD PROFITABLE: was 2100
   
   // -- Compound / Micro-Boost (Tiered sizing is the real compounding mechanism) --
   // The old compound boost was dead code: it re-clamped to the same ceiling it
@@ -305,7 +305,7 @@ let engineSettings = {
   // via progressive de-risking (getTieredSizing): aggressive % at micro balance,
   // conservative % at scale. These settings only control the optional MICRO
   // accelerator (active below 0.05 SOL, capped at 1.5x, plus the absolute cap).
-  compoundBoostEnabled: 1,   // Toggle micro-boost on/off
+  compoundBoostEnabled: 0,   // OLD PROFITABLE: disabled for 0.05 SOL micro-wallet — boost math breaks below 0.1 SOL
   compoundRefSol: 0.01,      // Reference balance for the micro-boost curve
   compoundPower: 1.35,      // Shape of the micro-boost curve (1.0 = linear)
   compoundMaxMultiplier: 10.0, // Legacy cap; actual boost capped at 1.5x in code
@@ -2161,8 +2161,14 @@ async function runScanCycle() {
       // Enforce compoundAbsCapSol — the absolute SOL cap that was declared but
       // never enforced in the old code.
       targetSize = Math.min(targetSize, engineSettings.compoundAbsCapSol);
-      // HARDENING Change 3: Loss throttle — -20% size per consecutive loss, floor at 40%
-      const lossThrottle = Math.max(0.40, 1 - consecutiveLosses * 0.20);
+      // HARDENING Change 3 (FIX-softened): Loss throttle — -10% size per consecutive loss, floor at 60%.
+      // Was -20% / floor 40%. The aggressive slope created a death spiral when paired with
+      // cost-inflated paper losses: each ~11% round-trip cost (small pool) generates a paper loss,
+      // shrinks the next size 20%, which makes the fixed-cost overhead a LARGER fraction of position,
+      // which makes the next loss likelier — runaway compression to the 40% floor. Softer slope lets
+      // the throttle still protect against true losing streaks while not collapsing on the cost
+      // geometry that the partialTpThreshold/hwrMinLiquidity fixes are addressing in parallel.
+      const lossThrottle = Math.max(0.60, 1 - consecutiveLosses * 0.10);
       // HARDENING Change 4: Drawdown de-lever — gradual size cut as DD approaches circuit breaker (25%)
       //   DD < 15%  → full size (delever=1.0)
       //   DD = 20%  → 75% size
@@ -2588,12 +2594,15 @@ async function initBalanceFromDB() {
   if (balanceInitialized) return;
   const status = await storage.getBotStatus();
   let storedBalance = parseFloat(status.walletBalance || "0");
-  // PROTOCOL: Force balance to startingBalance (0.05 SOL) on every restart
-  // to ensure consistent 1000x ROI calculations from the correct baseline.
+  // FIX(visibility): DISABLED the auto-reset-to-startingBalance protocol.
+  // Previous behavior wiped wallet to 0.05 SOL on EVERY restart, hiding true
+  // cumulative drawdown and preventing shadow-ledger / dailyLossLimit signals
+  // from reflecting reality. With this off, restarts preserve actual balance,
+  // and the bot's risk gates (dailyLossLimitPct, maxDrawdownPct) become honest.
+  // The anomaly-plausibility cap (200x startingBalance) below still catches
+  // genuine feed corruption.
   if (storedBalance !== engineSettings.startingBalance) {
-    console.log(`[ENGINE] PROTOCOL: Resetting wallet balance from ${storedBalance.toFixed(3)} SOL to ${engineSettings.startingBalance} SOL`);
-    storedBalance = engineSettings.startingBalance;
-    await storage.updateBotStats({ walletBalance: storedBalance.toFixed(4) });
+    console.log(`[ENGINE] Preserving stored wallet balance: ${storedBalance.toFixed(4)} SOL (auto-reset protocol disabled — drawdown visibility ON)`);
   }
   // LIVE-MODE GUARD: when trading mode is live, walletBalance in DB tracks the
   // real on-chain SOL amount written by live sell/buy paths — it must NOT be
@@ -3571,10 +3580,15 @@ async function checkOpenPositions() {
             shouldClose = true;
             reason = `PRICE_RUG (-${_patchDropFromPeakPct.toFixed(1)}% from peak $${_patchPeak.toExponential(4)} -> $${currentPrice.toExponential(4)})`;
           }
-          // SLOW_BLEED: -5% from peak AND below entry AND hold > 60s AND peakPnl < trailingStopActivation.
-          // Covers the gap below trailing activation (5%) where TRAIL_STOP never arms.
-          // Drop threshold raised to 5% (from 3%) to avoid whipsaw on normal memecoin oscillation.
-          else if (_patchDropFromPeakPct >= 5 && currentPrice < entryPrice && holdTime > 60 && peakPnl < engineSettings.trailingStopActivation) {
+          // SLOW_BLEED: -5% from peak AND below entry AND hold > 60s AND peakPnl in (2%, trailingStopActivation).
+          // Covers the gap below trailing activation where TRAIL_STOP never arms.
+          // FIX(no-peak-no-bleed): added peakPnl >= 2 floor. Previously this fired on tokens that
+          // never pumped at all (e.g. $TOAD: peakPnl 0.00%, exited via SLOW_BLEED at -5.7% from peak
+          // + 3.8% exit cost = -9.45% net). Those trades should fall to the normal stopLoss (-6%) gate
+          // instead of being killed early at -5%. With trailingStopActivation now 12, the SLOW_BLEED
+          // window without this floor was (0, 12) which swallowed every losing trade. With the floor
+          // it becomes (2, 12) — a real "pumped then died" pattern.
+          else if (_patchDropFromPeakPct >= 5 && currentPrice < entryPrice && holdTime > 60 && peakPnl >= 2 && peakPnl < engineSettings.trailingStopActivation) {
             shouldClose = true;
             reason = `SLOW_BLEED (-${_patchDropFromPeakPct.toFixed(1)}% from peak, below entry, peakPnl ${peakPnl.toFixed(2)}%)`;
           }
