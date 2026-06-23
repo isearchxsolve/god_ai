@@ -299,17 +299,18 @@ let engineSettings = {
   dynamicHoldEnabled: 1, 
   dynamicHoldMaxSeconds: 1800, // OLD PROFITABLE: was 2100
   
-  // -- Compound / Micro-Boost (Tiered sizing is the real compounding mechanism) --
-  // The old compound boost was dead code: it re-clamped to the same ceiling it
-  // multiplied, so it never increased position size. Compounding now happens
-  // via progressive de-risking (getTieredSizing): aggressive % at micro balance,
-  // conservative % at scale. These settings only control the optional MICRO
-  // accelerator (active below 0.05 SOL, capped at 1.5x, plus the absolute cap).
-  compoundBoostEnabled: 0,   // OLD PROFITABLE: disabled for 0.05 SOL micro-wallet — boost math breaks below 0.1 SOL
-  compoundRefSol: 0.01,      // Reference balance for the micro-boost curve
-  compoundPower: 1.35,      // Shape of the micro-boost curve (1.0 = linear)
-  compoundMaxMultiplier: 10.0, // Legacy cap; actual boost capped at 1.5x in code
-  compoundAbsCapSol: 10.0,  // Hard absolute SOL ceiling on any single position
+  // -- Compound Boost --
+  // When enabled, position sizes scale super-linearly as the portfolio grows past
+  // compoundRefSol. Formula: min(compoundMaxMultiplier, max(1, (portfolio/ref)^power))
+  //   portfolio = compoundRefSol  → multiplier = 1  (same as today)
+  //   portfolio = 1.0 SOL         → multiplier ≈ 1.8x
+  //   portfolio = 2.0 SOL         → multiplier ≈ 3.2x  (capped at 5x)
+  // Keep DISABLED until avgShadow turns consistently positive. Flip to 1 to activate.
+  compoundBoostEnabled: 0,      // 0 = off (safe default), 1 = on
+  compoundRefSol: 0.5,          // Baseline — matches your paper starting balance
+  compoundPower: 1.35,          // Super-linear growth shape
+  compoundMaxMultiplier: 5.0,   // Hard cap: never more than 5× base size
+  compoundAbsCapSol: 1.0,       // Absolute SOL ceiling per trade
 };
 
 let liveCandidatesCache: any[] = [], lastScanTime = 0;
@@ -1113,11 +1114,14 @@ function getTieredSizing(totalPortfolioSol: number): { pct: number; boost: numbe
   // Capped at 1.5x ��� enough to clear MIN_TRADE_SIZE_SOL on the first few
   // trades without taking on the geometric risk of the old 10x uncapped boost.
   let boost = 1.0;
-  if (engineSettings.compoundBoostEnabled && totalPortfolioSol < 0.05) {
+  if (engineSettings.compoundBoostEnabled) {
+    // Full compound boost: scales super-linearly once portfolio exceeds compoundRefSol.
+    // At ref (0.5 SOL): 1x. At 1 SOL: ~1.8x. At 2 SOL: ~3.2x. Hard cap: 5x.
+    // Keep disabled (compoundBoostEnabled=0) until avgShadow is consistently positive.
     const ref = Math.max(0.01, engineSettings.compoundRefSol);
     const ratio = totalPortfolioSol / ref;
     const raw = Math.pow(ratio, engineSettings.compoundPower);
-    boost = Math.min(1.5, Math.max(1.0, raw));
+    boost = Math.min(engineSettings.compoundMaxMultiplier, Math.max(1.0, raw));
   }
   // Progressive de-risking: size as % of balance shrinks as balance grows.
   // A 55% loss at 0.01 SOL is 0.0055 SOL (trivial). A 55% loss at 10 SOL is
@@ -2080,8 +2084,12 @@ async function runScanCycle() {
           hardBlockedAddresses.set(addr, Date.now()); 
           continue; 
       }
-      if (PUMPFUN_DEXES.has(pairDex) && openPumpfunCount >= cycleMaxPositions) {
-          console.log(`[GATE] SKIP $${candidate.tokenSymbol} — Pumpfun concentration limit reached (${cycleMaxPositions}).`);
+      // PUMPFUN CONCENTRATION GUARD: hard-cap at 1 open pumpfun/pumpswap position at a time
+      // regardless of wallet size or cycleMaxPositions. Pump.fun tokens are highly correlated —
+      // if the narrative dies, all open pumpfun positions die together. Limiting to 1 prevents
+      // correlated wipeouts (e.g. two pumpswap tokens rugging simultaneously = -60% in one cycle).
+      if (PUMPFUN_DEXES.has(pairDex) && openPumpfunCount >= 1) {
+          console.log(`[GATE] SKIP $${candidate.tokenSymbol} — Pumpfun concentration limit reached (1 open pumpfun/pumpswap max, currently ${openPumpfunCount}).`);
           continue;
       }
       
@@ -2808,7 +2816,7 @@ function getEffectiveMinScore(isMicroWallet: boolean = false): number {
 const FORCE_SELL_INTERVAL_MS  = 15_000;          // FIX 5: retry interval for persistent liquidation
 const MAX_FORCE_SELL_TIME_MS  = 5 * 60_000;       // FIX 5: max 5-minute liquidation window
 
-// ─────────────��───────────────────────────────────────────────────────────────
+// ─────────���───��───────────────────────────────────────────────────────────────
 // FIX 5: Persistent forced-liquidation loop.
 //
 // When a normal sell exhausts its retry budget (sellFailureStrikes > MAX_SELL_FAILURES)
@@ -2925,7 +2933,17 @@ async function checkOpenPositions() {
               const _patchRugData = await _patchRugResp.json() as any;
               const _patchRisks = Array.isArray(_patchRugData?.risks) ? _patchRugData.risks : [];
               const _patchHasFreeze = _patchRisks.some((r: any) => String(r?.name || "").toLowerCase().includes("freeze authority"));
-              const _patchHasLpUnlocked = _patchRisks.some((r: any) => String(r?.name || "").toLowerCase().includes("lp unlocked"));
+              // RELAX_GRADED_LP_VETO_LIVE: if set, skip ALL LP unlock checks mid-hold.
+              // Rationale: the entry veto already admitted this token knowing it has an LP unlock flag.
+              // The mid-hold rugcheck fetches a fresh API response which may return "LP Unlocked"
+              // (absolute) or "Large Amount of LP Unlocked" (graded) — both should be suppressed
+              // when RELAX mode is active, because we consciously accepted LP-unlock risk at entry.
+              // Previous version only skipped the "graded" variant but the API sometimes returns
+              // the plain "LP Unlocked" name for the same token, causing phantom mid-hold exits.
+              const _patchRelaxGraded = String(process.env.RELAX_GRADED_LP_VETO_LIVE || "").toLowerCase() === "true";
+              const _patchHasLpUnlocked = _patchRelaxGraded
+                ? false  // LP unlock was accepted at entry — do NOT re-exit mid-hold for same reason
+                : _patchRisks.some((r: any) => String(r?.name || "").toLowerCase().includes("lp unlocked"));
               const _patchHasSingleHolder = _patchRisks.some((r: any) => String(r?.name || "").toLowerCase().includes("single holder ownership"));
               if (_patchHasFreeze || _patchHasLpUnlocked || _patchHasSingleHolder) {
                 console.warn(`[MID-HOLD-RISK] #${trade.id} $${trade.tokenSymbol} — exit triggered by mid-hold rugcheck: freeze=${_patchHasFreeze} lpUnlocked=${_patchHasLpUnlocked} singleHolder=${_patchHasSingleHolder}`);
