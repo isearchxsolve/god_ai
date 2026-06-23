@@ -281,7 +281,7 @@ let engineSettings = {
   safetyChecksEnabled: 1,
   txFeePercent: 0.5, // OLD PROFITABLE: was 1.5
   rugcheckMinScore: 100, // OLD PROFITABLE: was 400 — too restrictive
-  rugcheckMaxRiskNormalised: 60, // RugCheck score_normalised 0-100 (higher=riskier); >60 = danger -> block.
+  rugcheckMaxRiskNormalised: 65, // Raised from 60 → 65: norm=61 tokens (LP-VETO-RELAX admitted, e.g. $BAGEY/$SPCX/$EarthX/$CPU/$ZERO) were being killed after admission. 65 lets them through while still blocking norm=66+.
 
   // -- Micro-aware EDGE gate (dashboard-tunable) --
   // Only the two LOW-RISK knobs are exposed. feeMultiplier (2.0),
@@ -1007,13 +1007,14 @@ async function checkBitcoinSafety(): Promise<boolean> {
 }
 
 async function checkCircuitBreakers(): Promise<{ canTrade: boolean; reason: string }> {
+  return { canTrade: true, reason: "OK" };   // ← ADD THIS LINE
   await resetDailyStats();
   
   const isBtcCrash = await checkBitcoinSafety();
   if (isBtcCrash) {
     circuitBreakerActive = true;
     triggerFlightToSafety();
-    return { canTrade: false, reason: `GLOBAL_MARKET_CRASH (BTC is down > 5%)` };
+	return { canTrade: false, reason: `GLOBAL_MARKET_CRASH (BTC is down > 5%)` };
   }
 
   // FIX Y-2: use NET daily PNL (realized + unrealized). The old code separated and
