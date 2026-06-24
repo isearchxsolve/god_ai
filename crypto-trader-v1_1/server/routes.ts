@@ -7,6 +7,16 @@ import { JupiterService, createJupiterService, SOL_MINT, MIN_FEE_BUFFER_SOL,getL
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { join as pathJoin } from "path";
 import { startHeartbeat, isHalted, healthState } from "./runtime-hooks";
+import { setDefaultResultOrder as __setDnsResultOrder } from "node:dns";
+
+// AI-FIX(2026-06-24): Force IPv4-first DNS resolution. Node 17+ defaults to "verbatim"
+// (AAAA/IPv6 returned first); on hosts without working IPv6, undici fetch() to
+// public-api.birdeye.so stalls until the AbortSignal timeout fires, while curl (IPv4)
+// returns in <1s. This silently disabled EVERY Birdeye call — smart-money top_traders
+// ("aborted due to timeout") AND the discovery tokenlist feed (bdVol=0 on every scan).
+// Restoring ipv4first makes Node take the same fast path curl uses. Process-wide DNS
+// preference only; no other behavior changes.
+try { __setDnsResultOrder("ipv4first"); } catch { /* no-op on older runtimes */ }
 
 // ── MULTIPLIER & STAGING CACHES ──
 const SEARCH_QUERIES = [
@@ -279,9 +289,9 @@ let engineSettings = {
   // hardTakeProfit: 80, 
   // stopLoss: -6,
   maxHoldSeconds: 420, // old profitable 
-    maxOpenPositions: 1, // old profitable: one position at a time          // MANDATORY: Only 1 position at a time
+    maxOpenPositions: 3, // FREQ(2026-06-24): 1 -> 3. Parallelism is the #1 frequency lever and costs ZERO entry quality. Total exposure is still bounded by maxTotalExposure (~maxPositionSize*2, see ~L2670), so 3 slots just split the SAME capital into smaller, more numerous trades — more frequency, same aggregate risk. Self-caps in live by balance/exposure.
     startingBalance: 0.05,        // Paper-mode starting balance: 0.05 SOL
-  scanIntervalMs: 30000, // old profitable: slower scan / less churn   // OLD PROFITABLE: 5s scan for faster entry
+  scanIntervalMs: 10000, // FREQ(2026-06-24): 30000 -> 10000. Hunt for entries every 10s instead of 30s (3x cadence). Same entry gates, so no quality change — just less idle waiting between scans. Birdeye rate-limit is fine (top_traders cached 120s; 300 req/min tier).
   priceCheckIntervalMs: 1000, // old profitable: faster exit checks   // OLD PROFITABLE: 3s price check
 
   // -- Conviction Gates (Lowered for current market) --
@@ -308,12 +318,12 @@ let engineSettings = {
   // sniperMinScore: 60,
   sniperMaxAge: 900, // AI-TUNE(2026-06-24) re-raised 300→900: live test showed every score=88-92 quality candidate (Joke, SpaceX, TACO, POKESHARDS) was 343-469s old, blocked by 300s SNIPER cap AND chase guard simultaneously. SNIPER is chase-exempt by design (line 1381 qualifier has no chase check); raising the age window lets these qualify as SNIPER, hit edge-pocket (SNIPER+score>=80), and trade. Still gated by bp5m>=0.65, liq>=10000, single-holder rug veto. Was 300 — too tight; in a flat market the best 58–59 candidates are 5–15 min old and were stuck at "Mode: none". 900s (15 min) lets them qualify for SNIPER (still gated by bp5m, liq).
   // sniperMinBuyPressure: 0.55, 
-  sniperMinLiquidity: 60000, // MC(2026-06-24): raised 20000 -> 60000. Calibrated Monte Carlo (reproduces live win 42.1%/EV -0.24%) shows the ~3.76% round-trip spread at $20k is the dominant per-trade drag; $60k cuts RT cost to ~2.25% and lifts modeled EV from +4.9% to +7.5%/trade, robust even under maturity-dampening. Gains plateau past $60k. Score>=90 entry gate deferred until win-rate-by-score is logged (unanchored + starves flow). // old profitable non-micro setting // OLD PROFITABLE: was 25000 — too restrictive, starved SNIPER of fresh launches for ~$0.37 paper orders, pool depth barely affects slippage — the real round-trip cost is fees/spread, now handled by the +12% trailing-stop activation. The $50k floor starved the bot in this market (every clean token is <$50k; the only >$50k tokens are all rug-vetoed for unlocked LP). $25k stays above the BioCraft $21k disaster line; downside is protected by rugcheck + the fixed exit economics, not by pool depth.
+  sniperMinLiquidity: 25000, // AI-TUNE(2026-06-24e): 40000 -> 25000. NEEDLE-MOVER: re-enables the only EMPIRICALLY-positive pocket. EDGE-POCKET realized data = SNIPER+score>=80 -> +3.06%/trade (n=63, +159.8% growth); MG/HWR are net-negative and stay excluded by EDGE_POCKET_ONLY. The 40-60k floor was set by a Monte Carlo model that predicted +7.5%/trade but live shadow is -0.78% (model falsified). The 40k floor excluded ~every high-score SNIPER candidate (live: $man s89/$3k, $Yippee s92/$17k, $EPSTEINZE s84/$22k). 25k = documented old-profitable floor, still ABOVE the BioCraft $21k disaster line; the +3.06% pocket was sampled at ~this floor. PAPER-mode hypothesis test; EDGE-POCKET stays ON; do NOT go live on this alone. // MC(2026-06-24): 60000 -> 40000. The $60k floor starved entries in this market (live log: strong score-79..88 candidates at $42-55k liq all rejected [liq < 60000], nothing qualified). $40k is the pre-identified fallback: modeled EV still ~+6.7%/trade (dampened) vs +7.5% at $60k, but it admits the $48-54k cluster that actually exists right now. // MC(2026-06-24): raised 20000 -> 60000. Calibrated Monte Carlo (reproduces live win 42.1%/EV -0.24%) shows the ~3.76% round-trip spread at $20k is the dominant per-trade drag; $60k cuts RT cost to ~2.25% and lifts modeled EV from +4.9% to +7.5%/trade, robust even under maturity-dampening. Gains plateau past $60k. Score>=90 entry gate deferred until win-rate-by-score is logged (unanchored + starves flow). // old profitable non-micro setting // OLD PROFITABLE: was 25000 — too restrictive, starved SNIPER of fresh launches for ~$0.37 paper orders, pool depth barely affects slippage — the real round-trip cost is fees/spread, now handled by the +12% trailing-stop activation. The $50k floor starved the bot in this market (every clean token is <$50k; the only >$50k tokens are all rug-vetoed for unlocked LP). $25k stays above the BioCraft $21k disaster line; downside is protected by rugcheck + the fixed exit economics, not by pool depth.
   sniperMaxSize: 0.006, // old profitable      // OLD PROFITABLE: was 0.003 — normal sizing restored    
   mgMinScore: 55, // old profitable            // OLD PROFITABLE: was 75
   mgMaxSize: 0.008, // old profitable // OLD PROFITABLE: was 0.004
   hwrMinScore: 55, // old profitable           // OLD PROFITABLE: was 75
-  hwrMinLiquidity: 60000, // MC(2026-06-24): raised 20000 -> 60000. Calibrated Monte Carlo (reproduces live win 42.1%/EV -0.24%) shows the ~3.76% round-trip spread at $20k is the dominant per-trade drag; $60k cuts RT cost to ~2.25% and lifts modeled EV from +4.9% to +7.5%/trade, robust even under maturity-dampening. Gains plateau past $60k. Score>=90 entry gate deferred until win-rate-by-score is logged (unanchored + starves flow). // old profitable non-micro setting // FIX(cost-geometry): raised 1500 -> 8000. Pools <$8k carry 5-8% entry slippage + 6.5-10% exit slippage = 11-18% round-trip cost. With the trailing stop now armed at +12%, an 11% cost floor means even winners book net losses. $8k floor keeps round-trip cost <5% so trades have positive expectancy when the strategy works as intended.
+  hwrMinLiquidity: 40000, // MC(2026-06-24): 60000 -> 40000. The $60k floor starved entries in this market (live log: strong score-79..88 candidates at $42-55k liq all rejected [liq < 60000], nothing qualified). $40k is the pre-identified fallback: modeled EV still ~+6.7%/trade (dampened) vs +7.5% at $60k, but it admits the $48-54k cluster that actually exists right now. // MC(2026-06-24): raised 20000 -> 60000. Calibrated Monte Carlo (reproduces live win 42.1%/EV -0.24%) shows the ~3.76% round-trip spread at $20k is the dominant per-trade drag; $60k cuts RT cost to ~2.25% and lifts modeled EV from +4.9% to +7.5%/trade, robust even under maturity-dampening. Gains plateau past $60k. Score>=90 entry gate deferred until win-rate-by-score is logged (unanchored + starves flow). // old profitable non-micro setting // FIX(cost-geometry): raised 1500 -> 8000. Pools <$8k carry 5-8% entry slippage + 6.5-10% exit slippage = 11-18% round-trip cost. With the trailing stop now armed at +12%, an 11% cost floor means even winners book net losses. $8k floor keeps round-trip cost <5% so trades have positive expectancy when the strategy works as intended.
   hwrMaxSize: 0.008, // old profitable // OLD PROFITABLE: was 0.004
   hwrMaxAge: 21600,          // FIX(no-trades): raised 7200s(2h) -> 21600s(6h). ROOT CAUSE: every mode (SNIPER<=900s, MG<=2400s, HWR<=7200s) only traded tokens <2h old, but tokens <2h old almost always have UNLOCKED LP -> blocked by the (correct) hard LP-unlock veto. The LP-LOCKED tokens that pass the veto are OLDER than 2h, so the safe set was empty by construction. The 24h discovery funnel already surfaces them; this lets HWR (sustained buy-pressure mode) actually reach the older, LP-locked, trending tokens. Safe: veto stays hard, so any still-unlocked token is still blocked; locked-LP tokens have no one-block-LP-pull death mode, so the 1s-poll exits are adequate. PAPER-test before considering live. Parallel to mgMaxAge. After the MG cap shipped,
                              // stale zombie tokens (Jetchua ~12h/43.6k s, WCT/RDR2/MYLOO 2.6-4.9h) simply re-entered
@@ -342,7 +352,7 @@ let engineSettings = {
   hwrMinBuyPressure1h: 0.51, // old profitable // OLD PROFITABLE: was 0.50
 
   // -- Operational Safety & Discovery --
-  maxTradesPerCycle: 1, // old profitable 
+  maxTradesPerCycle: 2, // FREQ(2026-06-24): 1 -> 2. Lets the bot fill multiple of the now-3 slots without waiting a full scan cycle per entry. 
   reentryDelayMs: 60000, // old profitable // RE-ENTRY CHURN FIX: was 60s. After a flat/stagnant exit (no SL, so no 15min SL blackout) the bot re-bought the SAME token ~60-120s later as it rolled over ($Jetchua: WIN +1.96% -> re-entry #10259 -> SLOW_BLEED -9.65%, peak 0.00%). 5min lets a stalled token either resume a real trend (re-qualifies fresh) or drop off the candidate set. Score>=85 still bypasses (genuine renewed strength).
   slReentryDelayMs: 900000, // old profitable 
   txCostsEnabled: 1, // old profitable
@@ -365,7 +375,7 @@ let engineSettings = {
   maxDiscoveryAgeSeconds: 10800, // old profitable // OLD PROFITABLE: was 86400
   
   dynamicHoldEnabled: 1, // old profitable 
-  dynamicHoldMaxSeconds: 2100, // old profitable // OLD PROFITABLE: was 2100
+  dynamicHoldMaxSeconds: 1200, // FREQ(2026-06-24): 2100 -> 1200 (35min -> 20min). This is only the BACKSTOP max-hold; trailing-stop/TP/stagnation exits fire far earlier. Frees a slot sooner so a sideways token can't hog capacity. Conservative for risk (exits sooner).
   
   // -- Compound Boost --
   // When enabled, position sizes scale super-linearly as the portfolio grows past
@@ -1009,7 +1019,14 @@ async function getEffectiveBalance(): Promise<number> {
   return Math.max(0, baseBalance + openCapital);
 }
 
-let cachedSolPriceUsd = 180, lastSolPriceFetch = 0, solPriceFetchedOnce = false;
+// AI-FIX(2026-06-24j): do not fall back to stale $180 SOL when DexScreener is temporarily unavailable.
+// A bad SOL/USD basis distorts paper/shadow sizing, liquidity-in-SOL checks, and cost accounting.
+// Default to a current conservative fallback (~$70) and allow override via SOL_PRICE_FALLBACK_USD.
+const SOL_PRICE_FALLBACK_USD = (() => {
+  const v = Number(process.env.SOL_PRICE_FALLBACK_USD || "70");
+  return Number.isFinite(v) && v > 0 ? v : 70;
+})();
+let cachedSolPriceUsd = SOL_PRICE_FALLBACK_USD, lastSolPriceFetch = 0, solPriceFetchedOnce = false;
 const SOL_PRICE_CACHE_TTL_MS = 20_000;
 
 async function getLiveSolPrice(): Promise<number> {
@@ -1295,19 +1312,35 @@ async function getMLBatchPredictions(tokenMetrics: Record<string, number>[]): Pr
   } catch { return tokenMetrics.map(() => null); }
 }
 
-async function fetchTokenPrice(tokenAddress: string): Promise<{ price: number; pair: DexScreenerPair | null }> {
+async function fetchTokenPrice(tokenAddress: string, preferredPairAddress?: string): Promise<{ price: number; pair: DexScreenerPair | null }> {
   const now = Date.now();
   const cached = tokenPriceCache.get(tokenAddress);
-  if (cached && now - cached.ts < 1500) return { price: cached.price, pair: cached.pair };
+  // ROOT-CAUSE FIX(2026-06-24): when a specific discovery pool is requested, do NOT serve a
+  // cached value that may be from a different (highest-liq) pool. That pool mismatch was the
+  // root cause of phantom "Vol:$0" activity rejections and 100-230% phantom "Price drifted
+  // since scan" rejections (e.g. $AYODELE 229.7%, $PLUSH 106.1%). Cache reads are kept only for
+  // the no-preference path (exits / generic lookups).
+  if (!preferredPairAddress && cached && now - cached.ts < 1500) return { price: cached.price, pair: cached.pair };
   try {
     // UPDATED: Using Throttled Fetch
     const data = await throttledDexScreenerFetch(`https://api.dexscreener.com/latest/dex/tokens/${tokenAddress}`, 5000);
     const pairs = (data.pairs || []) as DexScreenerPair[];
     const solanaPairs = pairs.filter(p => p.chainId === "solana");
     if (solanaPairs.length === 0) return { price: 0, pair: null };
-    const validPairs = solanaPairs.filter(p => { const liq = p.liquidity?.usd || 0, vol5m = p.volume?.m5 || 0; return !(liq > 0 && vol5m > liq * 15); });
-    if (validPairs.length === 0) return { price: 0, pair: null };
-    const bestPair = validPairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
+    // Prefer the EXACT pool discovery scored. /tokens/{addr} returns every pool for a token;
+    // picking highest-liquidity often returned a different, stale/inactive pool whose price &
+    // volume diverge wildly from the pool we actually scored. Match the discovery pairAddress
+    // first; only fall back to the legacy highest-liquidity (wash-filtered) selection when the
+    // preferred pool is absent or unfindable.
+    let bestPair: DexScreenerPair | null = null;
+    if (preferredPairAddress) {
+      bestPair = solanaPairs.find(p => (p.pairAddress || "").toLowerCase() === preferredPairAddress.toLowerCase()) || null;
+    }
+    if (!bestPair) {
+      const validPairs = solanaPairs.filter(p => { const liq = p.liquidity?.usd || 0, vol5m = p.volume?.m5 || 0; return !(liq > 0 && vol5m > liq * 15); });
+      if (validPairs.length === 0) return { price: 0, pair: null };
+      bestPair = validPairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
+    }
     const result = { price: parseFloat(bestPair.priceUsd || "0"), pair: bestPair };
     if (result.price <= 0) return { price: 0, pair: null };
     tokenPriceCache.set(tokenAddress, { ...result, ts: now });
@@ -1350,8 +1383,14 @@ async function fetchTokenPriceForExit(tokenAddress: string): Promise<{ price: nu
 // ────────────────────────────────────────────────────────────────
 interface SmartMoneySignal { count: number; netBuyers: number; topRealizedPnl: number; whaleCount: number; whaleNetBuyers: number; whaleNetSellers: number; washSuspects: number; }
 const SMART_MONEY_ENABLED = !!process.env.BIRDEYE_API_KEY;
+// AI-FIX(2026-06-24d): shared Birdeye 429 cooldown. The free/Lite tier is CU-metered; once a
+// call returns 429 we stop firing Birdeye discovery until this timestamp passes (avoids burning
+// the budget + log spam). Discovery is redundant anyway (Jupiter+DexScreener cover it), so a
+// quiet backoff costs nothing.
+let birdeyeRateLimitedUntil = 0;
 const SMART_MONEY_TIMEFRAME = process.env.SMART_MONEY_TIMEFRAME || "6h";
 const SMART_MONEY_TTL_MS = 120_000;
+const SMART_MONEY_TIMEOUT_MS = Number(process.env.SMART_MONEY_TIMEOUT_MS) || 12_000; // AI-FIX(2026-06-24): was a bare inline 5000ms (tightest in file vs 8000ms elsewhere). curl returns <1s, but Node/undici IPv6-first DNS stalls were tripping the 5s abort. Widened + retry below.
 // WHALE-FOLLOWING (Layer 3b): follow top-volume wallets (whales). Enabled whenever Birdeye is configured.
 const WHALE_TRACKING_ENABLED = SMART_MONEY_ENABLED && String(process.env.WHALE_TRACKING || "true").toLowerCase() !== "false";
 const WHALE_DISTRIBUTION_SELLERS = Number(process.env.WHALE_DISTRIBUTION_SELLERS) || 3; // # of net-selling whales that triggers a distribution exit
@@ -1365,9 +1404,21 @@ async function fetchSmartMoneyConvergence(tokenAddress: string, bypassCache: boo
   if (!bypassCache && cached && Date.now() - cached.ts < SMART_MONEY_TTL_MS) return cached.data;
   try {
     const url = `https://public-api.birdeye.so/defi/v2/tokens/top_traders?address=${tokenAddress}&time_frame=${SMART_MONEY_TIMEFRAME}&sort_type=desc&sort_by=volume_usd&offset=0&limit=10`;
-    const resp = await fetch(url, { headers: { "X-API-KEY": process.env.BIRDEYE_API_KEY as string, "Accept": "application/json", "x-chain": "solana" }, signal: AbortSignal.timeout(5000) });
-    if (!resp.ok) return empty;
-    const json: any = await resp.json();
+    let json: any = null;
+    const __attempts = 2; // AI-FIX(2026-06-24): one retry on timeout/abort (none before).
+    for (let __i = 0; __i < __attempts; __i++) {
+      try {
+        const resp = await fetch(url, { headers: { "X-API-KEY": process.env.BIRDEYE_API_KEY as string, "Accept": "application/json", "x-chain": "solana" }, signal: AbortSignal.timeout(SMART_MONEY_TIMEOUT_MS) });
+        if (!resp.ok) return empty;
+        json = await resp.json();
+        break;
+      } catch (err: any) {
+        const isTransient = err?.name === "TimeoutError" || err?.name === "AbortError" || /timeout|aborted|fetch failed|ECONNRESET|ETIMEDOUT/i.test(String(err?.message || err));
+        if (__i < __attempts - 1 && isTransient) { await new Promise(r => setTimeout(r, 300)); continue; }
+        throw err;
+      }
+    }
+    if (!json) return empty;
     const items: any[] = json?.data?.items || [];
     let count = 0, netBuyers = 0, topRealizedPnl = 0;
     let whaleCount = 0, whaleNetBuyers = 0, whaleNetSellers = 0, washSuspects = 0;
@@ -1564,6 +1615,45 @@ function calcCostAwareStopPrice(entryPrice: number, mode: string | null, liq: nu
   const rawTolerance = Math.abs(engineSettings.stopLoss);
   const priceMoveTolerance = Math.max(rawTolerance, exitCostPct + 1);
   return entryPrice * (1 - priceMoveTolerance / 100);
+}
+
+// ── BIRDEYE-INDEPENDENT HOLDER/LP CONCENTRATION (RugCheck full report) ───────────────
+// AI-FIX(2026-06-24c): a free, no-paid-tier fallback rug discriminator for when the Birdeye
+// whale tape is blind (bdVol=0 / 401-403). The safety path already trusts RugCheck but only
+// hits /report/summary, which returns presence-only risk flags. The full /report adds NUMERIC
+// holder concentration + LP-lock data — the strongest STATIC rug correlate within the
+// LP-unlocked pond (arxiv 2602.13480; Solidus Labs 2025). Chosen over raw Solana RPC
+// getTokenLargestAccounts because RugCheck already excludes LP/AMM vault accounts server-side
+// (raw RPC would misread the pool vault as a whale). Defensive parsing: any missing/renamed
+// field => available=false, and the caller falls back to its verified presence-flag baseline,
+// so a response-shape mismatch can never crash or silently change behavior.
+interface RugConcentration { available: boolean; topHolderPct: number; top5Pct: number; insiderPct: number; insiderCount: number; totalHolders: number; lpLockedPct: number; }
+const rugConcentrationCache = new Map<string, { data: RugConcentration; ts: number }>();
+async function fetchRugcheckConcentration(tokenAddress: string): Promise<RugConcentration> {
+  const _empty: RugConcentration = { available: false, topHolderPct: 0, top5Pct: 0, insiderPct: 0, insiderCount: 0, totalHolders: 0, lpLockedPct: 0 };
+  const _cached = rugConcentrationCache.get(tokenAddress);
+  if (_cached && Date.now() - _cached.ts < 120_000) return _cached.data;
+  try {
+    const resp = await fetch(`https://api.rugcheck.xyz/v1/tokens/${tokenAddress}/report`, { signal: AbortSignal.timeout(5000) });
+    if (!resp.ok) { console.warn(`[RUGCHECK-CONC] $${tokenAddress.slice(0,6)} non-OK HTTP ${resp.status} on /report (full report unavailable; falling back to presence flags)`); return _empty; }
+    const r: any = await resp.json();
+    const holders: any[] = Array.isArray(r?.topHolders) ? r.topHolders : [];
+    if (holders.length === 0) return _empty;
+    const pctOf = (h: any) => Number(h?.pct ?? h?.percentage ?? 0) || 0;
+    // Exclude LP/AMM vault accounts so we measure REAL holder concentration, not pool depth.
+    const nonLp = holders.filter((h: any) => !(h?.isLp === true || h?.lp === true || String(h?.insiderType || "").toLowerCase() === "lp"));
+    const sortedPct = nonLp.map(pctOf).sort((a: number, b: number) => b - a);
+    const topHolderPct = sortedPct[0] || 0;
+    const top5Pct = sortedPct.slice(0, 5).reduce((a: number, b: number) => a + b, 0);
+    const insiders = nonLp.filter((h: any) => h?.insider === true || h?.insider === 1);
+    const insiderPct = insiders.map(pctOf).reduce((a: number, b: number) => a + b, 0);
+    const markets: any[] = Array.isArray(r?.markets) ? r.markets : [];
+    const lpLockedPct = markets.reduce((mx: number, m: any) => Math.max(mx, Number(m?.lp?.lpLockedPct ?? m?.lpLockedPct ?? 0) || 0), 0);
+    const totalHolders = Number(r?.totalHolders ?? r?.totalHolder ?? 0) || 0;
+    const data: RugConcentration = { available: true, topHolderPct, top5Pct, insiderPct, insiderCount: insiders.length, totalHolders, lpLockedPct };
+    rugConcentrationCache.set(tokenAddress, { data, ts: Date.now() });
+    return data;
+  } catch { return _empty; }
 }
 
 /** Heuristics-only token safety check used when rugcheck circuit-breaker is open.
@@ -1807,7 +1897,7 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
     // is pure noise reduction.
     try {
         const extraSourceAddrs = new Set<string>();
-        let jupVerifiedCount = 0, jupTopCount = 0, birdEyeVolCount = 0, geckoVolCount = 0;
+        let jupVerifiedCount = 0, jupTopCount = 0, birdEyeVolCount = 0, birdEyeLiqCount = 0, geckoVolCount = 0; // AI-FIX(2026-06-24h): declare Source 4 counter. V3 LIQ now returns real tokens, so the existing birdEyeLiqCount++ path executes; without this declaration it throws ReferenceError and prevents LIQ addresses from contributing.
 
         // ── Source 1: Rolling hydration of Jupiter's verified token universe.
         try {
@@ -1858,17 +1948,20 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
         } catch (e: any) { console.warn("[SRC:JUP-TOP] failed:", e?.message || e); }
 
         // ── Source 3: Birdeye top-volume tokens (uses BIRDEYE_API_KEY). 24h USD volume = real demand signal.
-        if (process.env.BIRDEYE_API_KEY) {
+        // AI-FIX(2026-06-24d): migrated /defi/tokenlist (deprecated, 400 Bad Request) -> /defi/v3/token/list
+        // with the correct V3 enum sort_by=volume_24h_usd (old v24hUSD is now invalid). Gated behind the
+        // shared 429 cooldown.
+        if (process.env.BIRDEYE_API_KEY && Date.now() >= birdeyeRateLimitedUntil) {
             try {
                 const b: any = await withTimeout(
-                    fetch("https://public-api.birdeye.so/defi/tokenlist?sort_by=v24hUSD&sort_type=desc&offset=0&limit=100&min_liquidity=10000", {
+                    fetch("https://public-api.birdeye.so/defi/v3/token/list?sort_by=volume_24h_usd&sort_type=desc&offset=0&limit=100&min_liquidity=10000", {
                         headers: { "X-API-KEY": process.env.BIRDEYE_API_KEY, "Accept": "application/json", "x-chain": "solana" },
                         signal: AbortSignal.timeout(8000),
-                    }).then(r => r.ok ? r.json() : null),
+                    }).then((r: any) => { if (!r.ok) { if (r.status === 429) birdeyeRateLimitedUntil = Date.now() + 120_000; console.warn(`[SRC:BIRDEYE-VOL] non-OK HTTP ${r.status} ${r.statusText || ""} on /defi/v3/token/list (NOT a timeout). 429=rate/CU limit (120s backoff); 400=bad params; 401/403=key.`); return null; } return r.json(); }),
                     10_000,
                     "Birdeye TopVolume"
                 ).catch(() => null);
-                const tokens = (b?.data?.tokens) || (b?.data && Array.isArray(b.data) ? b.data : null) || b?.tokens || [];
+                const tokens = (b?.data?.items) || (b?.data?.tokens) || (b?.data && Array.isArray(b.data) ? b.data : null) || b?.tokens || [];
                 if (Array.isArray(tokens)) {
                     for (const t of tokens) {
                         const addr = t?.address || t?.tokenAddress || t?.mint;
@@ -1882,17 +1975,19 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
         }
 
         // ── Source 4: Birdeye top-liquidity tokens (depth signal, different from volume). 24h liq = quality.
-        if (process.env.BIRDEYE_API_KEY) {
+        // AI-FIX(2026-06-24d): migrated to /defi/v3/token/list (sort_by=liquidity). Gated behind the shared
+        // 429 cooldown so we don't fire a second call after the volume call already got rate-limited.
+        if (process.env.BIRDEYE_API_KEY && Date.now() >= birdeyeRateLimitedUntil) {
             try {
                 const b2: any = await withTimeout(
-                    fetch("https://public-api.birdeye.so/defi/tokenlist?sort_by=liquidity&sort_type=desc&offset=0&limit=100&min_liquidity=10000", {
+                    fetch("https://public-api.birdeye.so/defi/v3/token/list?sort_by=liquidity&sort_type=desc&offset=0&limit=100&min_liquidity=10000", {
                         headers: { "X-API-KEY": process.env.BIRDEYE_API_KEY, "Accept": "application/json", "x-chain": "solana" },
                         signal: AbortSignal.timeout(8000),
-                    }).then(r => r.ok ? r.json() : null),
+                    }).then((r: any) => { if (!r.ok) { if (r.status === 429) birdeyeRateLimitedUntil = Date.now() + 120_000; console.warn(`[SRC:BIRDEYE-LIQ] non-OK HTTP ${r.status} ${r.statusText || ""} on /defi/v3/token/list (NOT a timeout). 429=rate/CU limit (120s backoff); 400=bad params; 401/403=key.`); return null; } return r.json(); }),
                     10_000,
                     "Birdeye TopLiquidity"
                 ).catch(() => null);
-                const tokens2 = (b2?.data?.tokens) || (b2?.data && Array.isArray(b2.data) ? b2.data : null) || b2?.tokens || [];
+                const tokens2 = (b2?.data?.items) || (b2?.data?.tokens) || (b2?.data && Array.isArray(b2.data) ? b2.data : null) || b2?.tokens || [];
                 if (Array.isArray(tokens2)) {
                     for (const t of tokens2) {
                         const addr = t?.address || t?.tokenAddress || t?.mint;
@@ -1918,7 +2013,7 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
                 dexResults.push(hydrated);
             } catch { /* skip chunk */ }
         }
-        console.log(`[SRC-XTRA] quality-only union=${extraAddrs.length} | jupVerified=${jupVerifiedCount} jupTop=${jupTopCount} bdVol=${birdEyeVolCount} gkVol=${geckoVolCount} (verified-set size=${jupiterVerifiedSet.size}, offset=${jupiterVerifiedHydrationOffset})`);
+        console.log(`[SRC-XTRA] quality-only union=${extraAddrs.length} | jupVerified=${jupVerifiedCount} jupTop=${jupTopCount} bdVol=${birdEyeVolCount} bdLiq=${birdEyeLiqCount} gkVol=${geckoVolCount} (verified-set size=${jupiterVerifiedSet.size}, offset=${jupiterVerifiedHydrationOffset})`);
     } catch (e: any) { console.warn("[SRC-XTRA] block failed:", e?.message || e); }
 
     const geckoAndBirdeyeResults = await Promise.all([...geckoFetches, birdEyeFetch]);
@@ -1990,7 +2085,7 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
       }
     }
 
-    // AI-TUNE(2026-06-24) QUALITY FILTERS — real, source-level levers (not relabeled quantity).
+    // AI-TUNE(2026-06-24) QUALITY FILTERS ��� real, source-level levers (not relabeled quantity).
     // Runs once per cycle over the assembled candidate pool, BEFORE dedup/scoring.
     //   1. Refresh Jupiter verified set (cached, free).
     //   2. Tag every candidate with _jupVerified so it's visible everywhere downstream.
@@ -2061,6 +2156,7 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
       return {
         ...scoring,
         tokenAddress: sp.baseToken.address,
+        pairAddress: sp.pairAddress, // ROOT-CAUSE FIX(2026-06-24): carry the EXACT discovery pool so the buy-loop re-fetch re-selects it (not a stale highest-liq pool).
         tokenSymbol: sp.baseToken.symbol,
         score: scoring.combinedScore,
         qualifiedMode: scoring.qualifiedMode,
@@ -2198,16 +2294,92 @@ async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair): Pr
     });
     const _gradedLpRisk = _risks.find((r: any) => _vetoNameLc(r).includes("large amount of lp unlocked"));
     const _safetyTradingMode = ((await storage.getBotStatus().catch(() => ({ tradingMode: "paper" })))?.tradingMode === "live") ? "live" : "paper";
-    // PATCH #3b PARITY SWITCH: the graded "Large Amount of LP Unlocked" flag is now HARD-VETOED in
-    // BOTH paper and live by default, so paper selection == live selection (replicable results; the
-    // experiment to measure the graded flag's true rug rate is complete and it DID predict rugs).
-    // Set RELAX_GRADED_LP_VETO_LIVE=true in .env only if you later want to admit these tokens in BOTH
-    // modes together (still in parity). Default (unset or false) keeps the veto hard everywhere.
-    const _relaxGradedLpInLive = String(process.env.RELAX_GRADED_LP_VETO_LIVE || "").toLowerCase() === "true";
-    const _gradedLpAdmit = _relaxGradedLpInLive;
+    // AI-TUNE(2026-06-24g): PAPER-ONLY graded-LP probe. Latest live paper run shows the entry engine
+    // is finally finding the intended high-quality SNIPER pocket (e.g. score=100/85, liq~$150k, rej=[]),
+    // but every one is stopped by RugCheck's *graded* "Large Amount of LP Unlocked" flag. Do NOT weaken
+    // live protection: literal LP Unlocked + Single Holder remain absolute vetoes, and the graded flag
+    // remains a hard veto in LIVE. In PAPER only, admit the graded flag so the shadow ledger can measure
+    // whether these high-score/high-liq SNIPER setups are actually rugs or the only tradable market supply.
+    // Disable with PAPER_PROBE_GRADED_LP_VETO=false. No env var can relax this in live here.
+    const _paperProbeGradedLp = _safetyTradingMode !== "live" && String(process.env.PAPER_PROBE_GRADED_LP_VETO ?? "true").toLowerCase() !== "false";
+    const _gradedLpAdmit = !!(_gradedLpRisk && !_absoluteVetoRisk && _paperProbeGradedLp);
     const _vetoRisk = _absoluteVetoRisk || ((_gradedLpRisk && !_gradedLpAdmit) ? _gradedLpRisk : undefined);
     if (_gradedLpRisk && !_absoluteVetoRisk && !_vetoRisk) {
-      console.log(`[LP-VETO-RELAX:${_safetyTradingMode.toUpperCase()}] $${pair.baseToken?.symbol || tokenAddress} ADMITTED (graded "${_gradedLpRisk.name}" via RELAX_GRADED_LP_VETO_LIVE=true; applies to BOTH paper+live for parity) rugScoreNorm=${data?.score_normalised}`);
+      console.log(`[LP-VETO-PAPER-PROBE:${_safetyTradingMode.toUpperCase()}] $${pair.baseToken?.symbol || tokenAddress} ADMITTED graded "${_gradedLpRisk.name}" for PAPER/SHADOW measurement only; LIVE remains hard-vetoed. rugScoreNorm=${data?.score_normalised}`);
+    }
+    // ── LITERATURE-GROUNDED LP-UNLOCKED DISCRIMINATOR (AI-FIX 2026-06-24) ────────────────
+    // Research is unanimous (arxiv 2602.13480 MemeTrans; 2603.24625 "From Hype to Collapse";
+    // Solidus Labs 2025): within the LP-UNLOCKED population (~98% rug base rate — the exact
+    // pond RELAX_GRADED_LP_VETO_LIVE deliberately fishes), the surviving minority is NOT
+    // separated by static contract flags (those already passed) but by ORGANIZED GROUP
+    // BEHAVIOUR — coordinated/bundled wallets and early insider distribution. We now have a
+    // live read on that via the (just-repaired) Birdeye top_traders whale tape. So when we
+    // are about to admit an LP-unlocked token, require the tape to look like genuine
+    // accumulation, not a coordinated exit / wash bundle. DATA-ABSENT => DO NOT BLOCK (never
+    // re-introduce the zero-trade starvation); this is a graded, env-gated discriminator.
+    let _lpRelaxGateReason: string | null = null;
+    if (_gradedLpRisk && !_absoluteVetoRisk && !_vetoRisk && !_freezeActive) {
+      const _lpRelaxWhaleGateOn = String(process.env.LP_RELAX_WHALE_GATE || "true").toLowerCase() !== "false";
+      let _wsig: SmartMoneySignal | null = null;
+      try { _wsig = await fetchSmartMoneyConvergence(tokenAddress); } catch { _wsig = null; }
+      const _wc = _wsig?.whaleCount ?? 0;            // # top-volume wallets sampled
+      const _wSell = _wsig?.whaleNetSellers ?? 0;    // big wallets net-distributing
+      const _wBuy = _wsig?.whaleNetBuyers ?? 0;      // big wallets net-accumulating
+      const _wash = _wsig?.washSuspects ?? 0;        // balanced high-freq churners (bundle/wash proxy)
+      const _accumQ = _wsig?.netBuyers ?? 0;         // PROFITABLE, non-wash, net-accumulating wallets
+      // Concentration co-flags from RugCheck (presence only — /report/summary omits numeric
+      // values; logged for forward calibration, NOT vetoed, per documented over-veto risk).
+      const _top10Flag = _hasRisk("top 10 high ownership") || _hasRisk("top10");
+      const _highOwnFlag = _hasRisk("high ownership");
+      const _fewLpProviders = _hasRisk("low amount of lp providers");
+      console.log(`[LP-RELAX-PROFILE] $${pair.baseToken?.symbol || tokenAddress} whales=${_wc} accumQ=${_accumQ} netBuy=${_wBuy} netSell=${_wSell} wash=${_wash} | top10=${_top10Flag} highOwn=${_highOwnFlag} fewLP=${_fewLpProviders} | smEnabled=${SMART_MONEY_ENABLED} dataPresent=${_wc > 0} norm=${data?.score_normalised}`);
+      if (_lpRelaxWhaleGateOn && _wc > 0) {
+        // Only act when whale data is actually present. Two high-precision literature signals:
+        //  (1) coordinated distribution: >= WHALE_DISTRIBUTION_SELLERS big wallets net-selling.
+        //  (2) wash-dominated tape with ZERO genuine accumulation: organized fake volume / bundle.
+        if (_wSell >= WHALE_DISTRIBUTION_SELLERS) {
+          _lpRelaxGateReason = `lp_unlocked_whale_distribution(netSell=${_wSell}>=${WHALE_DISTRIBUTION_SELLERS})`;
+        } else if (_accumQ === 0 && _wash >= Math.ceil(_wc / 2)) {
+          _lpRelaxGateReason = `lp_unlocked_wash_no_accumulation(wash=${_wash}/${_wc})`;
+        }
+        if (_lpRelaxGateReason) {
+          console.log(`[LP-RELAX-GATE] $${pair.baseToken?.symbol || tokenAddress} VETO — ${_lpRelaxGateReason} (literature: organized group exit/bundle on unlocked LP)`);
+        }
+      } else if (_lpRelaxWhaleGateOn && _wc === 0) {
+        // FAIL-CLOSED FALLBACK (AI-FIX 2026-06-24b): the whale tape is the PRIMARY discriminator for
+        // the LP-unlocked rug-pond, but it is BLIND here — Birdeye returned no data (observed
+        // persistently as bdVol=0). The original posture fail-OPEN (admit) was chosen to avoid
+        // zero-trade starvation; live shadow stats now disprove that tradeoff: 158 trades, 40.5% win,
+        // -0.78%/trade, and two consecutive ~$50k-liq SNIPER tokens ($SABC, $Jycs) rugged to $0 via
+        // LIQ_COLLAPSE. Fishing this ~98%-rug pond with NO working discriminator is the dominant loss
+        // source. When the primary signal is blind, fall back to RugCheck's static concentration
+        // co-flags (the strongest Birdeye-INDEPENDENT rug correlates within the unlocked-LP
+        // population): top-10 high ownership, high single-owner, or too-few LP providers. Veto ONLY on
+        // a concentration red flag — clean-concentration unlocked-LP tokens still pass, so this does
+        // NOT re-create starvation; it just stops admitting the concentrated rug signature blind.
+        // PRIMARY blind-fallback (AI-FIX 2026-06-24c): pull NUMERIC holder/LP concentration from
+        // RugCheck's full report (Birdeye-independent, free). High-precision rug thresholds within
+        // the already-unlocked-LP pond:
+        //   - a single non-LP wallet >= 25% (can dump the whole float)
+        //   - top-5 non-LP wallets >= 60% (coordinated-dump setup)
+        //   - flagged insiders holding >= 15%
+        const _conc = await fetchRugcheckConcentration(tokenAddress);
+        if (_conc.available) {
+          console.log(`[LP-RELAX-CONC] $${pair.baseToken?.symbol || tokenAddress} topHolder=${_conc.topHolderPct.toFixed(1)}% top5=${_conc.top5Pct.toFixed(1)}% insider=${_conc.insiderPct.toFixed(1)}%(${_conc.insiderCount}) holders=${_conc.totalHolders} lpLocked=${_conc.lpLockedPct.toFixed(0)}% (RugCheck full report — Birdeye-independent)`);
+          if (_conc.topHolderPct >= 25) _lpRelaxGateReason = `lp_unlocked_top_holder_${_conc.topHolderPct.toFixed(0)}pct`;
+          else if (_conc.top5Pct >= 60) _lpRelaxGateReason = `lp_unlocked_top5_${_conc.top5Pct.toFixed(0)}pct`;
+          else if (_conc.insiderPct >= 15) _lpRelaxGateReason = `lp_unlocked_insider_${_conc.insiderPct.toFixed(0)}pct`;
+        }
+        // FALLBACK-of-the-fallback: if the full report is unavailable (RugCheck down / shape
+        // mismatch), keep the VERIFIED presence-flag baseline so we never silently stop
+        // discriminating the unlocked-LP pond.
+        if (!_lpRelaxGateReason && (_top10Flag || _highOwnFlag || _fewLpProviders)) {
+          _lpRelaxGateReason = `lp_unlocked_concentration_no_whaledata(top10=${_top10Flag},highOwn=${_highOwnFlag},fewLP=${_fewLpProviders})`;
+        }
+        if (_lpRelaxGateReason) {
+          console.log(`[LP-RELAX-GATE] $${pair.baseToken?.symbol || tokenAddress} VETO — ${_lpRelaxGateReason} (fail-closed: whale tape blind, concentration signal on unlocked LP)`);
+        }
+      }
     }
     // Concise safety-decision log (retains RugCheck score visibility for scale verification).
     console.log(`[SAFETY] $${pair.baseToken?.symbol || tokenAddress} rugScore=${data?.score} rugScoreNorm=${data?.score_normalised} freeze=${_freezeActive} mint=${_mintActive} veto=${_vetoRisk?.name || "none"}`);
@@ -2220,6 +2392,11 @@ async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair): Pr
       const _vetoSlug = String(_vetoRisk.name || "unknown").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
       reason = `rugcheck_veto_${_vetoSlug}`;
       console.log(`[SAFETY-VETO] $${pair.baseToken?.symbol || tokenAddress} HARD-VETO on risk flag: ${_vetoRisk.name}`);
+    } else if (_lpRelaxGateReason) {
+      // LITERATURE-GROUNDED LP-UNLOCKED DISCRIMINATOR: organized distribution / wash-bundle on
+      // an unlocked-LP token (the ~98%-rug pond). Vetoed AFTER absolute flags, BEFORE mint/norm.
+      safe = false; reason = _lpRelaxGateReason;
+      console.log(`[SAFETY-VETO] $${pair.baseToken?.symbol || tokenAddress} HARD-VETO (LP-unlocked discriminator): ${_lpRelaxGateReason}`);
     } else if (_mintActive) {
       // FIX: MINT authority active but freeze is null -> dilution risk only, token is still sellable.
       // Allow the trade (safe stays true) but log it for monitoring. Honeypot (freeze) is already blocked above,
@@ -2415,19 +2592,33 @@ async function runScanCycle() {
       if (currentOpenCount >= cycleMaxPositions) break;
       if (tradesThisCycle >= engineSettings.maxTradesPerCycle) break;
       
-      const { price, pair } = await fetchTokenPrice(candidate.tokenAddress);
+      const { price, pair } = await fetchTokenPrice(candidate.tokenAddress, candidate.pairAddress);
       if (!pair || price <= 0) {
           console.log(`[GATE] SKIP $${candidate.tokenSymbol} — Invalid price or pair data.`);
           continue;
       }
       
-      const vol5mCheck = pair.volume?.m5 ?? 0;
-      const txBuys5m = pair.txns?.m5?.buys ?? 0;
-      const txSells5m = pair.txns?.m5?.sells ?? 0;
-      const txTotal5m = txBuys5m + txSells5m;
+      // FIX(zero-trade 2026-06-24): the buy-loop re-fetch (fetchTokenPrice) selects the HIGHEST-
+      // LIQUIDITY pair from /tokens/{addr}, which for multi-pair tokens is frequently a different,
+      // INACTIVE pair whose volume.m5 reads $0 — even though THIS candidate already passed
+      // discovery's vol5m>=250 + minSells>=2 filter only seconds earlier (same scan cycle). That
+      // single mismatch was rejecting the best entries every cycle ($USWR score=92 liq=94615 rej=[],
+      // $SPCX SNIPER score=80 liq=61916 rej=[]) with "Insufficient 5m activity (Vol: $0, Tx: 0)",
+      // which is the PRIMARY reason no trades were occurring. Authoritative source = the discovery
+      // metrics the candidate already carries (volume5m/buys5m/sells5m, set at scan time). Use the
+      // MAX of fresh re-fetch and discovery; only reject if BOTH agree activity is genuinely dead.
+      const _freshVol5m = pair.volume?.m5 ?? 0;
+      const _freshTx5m = (pair.txns?.m5?.buys ?? 0) + (pair.txns?.m5?.sells ?? 0);
+      const _discVol5m = parseFloat(String((candidate as any).volume5m ?? 0)) || 0;
+      const _discTx5m = (parseFloat(String((candidate as any).buys5m ?? 0)) || 0) + (parseFloat(String((candidate as any).sells5m ?? 0)) || 0);
+      const vol5mCheck = Math.max(_freshVol5m, _discVol5m);
+      const txTotal5m = Math.max(_freshTx5m, _discTx5m);
       if (vol5mCheck < 75 || txTotal5m < 3) {
-          console.log(`[GATE] SKIP $${candidate.tokenSymbol} — Insufficient 5m activity (Vol: $${vol5mCheck.toFixed(0)}, Tx: ${txTotal5m})`);
+          console.log(`[GATE] SKIP $${candidate.tokenSymbol} — Insufficient 5m activity (fresh Vol: $${_freshVol5m.toFixed(0)} Tx:${_freshTx5m} | disc Vol: $${_discVol5m.toFixed(0)} Tx:${_discTx5m})`);
           continue;
+      }
+      if (_freshVol5m < 75 && _discVol5m >= 75) {
+          console.log(`[ACTIVITY-FALLBACK] $${candidate.tokenSymbol} — fresh re-fetch returned wrong/stale pair (vol $${_freshVol5m.toFixed(0)}); using discovery vol $${_discVol5m.toFixed(0)} Tx:${_discTx5m} from same scan cycle`);
       }
       
       const pairDex = (pair.dexId || candidate.dex || "").toLowerCase();
@@ -2440,8 +2631,8 @@ async function runScanCycle() {
       // regardless of wallet size or cycleMaxPositions. Pump.fun tokens are highly correlated —
       // if the narrative dies, all open pumpfun positions die together. Limiting to 1 prevents
       // correlated wipeouts (e.g. two pumpswap tokens rugging simultaneously = -60% in one cycle).
-      if (PUMPFUN_DEXES.has(pairDex) && openPumpfunCount >= 1) {
-          console.log(`[GATE] SKIP $${candidate.tokenSymbol} — Pumpfun concentration limit reached (1 open pumpfun/pumpswap max, currently ${openPumpfunCount}).`);
+      if (PUMPFUN_DEXES.has(pairDex) && openPumpfunCount >= 2) {
+          console.log(`[GATE] SKIP $${candidate.tokenSymbol} — Pumpfun concentration limit reached (FREQ: 1 -> 2 open pumpfun/pumpswap max, currently ${openPumpfunCount}; LP-unlocked whale gate mitigates the extra exposure).`);
           continue;
       }
       
@@ -3350,16 +3541,20 @@ async function checkOpenPositions() {
               const _patchRugData = await _patchRugResp.json() as any;
               const _patchRisks = Array.isArray(_patchRugData?.risks) ? _patchRugData.risks : [];
               const _patchHasFreeze = _patchRisks.some((r: any) => String(r?.name || "").toLowerCase().includes("freeze authority"));
-              // RELAX_GRADED_LP_VETO_LIVE: if set, skip ALL LP unlock checks mid-hold.
-              // Rationale: the entry veto already admitted this token knowing it has an LP unlock flag.
-              // The mid-hold rugcheck fetches a fresh API response which may return "LP Unlocked"
-              // (absolute) or "Large Amount of LP Unlocked" (graded) — both should be suppressed
-              // when RELAX mode is active, because we consciously accepted LP-unlock risk at entry.
-              // Previous version only skipped the "graded" variant but the API sometimes returns
-              // the plain "LP Unlocked" name for the same token, causing phantom mid-hold exits.
-              const _patchRelaxGraded = String(process.env.RELAX_GRADED_LP_VETO_LIVE || "").toLowerCase() === "true";
-              const _patchHasLpUnlocked = _patchRelaxGraded
-                ? false  // LP unlock was accepted at entry — do NOT re-exit mid-hold for same reason
+              // AI-FIX(2026-06-24i): align mid-hold rugcheck with the PAPER-only graded-LP probe.
+              // Entry can intentionally admit a graded "Large Amount of LP Unlocked" token in PAPER so
+              // shadow can measure whether high-score/high-liq SNIPER setups are profitable or rugs.
+              // The fresh mid-hold RugCheck response often collapses the graded flag into plain
+              // `lpUnlocked=true`, which immediately force-exited $Natomc after 32s and contaminated the
+              // experiment (-8.34% shadow) before price action could be measured. Therefore: in PAPER only,
+              // suppress LP-unlocked mid-hold exits while PAPER_PROBE_GRADED_LP_VETO is enabled. LIVE still
+              // treats any LP-unlocked mid-hold flag as an immediate exit. Freeze and single-holder remain
+              // hard exits in both modes.
+              const _patchPaperProbeGradedLp = trade.tradingMode !== "live" && String(process.env.PAPER_PROBE_GRADED_LP_VETO ?? "true").toLowerCase() !== "false";
+              const _patchLegacyRelaxGraded = String(process.env.RELAX_GRADED_LP_VETO_LIVE || "").toLowerCase() === "true";
+              const _patchSuppressLpMidHold = _patchPaperProbeGradedLp || _patchLegacyRelaxGraded;
+              const _patchHasLpUnlocked = _patchSuppressLpMidHold
+                ? false  // LP unlock was accepted at entry/probe — do NOT re-exit mid-hold for the same reason
                 : _patchRisks.some((r: any) => String(r?.name || "").toLowerCase().includes("lp unlocked"));
               const _patchHasSingleHolder = _patchRisks.some((r: any) => String(r?.name || "").toLowerCase().includes("single holder ownership"));
               if (_patchHasFreeze || _patchHasLpUnlocked || _patchHasSingleHolder) {
@@ -3536,7 +3731,7 @@ async function checkOpenPositions() {
         const entryPrice = parseFloat(trade.price);
         if (entryPrice <= 0) continue;
         let pnlPct = ((currentPrice - entryPrice) / entryPrice) * 100;
-        // ── LAYER 1: Price ratio gate — reject the corrupted price BEFORE it touches any state ──
+        // ── LAYER 1: Price ratio gate — reject the corrupted price BEFORE it touches any state ���─
         const PRICE_RATIO_MAX = 100;   // reject any price > 100× entry  (+10,000%)
         const PRICE_RATIO_MIN = 0.01;  // reject any price < 1% of entry (−99% in a single tick)
         const priceRatio = entryPrice > 0 ? currentPrice / entryPrice : 1;
@@ -3907,9 +4102,22 @@ async function checkOpenPositions() {
         // accounting floor for armed-trail exits (consumed downstream by FIX H). Ladder unchanged.
         const trailingFloor = peakPnl > 30 ? peakPnl * 0.60 : peakPnl > 15 ? peakPnl * 0.50 : peakPnl > 8 ? peakPnl * 0.40 : peakPnl > 3 ? peakPnl * 0.20 : 0;
         // round-trip cost gate: VOLUNTARY profit-taking (PNL_STAGNANT) must clear modeled spread+slippage+fees.
-        const _rtCosts = calcTransactionCosts(pair?.liquidity?.usd ?? 0, parseFloat(trade.amount || "0"));
+        // FIX(cost-gate liquidity-collapse trap, 2026-06-24): this voluntary-profit floor exists to
+        // avoid crystallizing a sub-cost "profit" in NORMAL conditions. But it was modeled on LIVE
+        // liquidity — so when a pool is being pulled (a rug), calcTransactionCosts() models exit
+        // slippage up to ~47% one-way and the floor EXPLODED (observed on $SABC: 8.02% -> 94.50%).
+        // That perversely blocked profit-taking exactly when we most needed out, trapping a +10.59%
+        // peak until LIQ_COLLAPSE dumped it at -18.23%. Two guards: (1) model the floor on STABLE
+        // (entry) liquidity, never the collapsing live value [use max(live, entry)]; (2) hard-cap the
+        // floor at 12% — beyond that, a real gain should always be takeable. Liquidity-collapse exits
+        // are owned by the Tier-1 LIQ_COLLAPSE / PRICE_RUG rules below, NOT by this cost gate.
+        const _entryLiqForCost = parseFloat(trade.liquidity ?? "0") || 0;
+        const _liveLiqForCost = pair?.liquidity?.usd ?? 0;
+        const _stableLiqForCost = Math.max(_liveLiqForCost, _entryLiqForCost);
+        const _rtCosts = calcTransactionCosts(_stableLiqForCost, parseFloat(trade.amount || "0"));
         const COST_SAFETY_MULT = 2.0;
-        const minProfitableExitPct = _rtCosts.totalRoundTripPct * COST_SAFETY_MULT + 0.5;
+        const COST_FLOOR_CAP_PCT = 12.0;
+        const minProfitableExitPct = Math.min(_rtCosts.totalRoundTripPct * COST_SAFETY_MULT + 0.5, COST_FLOOR_CAP_PCT);
         const clearsRoundTrip = pnlPct >= minProfitableExitPct;
         // price-based drop-from-peak leads DexScreener liquidity lag during a rug.
         const _peakPrice = peakPrices.get(trade.id) ?? entryPrice;
@@ -4280,7 +4488,7 @@ async function checkOpenPositions() {
           } else {
             partialLegMap.delete(trade.id);
           }
-          // ─────────────────────────────────────────────────────────────────
+          // ───────────────────────��─────────────────────────────────────────
           tradedAddresses.set(trade.tokenAddress, Date.now());
           if (reason.startsWith("STOP_LOSS") || reason.startsWith("HARD_LOSS_KILL") || reason.startsWith("DEEP_RUG_KILL") || reason.startsWith("EARLY_CUT") || reason.startsWith("FAST_CUT") || reason.startsWith("LIQ_COLLAPSE") || reason.startsWith("VOL_COLLAPSE") || reason.startsWith("SLOW_BLEED")) {
             stoppedOutAddresses.set(trade.tokenAddress, Date.now());
@@ -4658,7 +4866,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     clearLatencyLog();
     res.json({ cleared: true });
   });
-  // ─────────────────────────────────────────────────────────────────────────
+  // ────────────────────────────────────────────────────────────────���────────
   app.post("/api/settings", async (req, res) => {
     if (!requireAdmin(req, res)) return;
     try {
