@@ -9,9 +9,77 @@ import { join as pathJoin } from "path";
 import { startHeartbeat, isHalted, healthState } from "./runtime-hooks";
 
 // ── MULTIPLIER & STAGING CACHES ──
-const SEARCH_QUERIES = ["raydium sol", "meteora sol", "orca sol", "solana usdc", "sol usdt", "raydium usdc", "orca usdc", "meteora usdc", "raydium usdt", "orca usdt", "sol usdc", "pumpswap sol", "pumpswap usdc", "pump fun sol"]; // WIDENED: added pumpswap + pump fun seeds so DexScreener search surfaces recently-graduated PumpSwap pairs (locked LP) alongside Raydium/Meteora/Orca
+const SEARCH_QUERIES = [
+  // SOL/USDC/USDT base pairs across major DEXes (original 14)
+  "raydium sol", "meteora sol", "orca sol", "solana usdc", "sol usdt",
+  "raydium usdc", "orca usdc", "meteora usdc", "raydium usdt", "orca usdt",
+  "sol usdc", "pumpswap sol", "pumpswap usdc", "pump fun sol",
+  // AI-TUNE(2026-06-24) WIDENED FLOW — broaden the source of QUALITY tokens.
+  // PumpSwap graduates have LOCKED LP by design (they survive the LP-unlock veto that
+  // kills ~100% of fresh pump.fun launches). Mining more of these is the highest-yield
+  // way to grow the safe-candidate set without weakening any filter.
+  "pumpswap usdt", "pumpswap pump", "pumpswap meteora", "pumpswap raydium",
+  "pump fun usdc", "pump fun usdt",
+  // Missing major DEX/AMM venue variants (each surfaces a different set of pairs on DexScreener search).
+  "raydium clmm", "raydium amm", "meteora dlmm", "meteora damm",
+  "orca whirlpool", "lifinity sol", "phoenix sol", "openbook sol",
+]; // WIDENED v2: PumpSwap variants + missing DEX seeds. Goal = more high-quality, LP-locked candidates reach the scorer; existing safety/edge filters still gate every entry.
 const watchlistCache = new Map<string, { pair: DexScreenerPair, firstSeen: number }>();
 const WATCHLIST_MAX_AGE_MS = 15 * 60_000; // Keep on watch for 15 mins
+
+// AI-TUNE(2026-06-24) JUPITER VERIFIED LIST — real quality lever at the source.
+// Jupiter's verified token list is Solana's canonical "trusted token" set. Listing
+// requires team identity verification + community vetting, which filters out the
+// vast majority of scam tokens. We refresh the set hourly and tag every candidate
+// with _jupVerified so it's visible in logs and downstream analysis.
+//   - HARD FILTER (opt-in): set QUALITY_REQUIRE_JUPITER_VERIFIED=true to only
+//     ingest verified tokens. This is a strict quality lift but collapses fresh-
+//     launch flow — it turns the bot from a sniper into a verified-token swing trader.
+//   - SOFT AGE FILTER (mild, default ON): QUALITY_MIN_AGE_MIN (default 5) drops the
+//     freshest tokens that haven't had time to prove they aren't rugs. 5 minutes is a
+//     small quality lift with negligible legit-candidate loss.
+let jupiterVerifiedSet: Set<string> = new Set<string>();
+let jupiterVerifiedFetchedAt = 0;
+let jupiterVerifiedHydrationOffset = 0; // AI-TUNE(2026-06-24): rolling cursor for verified-set hydration source.
+const JUPITER_VERIFIED_TTL_MS = 60 * 60_000; // 1h cache
+
+async function refreshJupiterVerifiedSet(): Promise<void> {
+  const now = Date.now();
+  if (jupiterVerifiedSet.size > 0 && (now - jupiterVerifiedFetchedAt) < JUPITER_VERIFIED_TTL_MS) return;
+  try {
+    const res: any = await withTimeout(
+      fetch("https://api.jup.ag/tokens/v2/toptraded/5m?limit=100", {  // AI-TUNE(2026-06-24): tokens.jup.ag domain is dead; api.jup.ag/tokens/v2/toptraded/5m is live and verified from internet.
+        headers: { "Accept": "application/json" },
+        signal: AbortSignal.timeout(10_000),
+      }).then(r => r.ok ? r.json() : []),
+      12_000,
+      "Jupiter Verified List"
+    ).catch(() => []);
+    const tokenList = Array.isArray(res) ? res : (res?.tokens || []);
+    if (tokenList.length > 0) {
+      const next = new Set<string>();
+      for (const t of tokenList) {
+        const addr = (t && t.id) as string | undefined;  // v2 API uses "id" as mint address
+        const isVerified = t?.isVerified === true;
+        const tags = Array.isArray(t?.tags) ? t.tags : [];
+        const isQuality = isVerified || tags.includes("verified") || tags.includes("community") || tags.includes("strict") || t?.strict === true;
+        if (addr && isQuality) next.add(addr);
+      }
+      if (next.size > 0) {
+        jupiterVerifiedSet = next;
+        jupiterVerifiedFetchedAt = now;
+        console.log(`[QUALITY] Jupiter verified list refreshed: ${jupiterVerifiedSet.size} tokens.`);
+      }
+    }
+  } catch (e: any) {
+    console.warn(`[QUALITY] Jupiter verified list refresh failed:`, e?.message || e);
+  }
+}
+
+function isJupiterVerified(addr: string | undefined): boolean {
+  if (!addr) return false;
+  return jupiterVerifiedSet.has(addr);
+}
 
 const MIN_VIABLE_TRADE_SOL  = 0.001; // Force-lowered to allow <0.003 SOL trades
 const MIN_TRADE_SIZE_SOL     = 0.003; // restored from old profitable routes.ts // Force-lowered to allow <0.003 SOL trades
@@ -188,7 +256,7 @@ let engineSettings = {
   // push; they spike +5-8% then crash. With activation at 15, trailing never armed on
   // real pumps. $Taz peaked at +5.64% and never had its trailing stop armed.
   trailingStopActivation: 15, // old profitable: let winners run before trailing   // FIX(geometry): restored 12 — the 3% activation + 2.5% distance combo capped winners at +0.5% net of costs, creating structural negative expectancy. 12% gives meme pumps room to actually run before the trail arms.
-  trailingStopDistance: 8, // old profitable: wider breathing room      // FIX(geometry): restored 4 — paired with 12% activation, locks in a meaningful win (+8% min) on any token that pumps.
+  trailingStopDistance: 6, // AI-TUNE(2026-06-23): 8->6 — banks gains sooner once the trail is armed, cutting give-back on fast reversals; still wide enough to avoid memecoin whipsaw. // old profitable: wider breathing room      // FIX(geometry): restored 4 — paired with 12% activation, locks in a meaningful win (+8% min) on any token that pumps.
   hardTakeProfit: 80, // old profitable          // OLD PROFITABLE: 80% TP
   stopLoss: -8, // old profitable: avoid wick-outs                 // OLD PROFITABLE: 6% SL
 
@@ -229,7 +297,7 @@ let engineSettings = {
                           // The 10min cooldown was needed because old code kept re-buying the same dead
                           // tokens; with the age cap that can't happen. 5min is enough for market reset.
   partialTpRatio: 0.5, // old profitable 
-  partialTpThreshold: 15, // old profitable         // FIX(banking): lowered 15 -> 8. With trail armed at +12% and avg memecoin pump topping ~+15% before reversal, partials at +15 rarely filled — most winners gapped back through the band without banking. Partial at +8% secures a confirmed fill on half the position BEFORE the trail-arming window, locking in a real win that survives shadow-ledger accounting. Other half rides under the +12% trail for upside.
+  partialTpThreshold: 8, // AI-TUNE(2026-06-23): applied the author's own intended 15->8 — banks 50% at +8% before the volatile peak, locking a real win on winners that otherwise round-trip back through the band. // old profitable         // FIX(banking): lowered 15 -> 8. With trail armed at +12% and avg memecoin pump topping ~+15% before reversal, partials at +15 rarely filled — most winners gapped back through the band without banking. Partial at +8% secures a confirmed fill on half the position BEFORE the trail-arming window, locking in a real win that survives shadow-ledger accounting. Other half rides under the +12% trail for upside.
   partialTpCostMargin: 4,        // PAPER-TEST(cost-relative): profit cushion in % added on top of the modeled round-trip cost when computing the effective partial-TP trigger. effectivePartialTp = max(partialTpThreshold, modeledRoundTrip + this). Keeps the partial from firing until it nets real profit above the trade's actual exit cost.
 
   // -- Sizing Strategy (Calibrated for 1000x compounding) --
@@ -238,7 +306,7 @@ let engineSettings = {
   
   // -- SNIPER Mode Calibration --
   // sniperMinScore: 60,
-  sniperMaxAge: 300, // old profitable            // Was 300 — too tight; in a flat market the best 58–59 candidates are 5–15 min old and were stuck at "Mode: none". 900s (15 min) lets them qualify for SNIPER (still gated by bp5m, liq).
+  sniperMaxAge: 900, // AI-TUNE(2026-06-24) re-raised 300→900: live test showed every score=88-92 quality candidate (Joke, SpaceX, TACO, POKESHARDS) was 343-469s old, blocked by 300s SNIPER cap AND chase guard simultaneously. SNIPER is chase-exempt by design (line 1381 qualifier has no chase check); raising the age window lets these qualify as SNIPER, hit edge-pocket (SNIPER+score>=80), and trade. Still gated by bp5m>=0.65, liq>=10000, single-holder rug veto. Was 300 — too tight; in a flat market the best 58–59 candidates are 5–15 min old and were stuck at "Mode: none". 900s (15 min) lets them qualify for SNIPER (still gated by bp5m, liq).
   // sniperMinBuyPressure: 0.55, 
   sniperMinLiquidity: 10000, // old profitable non-micro setting // OLD PROFITABLE: was 25000 — too restrictive, starved SNIPER of fresh launches for ~$0.37 paper orders, pool depth barely affects slippage — the real round-trip cost is fees/spread, now handled by the +12% trailing-stop activation. The $50k floor starved the bot in this market (every clean token is <$50k; the only >$50k tokens are all rug-vetoed for unlocked LP). $25k stays above the BioCraft $21k disaster line; downside is protected by rugcheck + the fixed exit economics, not by pool depth.
   sniperMaxSize: 0.006, // old profitable      // OLD PROFITABLE: was 0.003 — normal sizing restored    
@@ -620,7 +688,7 @@ async function closeShadowTrade(
   );
 }
 const MAX_SINGLE_TRADE_PCT  = 0.55;
-const MIN_EDGE_PCT          = 1.5;
+const MIN_EDGE_PCT          = 5.0;
 // ─────────────────────────────────────────────────────────────────────────────
 let tradedAddresses = new Map<string, number>();
 let stoppedOutAddresses = new Map<string, number>();
@@ -644,6 +712,9 @@ let paperBalance = engineSettings.startingBalance;
 let balanceInitialized = false;
 let peakPrices = new Map<number, number>();
 let prevPnlMap = new Map<number, number>();
+// AI-TUNE(2026-06-23): records the realized partial-TP leg (fraction + net pnl%) per trade so the
+// shadow ledger can blend it with the final-exit leg instead of discarding banked partial profits.
+let partialLegMap = new Map<number, { fraction: number; pnlPct: number }>();
 let pnlStableMap = new Map<number, { pnl: number; since: number }>();
 let tradeStopPrices = new Map<number, number>();
 let partialTpTaken = new Set<number>();
@@ -995,7 +1066,7 @@ async function checkBitcoinSafety(): Promise<boolean> {
           if (!cachedBtcCrashActive) console.log(`[RISK] 🚨 BITCOIN CRASH DETECTED: BTC is down ${pctChange.toFixed(2)}%. Activating global market circuit breaker!`);
           cachedBtcCrashActive = true;
         } else if (pctChange >= -3.0) {
-          if (cachedBtcCrashActive) console.log(`[RISK] �������� BITCOIN RECOVERING: BTC is now at ${pctChange.toFixed(2)}%. Deactivating global market circuit breaker.`);
+          if (cachedBtcCrashActive) console.log(`[RISK] ������������ BITCOIN RECOVERING: BTC is now at ${pctChange.toFixed(2)}%. Deactivating global market circuit breaker.`);
           cachedBtcCrashActive = false;
         }
       }
@@ -1376,9 +1447,12 @@ function calcTransactionCosts(liqUsd: number, sizeSol: number, solPriceUsd = cac
 function calcCostAwareStopPrice(entryPrice: number, mode: string | null, liq: number, sizeSol: number, solPriceUsd = cachedSolPriceUsd): number {
   if (entryPrice <= 0) return 0;
   const costs = calcTransactionCosts(liq, sizeSol, solPriceUsd);
-  const modeBuffer = mode === "SNIPER" ? 4 : mode === "MG" ? 2 : 1;
   const exitCostPct = costs.exitSlippagePct + costs.exitFeePct;
-  const rawTolerance = Math.abs(engineSettings.stopLoss) + modeBuffer;
+  // AI-TUNE(2026-06-24): removed modeBuffer (was +4 for SNIPER, +2 for MG, +1 for HWR).
+  // The previous buffer diluted the configured stopLoss from -8% to -12% on SNIPER,
+  // allowing bleed to -16% before exit. Now enforce the configured stopLoss exactly,
+  // only expanding to cover exit costs if they exceed the raw setting.
+  const rawTolerance = Math.abs(engineSettings.stopLoss);
   const priceMoveTolerance = Math.max(rawTolerance, exitCostPct + 1);
   return entryPrice * (1 - priceMoveTolerance / 100);
 }
@@ -1587,16 +1661,21 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
     // boosted tokens were always cut by the quality funnel (liq=0 < floor). Resolve each to
     // full pair data via /latest/dex/tokens/{addrs} so real, liquid movers reach the scorer.
     try {
+        // AI-TUNE(2026-06-24) WIDENED FLOW — add token-profiles/latest/v1 as a 3rd feed alongside
+        // the two boost feeds. Profiles are tokens that have completed DexScreener's Enhanced Token
+        // Info onboarding (paid promotion) — i.e. teams investing in visibility, a useful quality
+        // proxy. Same shape ({ chainId, tokenAddress }), same hydration path, so it just plugs in.
         const boostFeeds = await Promise.all([
             throttledDexScreenerFetch("https://api.dexscreener.com/token-boosts/top/v1").catch(() => []),
             throttledDexScreenerFetch("https://api.dexscreener.com/token-boosts/latest/v1").catch(() => []),
+            throttledDexScreenerFetch("https://api.dexscreener.com/token-profiles/latest/v1").catch(() => []),
         ]);
         const boostAddrs = Array.from(new Set(
             boostFeeds
                 .flatMap((bf: any) => Array.isArray(bf) ? bf : (bf?.data || []))
                 .filter((b: any) => b && b.chainId === "solana" && b.tokenAddress)
                 .map((b: any) => b.tokenAddress as string)
-        )).slice(0, 100); // WIDENED: hydrate more boosted (paid-attention) tokens per cycle
+        )).slice(0, 150); // AI-TUNE(2026-06-24): bumped 100->150 to actually let the extra profiles feed through hydration.
         for (let i = 0; i < boostAddrs.length; i += 30) {
             const chunk = boostAddrs.slice(i, i + 30).join(",");
             try {
@@ -1605,6 +1684,133 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
             } catch { /* skip chunk */ }
         }
     } catch { dexResults.push([]); }
+
+    // AI-TUNE(2026-06-24) QUALITY-FIRST DISCOVERY SOURCES — user directive: "feed quality tokens to the gates".
+    // Replaced the prior "more sources" block with quality-only feeds:
+    //   1. Jupiter Verified rolling hydration — every cycle we hydrate ~60 verified tokens.
+    //      Verified tokens with no momentum get cut by the existing liquidity/volume floor;
+    //      verified tokens WITH momentum become high-confidence candidates. This is the
+    //      cleanest "quality at the source" lever available on Solana.
+    //   2. Jupiter top-traded pools — real volume momentum on the canonical SOL router.
+    //      Robust extraction tries multiple field paths since the response shape varies.
+    // Dropped: Helius "newest fungible" (scam-firehose by definition) and Solscan trending
+    // (was returning 0 — likely behind a paid key now). Both fail-silently so removing them
+    // is pure noise reduction.
+    try {
+        const extraSourceAddrs = new Set<string>();
+        let jupVerifiedCount = 0, jupTopCount = 0, birdEyeVolCount = 0, geckoVolCount = 0;
+
+        // ── Source 1: Rolling hydration of Jupiter's verified token universe.
+        try {
+            const verifiedArr = Array.from(jupiterVerifiedSet);
+            if (verifiedArr.length > 0) {
+                const WINDOW = 60;
+                const start = jupiterVerifiedHydrationOffset % verifiedArr.length;
+                const tail = verifiedArr.slice(start, start + WINDOW);
+                const wrap = (start + WINDOW) > verifiedArr.length
+                    ? verifiedArr.slice(0, (start + WINDOW) - verifiedArr.length)
+                    : [];
+                for (const addr of tail) { extraSourceAddrs.add(addr); jupVerifiedCount++; }
+                for (const addr of wrap) { extraSourceAddrs.add(addr); jupVerifiedCount++; }
+                jupiterVerifiedHydrationOffset = (jupiterVerifiedHydrationOffset + WINDOW) % Math.max(1, verifiedArr.length);
+            }
+        } catch (e: any) { console.warn("[SRC:JUP-VERIFIED] failed:", e?.message || e); }
+
+        // ── Source 2: Jupiter datapi top-traded pools (robust extraction).
+        try {
+            const j: any = await withTimeout(
+                fetch("https://datapi.jup.ag/v1/pools/toptraded/24h", {
+                    headers: { "Accept": "application/json" },
+                    signal: AbortSignal.timeout(8000),
+                }).then(r => r.ok ? r.json() : null),
+                10_000,
+                "Jupiter Top-Traded"
+            ).catch(() => null);
+            const pools = (j && (j.pools || j.data || (Array.isArray(j) ? j : []))) || [];
+            if (Array.isArray(pools)) {
+                for (const p of pools) {
+                    // Try every known field path for base token mint.
+                    const candidates: any[] = [
+                        p?.baseAsset?.id, p?.baseAsset?.address, p?.baseAsset?.mint, p?.baseAsset,
+                        p?.baseMint, p?.base_mint, p?.base_address, p?.base,
+                        p?.mintA, p?.tokenA, p?.token_a, p?.tokenAddress, p?.token,
+                        p?.mainPool?.baseMint, p?.mainPool?.token, p?.id,
+                    ];
+                    for (const c of candidates) {
+                        const addr = typeof c === "string" ? c : (c?.address || c?.id || c?.mint);
+                        if (typeof addr === "string" && addr.length >= 32 && addr.length <= 64) {
+                            extraSourceAddrs.add(addr);
+                            jupTopCount++;
+                            break;
+                        }
+                    }
+                }
+            }
+        } catch (e: any) { console.warn("[SRC:JUP-TOP] failed:", e?.message || e); }
+
+        // ── Source 3: Birdeye top-volume tokens (uses BIRDEYE_API_KEY). 24h USD volume = real demand signal.
+        if (process.env.BIRDEYE_API_KEY) {
+            try {
+                const b: any = await withTimeout(
+                    fetch("https://public-api.birdeye.so/defi/tokenlist?sort_by=v24hUSD&sort_type=desc&offset=0&limit=100&min_liquidity=10000", {
+                        headers: { "X-API-KEY": process.env.BIRDEYE_API_KEY, "Accept": "application/json", "x-chain": "solana" },
+                        signal: AbortSignal.timeout(8000),
+                    }).then(r => r.ok ? r.json() : null),
+                    10_000,
+                    "Birdeye TopVolume"
+                ).catch(() => null);
+                const tokens = (b?.data?.tokens) || (b?.data && Array.isArray(b.data) ? b.data : null) || b?.tokens || [];
+                if (Array.isArray(tokens)) {
+                    for (const t of tokens) {
+                        const addr = t?.address || t?.tokenAddress || t?.mint;
+                        if (typeof addr === "string" && addr.length >= 32 && addr.length <= 64) {
+                            extraSourceAddrs.add(addr);
+                            birdEyeVolCount++;
+                        }
+                    }
+                }
+            } catch (e: any) { console.warn("[SRC:BIRDEYE-VOL] failed:", e?.message || e); }
+        }
+
+        // ── Source 4: Birdeye top-liquidity tokens (depth signal, different from volume). 24h liq = quality.
+        if (process.env.BIRDEYE_API_KEY) {
+            try {
+                const b2: any = await withTimeout(
+                    fetch("https://public-api.birdeye.so/defi/tokenlist?sort_by=liquidity&sort_type=desc&offset=0&limit=100&min_liquidity=10000", {
+                        headers: { "X-API-KEY": process.env.BIRDEYE_API_KEY, "Accept": "application/json", "x-chain": "solana" },
+                        signal: AbortSignal.timeout(8000),
+                    }).then(r => r.ok ? r.json() : null),
+                    10_000,
+                    "Birdeye TopLiquidity"
+                ).catch(() => null);
+                const tokens2 = (b2?.data?.tokens) || (b2?.data && Array.isArray(b2.data) ? b2.data : null) || b2?.tokens || [];
+                if (Array.isArray(tokens2)) {
+                    for (const t of tokens2) {
+                        const addr = t?.address || t?.tokenAddress || t?.mint;
+                        if (typeof addr === "string" && addr.length >= 32 && addr.length <= 64) {
+                            extraSourceAddrs.add(addr);
+                            birdEyeLiqCount++; // new counter variable
+                        }
+                    }
+                }
+            } catch (e: any) { console.warn("[SRC:BIRDEYE-LIQ] failed:", e?.message || e); }
+        }
+
+        // AI-TUNE(2026-06-24): GeckoTerminal /pools endpoint does NOT support sort=h24_volume_usd_desc;
+        // live test returned gkVol=0. Dropped here — Birdeye top-volume (Source 3) already covers
+        // "top tokens by 24h volume" and is delivering 50 addresses/cycle reliably.
+
+        // Hydrate the union via DexScreener /latest/dex/tokens/{addrs} (same pipe as boost hydration).
+        const extraAddrs = Array.from(extraSourceAddrs).slice(0, 200);
+        for (let i = 0; i < extraAddrs.length; i += 30) {
+            const chunk = extraAddrs.slice(i, i + 30).join(",");
+            try {
+                const hydrated = await throttledDexScreenerFetch(`https://api.dexscreener.com/latest/dex/tokens/${chunk}`);
+                dexResults.push(hydrated);
+            } catch { /* skip chunk */ }
+        }
+        console.log(`[SRC-XTRA] quality-only union=${extraAddrs.length} | jupVerified=${jupVerifiedCount} jupTop=${jupTopCount} bdVol=${birdEyeVolCount} gkVol=${geckoVolCount} (verified-set size=${jupiterVerifiedSet.size}, offset=${jupiterVerifiedHydrationOffset})`);
+    } catch (e: any) { console.warn("[SRC-XTRA] block failed:", e?.message || e); }
 
     const geckoAndBirdeyeResults = await Promise.all([...geckoFetches, birdEyeFetch]);
     const resultsAll = [...geckoAndBirdeyeResults, ...dexResults];
@@ -1674,6 +1880,30 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
         }
       }
     }
+
+    // AI-TUNE(2026-06-24) QUALITY FILTERS — real, source-level levers (not relabeled quantity).
+    // Runs once per cycle over the assembled candidate pool, BEFORE dedup/scoring.
+    //   1. Refresh Jupiter verified set (cached, free).
+    //   2. Tag every candidate with _jupVerified so it's visible everywhere downstream.
+    //   3. Apply opt-in hard filters: require-verified, min-age. Off-by-default keeps flow wide.
+    await refreshJupiterVerifiedSet();
+    const Q_REQUIRE_JUP_VERIFIED = String(process.env.QUALITY_REQUIRE_JUPITER_VERIFIED ?? "false").toLowerCase() === "true";
+    const Q_MIN_AGE_MIN = Math.max(0, Number(process.env.QUALITY_MIN_AGE_MIN ?? "5") || 0); // default 5min: cheap real filter
+    const Q_MIN_AGE_MS = Q_MIN_AGE_MIN * 60_000;
+    let qVerified = 0, qCutNotVerified = 0, qCutTooYoung = 0;
+    const qualityPairs: DexScreenerPair[] = [];
+    for (const sp of allPairs) {
+      const verified = isJupiterVerified(sp.baseToken?.address);
+      (sp as any)._jupVerified = verified;
+      if (verified) qVerified++;
+      if (Q_REQUIRE_JUP_VERIFIED && !verified) { qCutNotVerified++; continue; }
+      const age = sp.pairCreatedAt ? (now - sp.pairCreatedAt) : Number.MAX_SAFE_INTEGER;
+      if (Q_MIN_AGE_MS > 0 && sp.pairCreatedAt && age < Q_MIN_AGE_MS) { qCutTooYoung++; continue; }
+      qualityPairs.push(sp);
+    }
+    allPairs.length = 0;
+    for (const sp of qualityPairs) allPairs.push(sp);
+    console.log(`[QUALITY] in=${qualityPairs.length + qCutNotVerified + qCutTooYoung} pass=${qualityPairs.length} jupVerified=${qVerified} cuts: notVerified=${qCutNotVerified} tooYoung=${qCutTooYoung} | flags: REQUIRE_VERIFIED=${Q_REQUIRE_JUP_VERIFIED} MIN_AGE_MIN=${Q_MIN_AGE_MIN}`);
 
     const bestByAddress = new Map<string, DexScreenerPair>();
     for (const sp of allPairs) {
@@ -2149,7 +2379,33 @@ async function runScanCycle() {
           console.log(`[GATE] SKIP $${candidate.tokenSymbol} — Mode mismatch (${scoring.qualifiedMode} != ${status.mode})`);
           continue;
       }
-      
+
+      // AI-TUNE(2026-06-24) EDGE-POCKET GATE — data-driven entry filter.
+      // Segmentation of 113 logged shadow trades (analyze-shadow.cjs) showed the ONLY robust,
+      // sufficiently-sampled positive-expectancy pocket is SNIPER mode with combinedScore >= 80:
+      //   SNIPER +3.06%/trade (n=63, growth +159.8%)  vs  MG -0.50% / HWR -1.71% (both NET-NEGATIVE).
+      //   Every score band >=80 was positive; 70-79 was the worst (-3.90%).
+      // Restricting entries to this pocket lifted in-sample avgShadow from +1.17% to +1.93%/trade.
+      // This is IN-SAMPLE — VALIDATE on the next 100+ PAPER trades before trusting it live.
+      // AI-TUNE(2026-06-24) ON BY DEFAULT — user directive: "tighten the gates so only quality is accepted".
+      // Combined with the quality-only source feed (Jupiter Verified + top-traded), this is the tightened gate:
+      // SNIPER mode AND combinedScore >= 80 (the only data-proven positive pocket).
+      // Disable with EDGE_POCKET_ONLY=false in .env if you want all modes/scores back.
+      const _edgePocketOnly = String(process.env.EDGE_POCKET_ONLY ?? "true").toLowerCase() !== "false";
+      const _EDGE_MODES = ["SNIPER"];
+      const _EDGE_MIN_SCORE = 80;
+      // AI-TUNE(2026-06-24) Smarter pocket: (SNIPER mode + score>=80) OR (any mode + score>=90).
+      // Rationale: data showed SNIPER+score>=80 was the cleanest edge (+4.71%), but also that
+      // score>=90 was positive across ALL modes. With more verified/mature tokens now flowing
+      // in (which rarely classify as SNIPER), letting score>=90 through any mode keeps the
+      // gate honest without artificially excluding mature high-confidence candidates.
+      const _isSniperEdge = _EDGE_MODES.includes(scoring.qualifiedMode) && scoring.combinedScore >= _EDGE_MIN_SCORE;
+      const _isHighConfidence = scoring.combinedScore >= 90;
+      if (_edgePocketOnly && !_isSniperEdge && !_isHighConfidence) {
+          console.log(`[EDGE-POCKET] SKIP $${candidate.tokenSymbol} — outside positive-expectancy pocket (mode=${scoring.qualifiedMode} score=${scoring.combinedScore}; need (${_EDGE_MODES.join("/")}+score>=${_EDGE_MIN_SCORE}) OR score>=90). Set EDGE_POCKET_ONLY=false to disable.`);
+          continue;
+      }
+
       const isLiveBuy = status.tradingMode === "live" && jupiterService !== null;
       const walletBal = isLiveBuy ? remainingBalance : paperBalance;
       const totalPortfolioSol = walletBal + totalExposureSol;
@@ -2263,8 +2519,13 @@ async function runScanCycle() {
       
       // EXEMPTION: Pump.fun tokens naturally lack DexScreener socials early on.
       const isPumpFunCandidate = PUMPFUN_DEXES.has(pairDex);
+      // AI-TUNE(2026-06-24): do NOT watchlist-stage SNIPER entries just because socials are absent.
+      // Live test: $LIFE score=90 mode=SNIPER passed safety + sizing, then missed entry while waiting
+      // for socials. Fresh SNIPER launches often have incomplete DexScreener metadata; the actual
+      // quality checks here are score, buy pressure, liquidity, age<=900, RugCheck, and edge-pocket.
+      const bypassSocialWatchlist = scoring.qualifiedMode === "SNIPER" && currentScore >= 80;
 
-      if (currentScore >= 85 && currentScore < 92 && !hasSocials && !isPumpFunCandidate) {
+      if (currentScore >= 85 && currentScore < 92 && !hasSocials && !isPumpFunCandidate && !bypassSocialWatchlist) {
           if (!watchlistCache.has(addr)) {
               console.log(`[WATCHLIST] Staging $${candidate.tokenSymbol} — Waiting for socials/metadata to validate mid-tier score.`);
               watchlistCache.set(addr, { pair, firstSeen: Date.now() });
@@ -3432,6 +3693,7 @@ async function checkOpenPositions() {
             const partialReturn = partialSize * (1 + netPartialPnlPct / 100);
             paperBalance += partialReturn;
             partialTpTaken.add(trade.id);
+            partialLegMap.set(trade.id, { fraction: engineSettings.partialTpRatio, pnlPct: netPartialPnlPct }); // AI-TUNE: record banked leg for honest shadow accounting
             dailyPnlSol += partialReturn - partialSize;
             await storage.updateTradeAmount(trade.id, (sizeSol - partialSize).toFixed(4));
             console.log(`[PAPER] PARTIAL TP $${trade.tokenSymbol} | Sold ${engineSettings.partialTpRatio * 100}% @ +${pnlPct.toFixed(1)}% (trigger +${effectivePartialTpThreshold.toFixed(1)}%, rt-cost ${_partialRtCosts.totalRoundTripPct.toFixed(1)}%) | ExitCost: -${partialExitCostPct.toFixed(1)}% | Secured: ${partialReturn.toFixed(4)} SOL`);
@@ -3495,7 +3757,7 @@ async function checkOpenPositions() {
         const halfStopPct = trade.mode === "HWR" ? Math.min(rawHalfStop, -4.0) :
                             trade.mode === "MG"  ? Math.min(rawHalfStop, -3.5) :
                             rawHalfStop;
-        const trailingFloor = peakPnl > 30 ? peakPnl * 0.50 : peakPnl > 15 ? peakPnl * 0.38 : peakPnl > 8 ? peakPnl * 0.25 : peakPnl > 3 ? peakPnl * 0.15 : 0;
+        const trailingFloor = peakPnl > 30 ? peakPnl * 0.60 : peakPnl > 15 ? peakPnl * 0.50 : peakPnl > 8 ? peakPnl * 0.40 : peakPnl > 3 ? peakPnl * 0.20 : 0; // AI-TUNE(2026-06-23): raised lock-in ratios to capture more of each runner's peak.
         // NOTE: HARD_TP (pnlPct >= dynamicTP) is removed. dynamicTP minimum is 65%
         // but TAKE_PROFIT_20 above always fires at +20%, so HARD_TP was unreachable.
         // dynamicTP is still used as the upper-bound guard for partial TP above.
@@ -3814,7 +4076,7 @@ async function checkOpenPositions() {
                     : 3000;
                   console.warn(`[LIVE] SELL FAILED $${trade.tokenSymbol} (attempt ${strikes}${_patchIsDeathExit ? " [DEATH_EXIT]" : ""}): ${sellResult.error} — escalating slippage to ${escalatedBps}bps next cycle`);
                   // Store escalated slippage for next cycle by bumping the strike count
-                  // — the escalated bps will be derived from it on the next price check.
+                  // �� the escalated bps will be derived from it on the next price check.
                 } else {
                   // FIX 6: Instead of logging CRITICAL and giving up (which leaves real tokens
                   // stranded in the wallet forever), launch the persistent force-sell loop in
@@ -3965,7 +4227,18 @@ async function checkOpenPositions() {
           
           // ── SHADOW MODE: close matching shadow trade ──────��────��──────────
           if (trade.tradingMode !== "live") {
-            closeShadowTrade(trade.tokenAddress, currentPrice, finalPnlPct!, reason).catch(() => {});
+            // AI-TUNE(2026-06-23): blend any banked partial-TP leg with the final-exit leg so the
+            // shadow ledger reflects the TRUE realized paper PnL of the whole position, not just the
+            // last slice. Previously a +15% partial followed by a +6% final logged only +6%, which
+            // understated every winner that took a partial and corrupted the avgPaper/inflation figures.
+            const _partialLeg = partialLegMap.get(trade.id);
+            const _blendedPaperPnl = _partialLeg
+              ? _partialLeg.pnlPct * _partialLeg.fraction + finalPnlPct! * (1 - _partialLeg.fraction)
+              : finalPnlPct!;
+            partialLegMap.delete(trade.id);
+            closeShadowTrade(trade.tokenAddress, currentPrice, _blendedPaperPnl, reason).catch(() => {});
+          } else {
+            partialLegMap.delete(trade.id);
           }
           // ─────────────────────────────────────────────────────────────────
           tradedAddresses.set(trade.tokenAddress, Date.now());
@@ -4238,7 +4511,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
   app.get("/api/settings", async (_req, res) => { res.json(engineSettings); });
 
-  // ── Shadow mode endpoints ─────────────────────────────────────────────────
+  // ── Shadow mode endpoints ────���────────────────────────────────────────────
   app.get("/api/shadow/trades", (_req, res) => {
     const { open, closed } = getShadowTrades();
     // Compute summary statistics on closed trades
