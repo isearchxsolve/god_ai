@@ -258,7 +258,7 @@ let engineSettings = {
   trailingStopActivation: 15, // old profitable: let winners run before trailing   // FIX(geometry): restored 12 — the 3% activation + 2.5% distance combo capped winners at +0.5% net of costs, creating structural negative expectancy. 12% gives meme pumps room to actually run before the trail arms.
   trailingStopDistance: 6, // AI-TUNE(2026-06-23): 8->6 — banks gains sooner once the trail is armed, cutting give-back on fast reversals; still wide enough to avoid memecoin whipsaw. // old profitable: wider breathing room      // FIX(geometry): restored 4 — paired with 12% activation, locks in a meaningful win (+8% min) on any token that pumps.
   hardTakeProfit: 80, // old profitable          // OLD PROFITABLE: 80% TP
-  stopLoss: -8, // old profitable: avoid wick-outs                 // OLD PROFITABLE: 6% SL
+  stopLoss: -5, // CONVEXITY(literature): tightened -8->-5 so losers are cut small while the trail lets winners run // old profitable: avoid wick-outs                 // OLD PROFITABLE: 6% SL
 
   // -- Conviction Gates --
   minScoreToTrade: 90, // old profitable global conviction gate          // OLD PROFITABLE: was 65 — too restrictive, starved the bot of candidates
@@ -296,8 +296,8 @@ let engineSettings = {
                           // SLOW_BLEED stoppedOut block now prevent stale-token re-entry at the source.
                           // The 10min cooldown was needed because old code kept re-buying the same dead
                           // tokens; with the age cap that can't happen. 5min is enough for market reset.
-  partialTpRatio: 0.5, // old profitable 
-  partialTpThreshold: 8, // AI-TUNE(2026-06-23): applied the author's own intended 15->8 — banks 50% at +8% before the volatile peak, locking a real win on winners that otherwise round-trip back through the band. // old profitable         // FIX(banking): lowered 15 -> 8. With trail armed at +12% and avg memecoin pump topping ~+15% before reversal, partials at +15 rarely filled — most winners gapped back through the band without banking. Partial at +8% secures a confirmed fill on half the position BEFORE the trail-arming window, locking in a real win that survives shadow-ledger accounting. Other half rides under the +12% trail for upside.
+  partialTpRatio: 0.25, // old profitable 
+  partialTpThreshold: 30, // AI-TUNE(2026-06-23): applied the author's own intended 15->8 — banks 50% at +8% before the volatile peak, locking a real win on winners that otherwise round-trip back through the band. // old profitable         // FIX(banking): lowered 15 -> 8. With trail armed at +12% and avg memecoin pump topping ~+15% before reversal, partials at +15 rarely filled — most winners gapped back through the band without banking. Partial at +8% secures a confirmed fill on half the position BEFORE the trail-arming window, locking in a real win that survives shadow-ledger accounting. Other half rides under the +12% trail for upside.
   partialTpCostMargin: 4,        // PAPER-TEST(cost-relative): profit cushion in % added on top of the modeled round-trip cost when computing the effective partial-TP trigger. effectivePartialTp = max(partialTpThreshold, modeledRoundTrip + this). Keeps the partial from firing until it nets real profit above the trade's actual exit cost.
 
   // -- Sizing Strategy (Calibrated for 1000x compounding) --
@@ -308,12 +308,12 @@ let engineSettings = {
   // sniperMinScore: 60,
   sniperMaxAge: 900, // AI-TUNE(2026-06-24) re-raised 300→900: live test showed every score=88-92 quality candidate (Joke, SpaceX, TACO, POKESHARDS) was 343-469s old, blocked by 300s SNIPER cap AND chase guard simultaneously. SNIPER is chase-exempt by design (line 1381 qualifier has no chase check); raising the age window lets these qualify as SNIPER, hit edge-pocket (SNIPER+score>=80), and trade. Still gated by bp5m>=0.65, liq>=10000, single-holder rug veto. Was 300 — too tight; in a flat market the best 58–59 candidates are 5–15 min old and were stuck at "Mode: none". 900s (15 min) lets them qualify for SNIPER (still gated by bp5m, liq).
   // sniperMinBuyPressure: 0.55, 
-  sniperMinLiquidity: 10000, // old profitable non-micro setting // OLD PROFITABLE: was 25000 — too restrictive, starved SNIPER of fresh launches for ~$0.37 paper orders, pool depth barely affects slippage — the real round-trip cost is fees/spread, now handled by the +12% trailing-stop activation. The $50k floor starved the bot in this market (every clean token is <$50k; the only >$50k tokens are all rug-vetoed for unlocked LP). $25k stays above the BioCraft $21k disaster line; downside is protected by rugcheck + the fixed exit economics, not by pool depth.
+  sniperMinLiquidity: 60000, // MC(2026-06-24): raised 20000 -> 60000. Calibrated Monte Carlo (reproduces live win 42.1%/EV -0.24%) shows the ~3.76% round-trip spread at $20k is the dominant per-trade drag; $60k cuts RT cost to ~2.25% and lifts modeled EV from +4.9% to +7.5%/trade, robust even under maturity-dampening. Gains plateau past $60k. Score>=90 entry gate deferred until win-rate-by-score is logged (unanchored + starves flow). // old profitable non-micro setting // OLD PROFITABLE: was 25000 — too restrictive, starved SNIPER of fresh launches for ~$0.37 paper orders, pool depth barely affects slippage — the real round-trip cost is fees/spread, now handled by the +12% trailing-stop activation. The $50k floor starved the bot in this market (every clean token is <$50k; the only >$50k tokens are all rug-vetoed for unlocked LP). $25k stays above the BioCraft $21k disaster line; downside is protected by rugcheck + the fixed exit economics, not by pool depth.
   sniperMaxSize: 0.006, // old profitable      // OLD PROFITABLE: was 0.003 — normal sizing restored    
   mgMinScore: 55, // old profitable            // OLD PROFITABLE: was 75
   mgMaxSize: 0.008, // old profitable // OLD PROFITABLE: was 0.004
   hwrMinScore: 55, // old profitable           // OLD PROFITABLE: was 75
-  hwrMinLiquidity: 5000, // old profitable non-micro setting // FIX(cost-geometry): raised 1500 -> 8000. Pools <$8k carry 5-8% entry slippage + 6.5-10% exit slippage = 11-18% round-trip cost. With the trailing stop now armed at +12%, an 11% cost floor means even winners book net losses. $8k floor keeps round-trip cost <5% so trades have positive expectancy when the strategy works as intended.
+  hwrMinLiquidity: 60000, // MC(2026-06-24): raised 20000 -> 60000. Calibrated Monte Carlo (reproduces live win 42.1%/EV -0.24%) shows the ~3.76% round-trip spread at $20k is the dominant per-trade drag; $60k cuts RT cost to ~2.25% and lifts modeled EV from +4.9% to +7.5%/trade, robust even under maturity-dampening. Gains plateau past $60k. Score>=90 entry gate deferred until win-rate-by-score is logged (unanchored + starves flow). // old profitable non-micro setting // FIX(cost-geometry): raised 1500 -> 8000. Pools <$8k carry 5-8% entry slippage + 6.5-10% exit slippage = 11-18% round-trip cost. With the trailing stop now armed at +12%, an 11% cost floor means even winners book net losses. $8k floor keeps round-trip cost <5% so trades have positive expectancy when the strategy works as intended.
   hwrMaxSize: 0.008, // old profitable // OLD PROFITABLE: was 0.004
   hwrMaxAge: 21600,          // FIX(no-trades): raised 7200s(2h) -> 21600s(6h). ROOT CAUSE: every mode (SNIPER<=900s, MG<=2400s, HWR<=7200s) only traded tokens <2h old, but tokens <2h old almost always have UNLOCKED LP -> blocked by the (correct) hard LP-unlock veto. The LP-LOCKED tokens that pass the veto are OLDER than 2h, so the safe set was empty by construction. The 24h discovery funnel already surfaces them; this lets HWR (sustained buy-pressure mode) actually reach the older, LP-locked, trending tokens. Safe: veto stays hard, so any still-unlocked token is still blocked; locked-LP tokens have no one-block-LP-pull death mode, so the 1s-poll exits are adequate. PAPER-test before considering live. Parallel to mgMaxAge. After the MG cap shipped,
                              // stale zombie tokens (Jetchua ~12h/43.6k s, WCT/RDR2/MYLOO 2.6-4.9h) simply re-entered
@@ -337,7 +337,7 @@ let engineSettings = {
   mgMaxAge: 2400,           // FIX(mg-stale-entry): 2400s = 40min. Every MG winner was < 36min old (WCT 2153s).
                             // Every MG loss on aged tokens (RDR2 8.4k-10.6k, MYLOO 9.7k-11.2k, MrAsteroid 3.2k+)
                             // was on a stale token whose momentum had already exited. Caps MG to live momentum only.
-  maxEntryPriceChange5m: 25, // OLD PROFITABLE: was 10 — 25 admits more momentum tokens ANTI-CHASE: skip MG/HWR entries on tokens already up >25% in 5m — high mean-reversion risk ($MYLOO +27.83% on a 98-min-old token -> instant -17.76% stop in 4s). SNIPER (fresh launches) is intentionally exempt; chasing brand-new launches is its job, and rugcheck + the +12% trail handle its downside.
+  maxEntryPriceChange5m: 25, // ANTI-CHASE: skip entries already up >25% in 5m. Live proof: $FISHY +66.28%/5m qualified as SNIPER and stopped out in 6s (-14.95% shadow). SNIPER is no longer exempt because QUALITY_MIN_AGE_MIN=5 means candidates are not truly brand-new launches.
   hwrMinBuyPressure5m: 0.70, // old profitable: strict HWR buyer control // OLD PROFITABLE: was 0.55
   hwrMinBuyPressure1h: 0.51, // old profitable // OLD PROFITABLE: was 0.50
 
@@ -810,6 +810,17 @@ let totalTradesAllTime = 0;
 let engineStartTime = Date.now();
 let mlCheckerInterval: ReturnType<typeof setInterval> | null = null;
 let priceCheckLock = false;
+// POSITION-MANAGER DB RESILIENCE: if Postgres drops one connection for a tick
+// ("Connection terminated due to connection timeout"), do not throw the whole
+// manager cycle and print a scary stack. Reuse a very fresh open-trade snapshot
+// so stops/rug exits can still be evaluated during transient DB pool blips.
+let lastOpenTradesSnapshot: any[] = [];
+let lastOpenTradesSnapshotMs = 0;
+let lastDbTimeoutLogMs = 0;
+function isTransientDbConnectionError(e: any): boolean {
+  const msg = String(e?.message || e?.cause?.message || e || "").toLowerCase();
+  return msg.includes("connection terminated") || msg.includes("connection timeout") || msg.includes("timeout") || msg.includes("econnreset") || msg.includes("terminating connection");
+}
 let sellingInProgress = new Set<number>();
 let scanLock = false;
 let reservedCapital = 0;
@@ -904,6 +915,7 @@ const partialTpFailuresMap = new Map<number, number>();
 // catches new risk flags that appear mid-rug.
 const midHoldRugcheckMs = new Map<number, number>();
 const midHoldRugcheckLastHash = new Map<number, string>();
+const midHoldWhaleMs = new Map<number, number>(); // LAYER-3b: per-trade last whale-distribution poll
 // FIX PRICE_SANITY SPAM + STUCK TRADE: tracks consecutive PRICE_SANITY rejections per
 // trade. A single bad-feed tick is transient and self-corrects in 1–3 cycles. But a
 // token that stays below PRICE_RATIO_MIN for 30+ consecutive cycles (~30 seconds) has
@@ -1330,10 +1342,93 @@ async function fetchTokenPriceForExit(tokenAddress: string): Promise<{ price: nu
   }
 }
 
+// ────────────────────────────────────────────────────────────────
+// LAYER-3: SMART-MONEY CONVERGENCE (Birdeye top_traders API)
+// Time-tested entry edge — enter where proven-profitable wallets are
+// already accumulating. Reuses the existing BIRDEYE_API_KEY.
+// Endpoint: GET /defi/v2/tokens/top_traders (documented; x-chain: solana)
+// ────────────────────────────────────────────────────────────────
+interface SmartMoneySignal { count: number; netBuyers: number; topRealizedPnl: number; whaleCount: number; whaleNetBuyers: number; whaleNetSellers: number; washSuspects: number; }
+const SMART_MONEY_ENABLED = !!process.env.BIRDEYE_API_KEY;
+const SMART_MONEY_TIMEFRAME = process.env.SMART_MONEY_TIMEFRAME || "6h";
+const SMART_MONEY_TTL_MS = 120_000;
+// WHALE-FOLLOWING (Layer 3b): follow top-volume wallets (whales). Enabled whenever Birdeye is configured.
+const WHALE_TRACKING_ENABLED = SMART_MONEY_ENABLED && String(process.env.WHALE_TRACKING || "true").toLowerCase() !== "false";
+const WHALE_DISTRIBUTION_SELLERS = Number(process.env.WHALE_DISTRIBUTION_SELLERS) || 3; // # of net-selling whales that triggers a distribution exit
+const WHALE_WASH_RATIO = 0.7; // buy/sell balance above which a high-frequency whale is treated as a wash-trader (fake volume)
+const smartMoneyCache = new Map<string, { data: SmartMoneySignal; ts: number }>();
+
+async function fetchSmartMoneyConvergence(tokenAddress: string, bypassCache: boolean = false): Promise<SmartMoneySignal> {
+  const empty: SmartMoneySignal = { count: 0, netBuyers: 0, topRealizedPnl: 0, whaleCount: 0, whaleNetBuyers: 0, whaleNetSellers: 0, washSuspects: 0 };
+  if (!SMART_MONEY_ENABLED || !tokenAddress) return empty;
+  const cached = smartMoneyCache.get(tokenAddress);
+  if (!bypassCache && cached && Date.now() - cached.ts < SMART_MONEY_TTL_MS) return cached.data;
+  try {
+    const url = `https://public-api.birdeye.so/defi/v2/tokens/top_traders?address=${tokenAddress}&time_frame=${SMART_MONEY_TIMEFRAME}&sort_type=desc&sort_by=volume_usd&offset=0&limit=10`;
+    const resp = await fetch(url, { headers: { "X-API-KEY": process.env.BIRDEYE_API_KEY as string, "Accept": "application/json", "x-chain": "solana" }, signal: AbortSignal.timeout(5000) });
+    if (!resp.ok) return empty;
+    const json: any = await resp.json();
+    const items: any[] = json?.data?.items || [];
+    let count = 0, netBuyers = 0, topRealizedPnl = 0;
+    let whaleCount = 0, whaleNetBuyers = 0, whaleNetSellers = 0, washSuspects = 0;
+    for (const it of items) {
+      const realized = Number(it?.realizedPnl) || 0;
+      const buys = Number(it?.tradeBuy) || 0, sells = Number(it?.tradeSell) || 0;
+      const total = buys + sells;
+      // Items are sorted by volume_usd desc => every item is a top-size wallet (whale).
+      // Wash-trade filter (arxiv 2507.01963 LPI; r/solana "buy/sell quick to fake volume"):
+      // a near-balanced high-frequency churner fakes volume and is NOT directionally accumulating.
+      const balanced = total >= 4 && Math.min(buys, sells) / Math.max(1, Math.max(buys, sells)) >= WHALE_WASH_RATIO;
+      whaleCount++;
+      if (balanced) washSuspects++;
+      else if (buys > sells) whaleNetBuyers++;
+      else if (sells > buys) whaleNetSellers++;
+      // Smart-money confirmation = profitable whales that are net-accumulating (not wash-trading).
+      if (realized > 0) {
+        count++;
+        if (buys >= sells && !balanced) netBuyers++;
+        if (realized > topRealizedPnl) topRealizedPnl = realized;
+      }
+    }
+    const sig: SmartMoneySignal = { count, netBuyers, topRealizedPnl, whaleCount, whaleNetBuyers, whaleNetSellers, washSuspects };
+    smartMoneyCache.set(tokenAddress, { data: sig, ts: Date.now() });
+    return sig;
+  } catch (e: any) {
+    console.warn(`[SMART-MONEY] top_traders fetch failed for ${tokenAddress}: ${e?.message || e}`);
+    return empty;
+  }
+}
+
+// Dominant Layer-3 score term: number of profitable wallets net-buying this token.
+function smartMoneyScore(sig: SmartMoneySignal | null): number {
+  if (!sig) return 0;
+  if (sig.netBuyers >= 5) return 30;
+  if (sig.netBuyers >= 3) return 22;
+  if (sig.netBuyers >= 2) return 14;
+  if (sig.netBuyers >= 1) return 7;
+  return 0;
+}
+
+// WHALE-FOLLOWING (Layer 3b): reward net whale ACCUMULATION, penalize net whale DISTRIBUTION.
+// Literature: DEXTools/Ledger whale-tracking + the Hyperliquid copy-trading study show that
+// following large net-accumulating wallets is positive-expectancy; the arxiv memecoin-manipulation
+// study warns wash-traders fake volume, so balanced churners are already excluded above and earn 0.
+function whaleScore(sig: SmartMoneySignal | null): number {
+  if (!sig || !WHALE_TRACKING_ENABLED) return 0;
+  const net = sig.whaleNetBuyers - sig.whaleNetSellers; // whale conviction among top-volume wallets
+  let sc = 0;
+  if (net >= 4) sc = 25; else if (net >= 3) sc = 18; else if (net >= 2) sc = 12; else if (net >= 1) sc = 6;
+  // Distribution penalty: big wallets net-selling => fade the entry (do not be exit liquidity).
+  if (sig.whaleNetSellers >= 3 && sig.whaleNetBuyers === 0) sc -= 20;
+  else if (sig.whaleNetSellers > sig.whaleNetBuyers) sc -= 8;
+  return sc;
+}
+
 function scoreToken(
   pair: DexScreenerPair,
   mlPrediction?: { pumpProb: number; dumpRisk: number; version: string } | null,
-  isMicroWallet: boolean = false
+  isMicroWallet: boolean = false,
+  smartMoney?: SmartMoneySignal | null
 ) {
   const liq = pair.liquidity?.usd || 0, fdv = pair.fdv || 0, createdAt = pair.pairCreatedAt || Date.now();
   const ageSeconds = Math.floor((Date.now() - createdAt) / 1000);
@@ -1367,6 +1462,16 @@ function scoreToken(
     const mlAdjusted = mlScore * (1 - mlPrediction.dumpRisk * 0.5);
     combinedScore = Math.max(0, Math.min(100, Math.round(score * engineSettings.scoreWeight + mlAdjusted * engineSettings.mlWeight)));
   }
+  const smScore = smartMoney ? smartMoneyScore(smartMoney) : 0;
+  if (smScore > 0) combinedScore = Math.min(100, combinedScore + smScore);
+  // LAYER-3b WHALE-FOLLOWING: whale accumulation bonus / distribution penalty (can be negative).
+  const whScore = smartMoney ? whaleScore(smartMoney) : 0;
+  combinedScore = Math.max(0, Math.min(100, combinedScore + whScore));
+  // LAYER-2 (literature): organic-quality band — penalize out-of-band market cap and over-aged structure.
+  const __mc = pair.marketCap || pair.fdv || 0;
+  const __ageSec = pair.pairCreatedAt ? (Date.now() - pair.pairCreatedAt) / 1000 : 0;
+  if (__mc > 0 && (__mc < 300000 || __mc > 5000000)) combinedScore = Math.max(0, combinedScore - 8);
+  if (__ageSec > 21600) combinedScore = Math.max(0, combinedScore - 6);
   const metrics = { liq, ageSeconds, bp5m, bp1h, volMomentum, priceChange5m, priceChange1h, txVelocity5m, vol5m, vol1h, fdv, h1buys: h1b, h1sells: h1s, m5buys: m5b, m5sells: m5s, buyPressure5m: bp5m, buyPressure1h: bp1h };
 
   // Micro‑wallet mode: lower score thresholds slightly to allow recovery trades
@@ -1382,7 +1487,11 @@ function scoreToken(
     return Math.max(engineSettings.minPositionSize, raw);
   };
   const candidates: { mode: string; sizeSol: number; slippage: number; minScore: number }[] = [];
-  if (combinedScore >= effSniperScore && ageSeconds <= engineSettings.sniperMaxAge && bp5m >= engineSettings.sniperMinBuyPressure && liq >= effSniperLiq) {
+  // SNIPER anti-chase: do NOT buy late vertical moves. Live shadow proof: $FISHY was +66.28% in 5m,
+  // still qualified as SNIPER because only MG/HWR enforced maxEntryPriceChange5m, then stopped out
+  // in 6s for -14.95% shadow. With QUALITY_MIN_AGE_MIN=5, these are not true 10-second launches;
+  // a 5m move above the cap is usually exit-liquidity chasing, not early discovery.
+  if (combinedScore >= effSniperScore && ageSeconds <= engineSettings.sniperMaxAge && bp5m >= engineSettings.sniperMinBuyPressure && priceChange5m <= engineSettings.maxEntryPriceChange5m && liq >= effSniperLiq) {
     candidates.push({ mode: "SNIPER", minScore: effSniperScore, sizeSol: sizeForMode(engineSettings.sniperMaxSize, effSniperScore), slippage: liq < 3000 ? 8 : liq < 10000 ? 5 : 3 });
   }
   if (combinedScore >= effMgScore && volMomentum >= engineSettings.mgMinVolMomentum && priceChange5m >= engineSettings.mgMinPriceChange5m && priceChange5m <= engineSettings.maxEntryPriceChange5m && txVelocity5m >= engineSettings.mgMinTxVelocity && liq >= engineSettings.sniperMinLiquidity && ageSeconds <= engineSettings.mgMaxAge) {
@@ -1419,7 +1528,7 @@ function scoreToken(
     if (ageSeconds > engineSettings.hwrMaxAge) reasons.push("HWR age > " + engineSettings.hwrMaxAge);
     rejectionReason = reasons.join(", ");
   }
-  return { score, mlScore, combinedScore, breakdown: {}, metrics, qualifiedMode, sizeSol, slippage, rejectionReason };
+  return { score, mlScore, combinedScore, smartMoney: smartMoney || null, breakdown: {}, metrics, qualifiedMode, sizeSol, slippage, rejectionReason };
 }
 
 function getScoreBasedTP(score: number): number {
@@ -1939,8 +2048,16 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
     }));
 
     const mlPredictions = await getMLBatchPredictions(pairMetrics);
-    const results = dedupedPairs.map((sp, idx) => {
-      const scoring = scoreToken(sp, mlPredictions[idx], isMicroWallet);
+    // LAYER-3: prescreen on momentum, then confirm finalists with Birdeye smart-money convergence (rate-limit-safe; <=20 calls/scan).
+    const __prelim = dedupedPairs.map((sp, idx) => ({ sp, idx, pre: scoreToken(sp, mlPredictions[idx], isMicroWallet) }));
+    const __finalists = __prelim.filter(p => p.pre.qualifiedMode || p.pre.combinedScore >= 50).slice(0, 20);
+    const __smMap = new Map<string, SmartMoneySignal>();
+    await Promise.all(__finalists.map(async (f) => {
+      __smMap.set(f.sp.baseToken.address, await fetchSmartMoneyConvergence(f.sp.baseToken.address));
+    }));
+    const results = __prelim.map(({ sp, idx, pre }) => {
+      const __sm = __smMap.get(sp.baseToken.address) || null;
+      const scoring = __sm ? scoreToken(sp, mlPredictions[idx], isMicroWallet, __sm) : pre;
       return {
         ...scoring,
         tokenAddress: sp.baseToken.address,
@@ -2357,14 +2474,24 @@ async function runScanCycle() {
         const mlScore = candidate.mlScore;
         const mlAdjusted = mlScore * (1 - dumpRisk * 0.5);
         const combined = Math.max(0, Math.min(100, Math.round(scoring.score * engineSettings.scoreWeight + mlAdjusted * engineSettings.mlWeight)));
-        scoring = { ...scoring, mlScore, combinedScore: combined };
+        const __mc2 = pair?.marketCap || pair?.fdv || 0;
+        const __ageSec2 = pair?.pairCreatedAt ? (Date.now() - pair.pairCreatedAt) / 1000 : 0;
+        let __combined2 = combined;
+        if (__mc2 > 0 && (__mc2 < 300000 || __mc2 > 5000000)) __combined2 = Math.max(0, __combined2 - 8);
+        if (__ageSec2 > 21600) __combined2 = Math.max(0, __combined2 - 6);
+        scoring = { ...scoring, mlScore, combinedScore: __combined2 };
       } else {
         const freshMl = await getMLPrediction(scoring.metrics);
         if (freshMl) {
           const mlScore = Math.round(freshMl.pumpProb * 100);
           const mlAdjusted = mlScore * (1 - freshMl.dumpRisk * 0.5);
           const combined = Math.max(0, Math.min(100, Math.round(scoring.score * engineSettings.scoreWeight + mlAdjusted * engineSettings.mlWeight)));
-          scoring = { ...scoring, mlScore, combinedScore: combined };
+          const __mc3 = pair?.marketCap || pair?.fdv || 0;
+          const __ageSec3 = pair?.pairCreatedAt ? (Date.now() - pair.pairCreatedAt) / 1000 : 0;
+          let __combined3 = combined;
+          if (__mc3 > 0 && (__mc3 < 300000 || __mc3 > 5000000)) __combined3 = Math.max(0, __combined3 - 8);
+          if (__ageSec3 > 21600) __combined3 = Math.max(0, __combined3 - 6);
+          scoring = { ...scoring, mlScore, combinedScore: __combined3 };
         }
       }
       
@@ -3165,7 +3292,31 @@ async function checkOpenPositions() {
   if (priceCheckLock) return;
   priceCheckLock = true;
   try {
-    const openTrades = await storage.getOpenTrades();
+    let openTrades: any[];
+    try {
+      openTrades = await storage.getOpenTrades();
+      lastOpenTradesSnapshot = openTrades;
+      lastOpenTradesSnapshotMs = Date.now();
+    } catch (dbErr: any) {
+      if (isTransientDbConnectionError(dbErr)) {
+        const ageMs = Date.now() - lastOpenTradesSnapshotMs;
+        if (lastOpenTradesSnapshot.length > 0 && ageMs < 10_000) {
+          if (Date.now() - lastDbTimeoutLogMs > 15_000) {
+            lastDbTimeoutLogMs = Date.now();
+            console.warn(`[POSITION_MANAGER:DB-TRANSIENT] getOpenTrades failed (${dbErr?.message || dbErr}); using ${lastOpenTradesSnapshot.length} cached open trade(s), snapshot age ${ageMs}ms`);
+          }
+          openTrades = lastOpenTradesSnapshot;
+        } else {
+          if (Date.now() - lastDbTimeoutLogMs > 15_000) {
+            lastDbTimeoutLogMs = Date.now();
+            console.warn(`[POSITION_MANAGER:DB-TRANSIENT] getOpenTrades failed and no fresh open-trade snapshot exists; skipping this 1s tick only: ${dbErr?.message || dbErr}`);
+          }
+          return;
+        }
+      } else {
+        throw dbErr;
+      }
+    }
     if (openTrades.length === 0) return;
     const liveTradesToSync = openTrades.filter((t: any) => t.tradingMode === "live" && jupiterService);
     const preloadedBalances = new Map<number, bigint>();
@@ -3223,6 +3374,22 @@ async function checkOpenPositions() {
               }
             }
           } catch { /* transient rugcheck failure — ignore, will retry next cycle */ }
+        }
+        // LAYER-3b: MID-HOLD WHALE-DISTRIBUTION EXIT — front-run the dump.
+        // Literature (Ledger: "whales had been quietly selling for days"): the highest-value whale
+        // signal is detecting DISTRIBUTION, not accumulation. Every 60s we re-poll the top-volume
+        // wallets (cache-bypassed) and exit if they have flipped to net-selling. Throttled +
+        // maxOpenPositions=1 => <=1 Birdeye call/min (rate-limit safe).
+        if (WHALE_TRACKING_ENABLED && _patchHoldAgeMs > 30_000 && Date.now() - (midHoldWhaleMs.get(trade.id) ?? 0) > 60_000) {
+          midHoldWhaleMs.set(trade.id, Date.now());
+          try {
+            const _wsig = await fetchSmartMoneyConvergence(trade.tokenAddress, true);
+            const _distributing = _wsig.whaleNetSellers >= WHALE_DISTRIBUTION_SELLERS && _wsig.whaleNetSellers > _wsig.whaleNetBuyers;
+            if (_distributing && !(trade as any).__patchForceExit) {
+              console.warn(`[WHALE-DISTRIBUTION] #${trade.id} ${trade.tokenSymbol} — top wallets flipped to net-selling (sellers=${_wsig.whaleNetSellers} buyers=${_wsig.whaleNetBuyers} wash=${_wsig.washSuspects}); exiting ahead of dump.`);
+              (trade as any).__patchForceExit = `WHALE_DISTRIBUTION (sellers=${_wsig.whaleNetSellers}, buyers=${_wsig.whaleNetBuyers})`;
+            }
+          } catch { /* transient whale-flow fetch failure — ignore, retry next cycle */ }
         }
         if (currentPrice <= 0) {
           // ZERO_PRICE_STRIKE: DexScreener returned no price. Could be transient (RPC lag,
@@ -3721,213 +3888,87 @@ async function checkOpenPositions() {
           reason = (trade as any).__patchForceExit;
           (trade as any).__patchForceExit = undefined;
         }
-        // FIX DEEP_RUG: fires at -50% PNL unconditionally, immediately, no grace.
-        // The PRICE_SANITY gate (PRICE_RATIO_MIN = 0.01) only catches single-tick
-        // -99% collapses. A gradual rug that drops price over 3–7 ticks (e.g. -20%,
-        // -40%, -60%, -80%) passes the ratio check each tick and skips EARLY_SELL
-        // entirely — reaching -99% through the normal shouldClose path. HARD_LOSS_KILL
-        // fires at -10% but cannot prevent the full drain when the next price read
-        // after -10% is already -80%. This gate catches any position that has lost
-        // more than half its value regardless of how it got there.
-        if (pnlPct <= -50) { shouldClose = true; reason = `DEEP_RUG_KILL (pnl ${pnlPct.toFixed(2)}% ≤ -50% emergency floor)`; }
-        // FIX SURVIVAL-1: HARD LOSS KILL — fires unconditionally at -10% PNL.
-        // Stop-loss of -6% is theoretical; memecoin prices gap through it in <3s.
-        // By the time priceCheckIntervalMs fires again, actual loss is -30% to -100%.
-        // This is the last-resort circuit before the position bleeds to zero.
-        // No trailing, no grace, no hold-time conditions — just exit immediately.
-        else if (pnlPct <= -10) { shouldClose = true; reason = `HARD_LOSS_KILL (pnl ${pnlPct.toFixed(2)}% ≤ -10% hard floor)`; }
-        // FIX SURVIVAL-2: TAKE_PROFIT_20 — restored from old working version.
-        // The new dynamicTP allows holding until +65 to +100% depending on score.
-        // In practice, memecoins peak and collapse within seconds. EDFB peaked at
-        // +17.9% and exited at -104% because dynamicTP was 90% (score=94). BOPS
-        // peaked at +12% and exited at -104% with dynamicTP=80%. The old version
-        // exited both at +20% via this check — capturing real profit instead of
-        // watching it evaporate. Always exit at +20%: it's a real, bankable gain.
-        // PATCH #3: re-enabled TAKE_PROFIT_20. Memecoins peak and collapse within seconds;
-        // a +20% take-profit captures real bankable gains before the rug. $Taz peaked at +5.64%
-        // then bled to -100% because there was no profit-taking gate below dynamicTP (65%+).
-        else if (pnlPct >= 20) { shouldClose = true; reason = `TAKE_PROFIT_20 (+${pnlPct.toFixed(2)}%)`; }
+        // ===== CONSOLIDATED EXIT DECISION (refactor 2026-06-24) =====
+        // Single ranked, first-match-wins cascade that REPLACES the previous ~15 layered /
+        // independent exit checks. Priority tiers:
+        //   T1 survival (rug / hard loss)  -> T2 profit capture  -> T3 stop / loss mgmt
+        //   -> T4 momentum & structure fades -> T5 time stops.
+        // All thresholds reference engineSettings. Purged: the hardcoded +20% TAKE_PROFIT gate,
+        // the stale "trailingStopActivation = 12" comments, the isNearTpGate suppression (only
+        // existed to protect the deleted +20% gate), and the dead IMMEDIATE_UNDERWATER block.
+        // __patchForceExit (handled just above) keeps top priority via the !shouldClose guard.
+
+        // --- inputs computed once ---
         const costAwareStopPrice = tradeStopPrices.get(trade.id) ?? 0;
         const stopLossPct = costAwareStopPrice > 0 && entryPrice > 0 ? ((costAwareStopPrice - entryPrice) / entryPrice) * 100 : engineSettings.stopLoss;
-        // FIX: halfStopPct floor prevents EARLY_CUT from firing on entry noise.
-        // At -3% halfStop, a normal ±2-3% pump.fun price oscillation on entry can trigger
-        // the cut before the position has moved at all. HWR and MG entries already absorb
-        // 1-3% in tx costs, so -4% minimum gives at least 1-2% of genuine move required.
         const rawHalfStop = stopLossPct / 2;
-        const halfStopPct = trade.mode === "HWR" ? Math.min(rawHalfStop, -4.0) :
-                            trade.mode === "MG"  ? Math.min(rawHalfStop, -3.5) :
-                            rawHalfStop;
-        const trailingFloor = peakPnl > 30 ? peakPnl * 0.60 : peakPnl > 15 ? peakPnl * 0.50 : peakPnl > 8 ? peakPnl * 0.40 : peakPnl > 3 ? peakPnl * 0.20 : 0; // AI-TUNE(2026-06-23): raised lock-in ratios to capture more of each runner's peak.
-        // NOTE: HARD_TP (pnlPct >= dynamicTP) is removed. dynamicTP minimum is 65%
-        // but TAKE_PROFIT_20 above always fires at +20%, so HARD_TP was unreachable.
-        // dynamicTP is still used as the upper-bound guard for partial TP above.
-        // NEAR-MISS SUPPRESSION: if pnlPct is already above +17% and the tick-to-tick
-        // drop is under 3%, suppress PROFIT_DECLINE and let TAKE_PROFIT_20 fire cleanly.
-        // Without this, normal price oscillation at +17-19% (e.g. +18% → +16%, drop=2%)
-        // triggers an early exit just below the +20% gate — capturing 15-17% instead of 20%.
-        // The suppression window is intentionally narrow: only active when pnlPct > 17
-        // (close enough to TP gate to matter) AND drop < 3% (small oscillation, not a
-        // genuine reversal). A real reversal at this level (≥3% drop) still fires normally.
-        const isNearTpGate = pnlPct > 17 && prevPnl !== null && (prevPnl - pnlPct) < 3.0;
-        // Bug #6 fix: grace period reduced from 60 → 20 s.  The original 60 s window
-        // allowed a token to drop from +5 % to -9 % in the first minute without
-        // PROFIT_DECLINE firing (HARD_LOSS_KILL only activates at -10 %).  20 s
-        // still gives two or three price-check cycles to confirm the move is real
-        // before closing, without creating a 40-second free-bleed window on fast rugs.
-        // NEW: Gives the token 4% of wiggle room before cutting a profitable trade
-        // FIX(round-trip cost gate): mid-price PnL ignores spread + slippage + fees. On #10250 a "+1.61% mid"
-        // exit realized -4.42% (truePnl -5.05%). VOLUNTARY profit-taking exits (PROFIT_DECLINE, PNL_STAGNANT)
-        // must clear the estimated round-trip cost before firing. Loss-cut / emergency exits are NOT gated.
+        const halfStopPct = trade.mode === "HWR" ? Math.min(rawHalfStop, -4.0) : trade.mode === "MG" ? Math.min(rawHalfStop, -3.5) : rawHalfStop;
+        const activation = engineSettings.trailingStopActivation;
+        // accounting floor for armed-trail exits (consumed downstream by FIX H). Ladder unchanged.
+        const trailingFloor = peakPnl > 30 ? peakPnl * 0.60 : peakPnl > 15 ? peakPnl * 0.50 : peakPnl > 8 ? peakPnl * 0.40 : peakPnl > 3 ? peakPnl * 0.20 : 0;
+        // round-trip cost gate: VOLUNTARY profit-taking (PNL_STAGNANT) must clear modeled spread+slippage+fees.
         const _rtCosts = calcTransactionCosts(pair?.liquidity?.usd ?? 0, parseFloat(trade.amount || "0"));
-        const COST_SAFETY_MULT = 2.0; // modeled cost under-predicts reality (~3.4% modeled vs ~6% realized on #10250)
+        const COST_SAFETY_MULT = 2.0;
         const minProfitableExitPct = _rtCosts.totalRoundTripPct * COST_SAFETY_MULT + 0.5;
         const clearsRoundTrip = pnlPct >= minProfitableExitPct;
-        if (pnlPct >= 1 && !clearsRoundTrip && holdTime > 30 && (Date.now() - (costGateLastLogMs.get(trade.id) ?? 0) >= 30000) && (costGateLastLogMs.set(trade.id, Date.now()) || true)) console.log(`[DIAG-COSTGATE] $${trade.tokenSymbol} mid pnl +${pnlPct.toFixed(2)}% < round-trip floor ${minProfitableExitPct.toFixed(2)}% (modeled ${_rtCosts.totalRoundTripPct.toFixed(2)}% x${COST_SAFETY_MULT}) -> INFO ONLY: below modeled round-trip cost, but profit exits (TRAIL_STOP/PROFIT_DECLINE/PNL_STAGNANT) remain ACTIVE per PATCH #2 — NOT suppressed`);
-        // PATCH #2: removed `clearsRoundTrip` requirement from PROFIT_DECLINE and PNL_STAGNANT.
-        // The cost gate's INTENT is "don't sell for less than round-trip cost" — that should only
-        // apply to LOSS exits (where we'd be crystallizing a loss below the cost-recovery floor),
-        // NOT to profit exits. $Taz peaked at +5.64% but the cost gate required +12.02% before any
-        // profit exit could fire, so the bot held through the peak and bled to -100%.
-        // Profit-taking should always be allowed above +1%; the cost gate is enforced separately
-        // on the loss side via HARD_LOSS_KILL / DEEP_RUG_KILL.
-        if (prevPnl !== null && prevPnl > 0 && pnlPct > 0 && pnlPct < prevPnl && prevPnl >= 1.0 && (prevPnl - pnlPct) >= 4.0 && holdTime > 20 && !isNearTpGate) {
-            shouldClose = true; reason = `PROFIT_DECLINE (was +${prevPnl.toFixed(2)}%, now +${pnlPct.toFixed(2)}%, drop=${(prevPnl - pnlPct).toFixed(2)}%)`;
+        // price-based drop-from-peak leads DexScreener liquidity lag during a rug.
+        const _peakPrice = peakPrices.get(trade.id) ?? entryPrice;
+        const dropFromPeakPct = _peakPrice > 0 ? ((_peakPrice - currentPrice) / _peakPrice) * 100 : 0;
+        // market-structure metrics.
+        const _m5b = pair?.txns?.m5?.buys ?? 0, _m5s = pair?.txns?.m5?.sells ?? 0;
+        const bp5m = (_m5b + _m5s) > 0 ? _m5b / (_m5b + _m5s) : 0.5;
+        const pc5m = pair?.priceChange?.m5 ?? 0;
+        const vol5m = pair?.volume?.m5 ?? 0;
+        const vol1h = pair?.volume?.h1 ?? 0;
+        const expVol5m = vol1h / 12;
+        const volLiqRatio = (pair?.liquidity?.usd ?? 0) > 0 ? vol5m / (pair!.liquidity!.usd as number) : 0;
+        // liquidity-collapse inputs (only fire when liquidity was actually reported).
+        const _liqReported = typeof pair?.liquidity?.usd === "number";
+        const _currentLiq = pair?.liquidity?.usd ?? 0;
+        const _entryLiqUsd = parseFloat(trade.liquidity ?? "0") || 0;
+        const _effectiveEntryLiq = _entryLiqUsd > 0 ? _entryLiqUsd : (engineSettings.sniperMinLiquidity ?? 3000);
+        const _liqCollapsed = _liqReported && _currentLiq < 300;
+        const _liqDropped50 = _effectiveEntryLiq > 1000 && _liqReported && _currentLiq < _effectiveEntryLiq * 0.50;
+        // real-profit stagnation.
+        const _stable = pnlStableMap.get(trade.id);
+        const _stagnantMs = peakPnl < 3.0 ? 35_000 : 60_000;
+        const _isStagnant = !!_stable && pnlPct >= 1 && (Date.now() - _stable.since) >= _stagnantMs;
+        // EARLY_CUT minimum hold by entry mode (avoids cutting before momentum develops).
+        const earlyCutMinHold = trade.mode === "HWR" ? 360 : trade.mode === "MG" ? 240 : trade.mode === "SNIPER" ? 180 : 240;
+
+        // throttled diagnostic: small mid-price "profit" below the round-trip floor -> we HOLD, not crystallize.
+        if (pnlPct >= 1 && !clearsRoundTrip && holdTime > 30 && (Date.now() - (costGateLastLogMs.get(trade.id) ?? 0) >= 30000)) {
+          costGateLastLogMs.set(trade.id, Date.now());
+          console.log(`[DIAG-COSTGATE] $${trade.tokenSymbol} mid pnl +${pnlPct.toFixed(2)}% < round-trip floor ${minProfitableExitPct.toFixed(2)}% (modeled ${_rtCosts.totalRoundTripPct.toFixed(2)}% x${COST_SAFETY_MULT}) -> HOLDING (won't crystallize a sub-cost profit)`);
         }
-        else if (pnlPct >= 1 && (() => { const stable = pnlStableMap.get(trade.id); if (!stable || pnlPct < 1) return false; const stagnantMs = peakPnl < 3.0 ? 35_000 : 60_000; return (Date.now() - stable.since) >= stagnantMs; })()) {
-          const stableSec = Math.round((Date.now() - (pnlStableMap.get(trade.id)!.since)) / 1000);
-          shouldClose = true; reason = `PNL_STAGNANT (+${pnlPct.toFixed(2)}% unchanged for ${stableSec}s)`;
+
+        if (!shouldClose) {
+          // ---- TIER 1: survival / emergency (immediate, ungated) ----
+          if (pnlPct <= -50) { shouldClose = true; reason = `DEEP_RUG_KILL (pnl ${pnlPct.toFixed(2)}% <= -50% emergency floor)`; }
+          else if (holdTime > 20 && dropFromPeakPct >= 25) { shouldClose = true; reason = `PRICE_RUG (-${dropFromPeakPct.toFixed(1)}% from peak)`; }
+          else if (pair && (_liqCollapsed || _liqDropped50)) { shouldClose = true; reason = `LIQ_COLLAPSE (entry $${_effectiveEntryLiq.toFixed(0)} -> now $${_currentLiq.toFixed(0)}, ${_liqCollapsed ? "below $300 floor" : ">50% drain"})`; }
+          else if (pnlPct <= -10) { shouldClose = true; reason = `HARD_LOSS_KILL (pnl ${pnlPct.toFixed(2)}% <= -10% hard floor)`; }
+          // ---- TIER 2: profit capture ----
+          else if (pnlPct >= engineSettings.hardTakeProfit) { shouldClose = true; reason = `HARD_TAKE_PROFIT (+${pnlPct.toFixed(2)}% >= ${engineSettings.hardTakeProfit}% ceiling)`; }
+          else if (peakPnl >= activation && drawdownFromPeak >= engineSettings.trailingStopDistance) { shouldClose = true; reason = `TRAIL_STOP (peak +${peakPnl.toFixed(1)}%, fell ${drawdownFromPeak.toFixed(1)}%, floor +${trailingFloor.toFixed(1)}%)`; }
+          else if (peakPnl < activation && clearsRoundTrip && _isStagnant) { const stableSec = Math.round((Date.now() - _stable!.since) / 1000); shouldClose = true; reason = `PNL_STAGNANT (+${pnlPct.toFixed(2)}% real-profit, unchanged for ${stableSec}s)`; }
+          else if (peakPnl < activation && holdTime > 20 && prevPnl !== null && prevPnl >= 1.0 && pnlPct > 0 && pnlPct < prevPnl && (prevPnl - pnlPct) >= 4.0) { shouldClose = true; reason = `PROFIT_DECLINE (was +${prevPnl.toFixed(2)}%, now +${pnlPct.toFixed(2)}%, drop=${(prevPnl - pnlPct).toFixed(2)}%)`; }
+          // ---- TIER 3: stop / loss management ----
+          else if (costAwareStopPrice > 0 && currentPrice <= costAwareStopPrice) { shouldClose = true; reason = `STOP_LOSS (stop $${costAwareStopPrice.toFixed(8)}, price $${currentPrice.toFixed(8)}, pnl ${pnlPct.toFixed(1)}%)`; }
+          else if (dropFromPeakPct >= 5 && currentPrice < entryPrice && holdTime > 60 && peakPnl >= 2 && peakPnl < activation) { shouldClose = true; reason = `SLOW_BLEED (-${dropFromPeakPct.toFixed(1)}% from peak, below entry, peakPnl ${peakPnl.toFixed(2)}%)`; }
+          else if (holdTime > 120 && pnlPct < stopLossPct * 0.7) { shouldClose = true; reason = `FAST_CUT (pnl ${pnlPct.toFixed(1)}% past 70% of stop ${(stopLossPct * 0.7).toFixed(1)}%)`; }
+          else if (holdTime > dynamicMaxHold / 2 && holdTime >= earlyCutMinHold && pnlPct < halfStopPct) { shouldClose = true; reason = `EARLY_CUT (pnl ${pnlPct.toFixed(1)}% < halfStop ${halfStopPct.toFixed(1)}%)`; }
+          // ---- TIER 4: momentum / structure fades (only meaningful while in some profit) ----
+          else if (pnlPct > 10 && bp5m < 0.43 && pc5m < -3) { shouldClose = true; reason = `EARLY_EXIT_WEAK_BP (bp=${bp5m.toFixed(2)}, d5m=${pc5m.toFixed(1)}%)`; }
+          else if (holdTime > 45 && bp5m < 0.38 && pc5m < -2) { shouldClose = true; reason = `MOMENTUM_FADE (BP=${bp5m.toFixed(2)}, d5m=${pc5m.toFixed(1)}%)`; }
+          else if (holdTime > 45 && pnlPct > 5 && bp5m < 0.43 && pc5m < -4) { shouldClose = true; reason = `PROFIT_PROTECT_FADE (BP=${bp5m.toFixed(2)}, d5m=${pc5m.toFixed(1)}%, PNL=+${pnlPct.toFixed(1)}%)`; }
+          else if (pnlPct > 5 && volLiqRatio > 7) { shouldClose = true; reason = `LIQUIDITY_EXHAUSTION (${volLiqRatio.toFixed(2)}x)`; }
+          else if (holdTime > 180 && pnlPct > 1 && expVol5m > 100 && vol5m < expVol5m * 0.15) { shouldClose = true; reason = `VOL_COLLAPSE (5m vol ${vol5m.toFixed(0)} < 15% of expected ${expVol5m.toFixed(0)})`; }
+          // ---- TIER 5: time stops ----
+          else if (holdTime > dynamicMaxHold && pnlPct < 5) { shouldClose = true; reason = `MAX_HOLD(${Math.round(dynamicMaxHold)}s)`; }
+          else if (holdTime > engineSettings.dynamicHoldMaxSeconds) { shouldClose = true; reason = `ABSOLUTE_MAX_HOLD(${Math.round(holdTime)}s > ${engineSettings.dynamicHoldMaxSeconds}s cap, pnl ${pnlPct.toFixed(2)}%)`; }
         }
-        else if (peakPnl >= engineSettings.trailingStopActivation && drawdownFromPeak >= engineSettings.trailingStopDistance) {
-          shouldClose = true;
-          reason = `TRAIL_STOP (peak +${peakPnl.toFixed(1)}%, fell ${drawdownFromPeak.toFixed(1)}%, floor +${trailingFloor.toFixed(1)}%)`;
-        }
-        // BUGFIX #6: was `pair.liquidity?.usd && pair.liquidity.usd < 300` —
-        // the `&&` short-circuits when usd=0, so a pool with literally $0
-        // liquidity doesn't trigger this exit. Use nullish coalescing.
-        else if (pair && (pair.liquidity?.usd ?? 0) < 300) {
-           shouldClose = true; reason = `LIQUIDITY_DRAIN_EMERGENCY(liq < $300, now ${(pair.liquidity?.usd ?? 0).toFixed(0)})`;
-        }
-        else if (costAwareStopPrice > 0 && currentPrice <= costAwareStopPrice) { shouldClose = true; reason = `STOP_LOSS (stop $${costAwareStopPrice.toFixed(8)}, price $${currentPrice.toFixed(8)}, pnl ${pnlPct.toFixed(1)}%)`; }
-        else if (holdTime > dynamicMaxHold && pnlPct < 5) { shouldClose = true; reason = `MAX_HOLD(${Math.round(dynamicMaxHold)}s)`; }
-        // ABSOLUTE_MAX_HOLD: fires regardless of PnL when holdTime exceeds the engine-wide
-        // maximum (dynamicHoldMaxSeconds, default 2100s = 35min). The normal MAX_HOLD above
-        // requires pnlPct < 5%, so a trade stagnating between +5% and +20% — where TRAIL_STOP
-        // hasn't triggered (no drawdown from peak) and TAKE_PROFIT_20 hasn't reached — can
-        // hold open indefinitely. This is a hard ceiling: no memecoin position should survive
-        // past 35 minutes regardless of profitability. Placed as standalone if (not else-if)
-        // so it always evaluates even if shouldClose is already true from another branch.
-        if (!shouldClose && holdTime > engineSettings.dynamicHoldMaxSeconds) {
-          shouldClose = true;
-          reason = `ABSOLUTE_MAX_HOLD(${Math.round(holdTime)}s > ${engineSettings.dynamicHoldMaxSeconds}s cap, pnl ${pnlPct.toFixed(2)}%)`;
-        }
-        else if (holdTime > dynamicMaxHold / 2 && pnlPct < halfStopPct) {
-          // EARLY_CUT minimum hold guard: don't fire before the token has had time to
-          // develop momentum. For HWR (buy pressure measured over 1h) cutting at 3-4min
-          // is contradictory — the signal is sustained, not instant. For SNIPER/MG a
-          // shorter minimum is appropriate since those are momentum-burst entries.
-          // Shadow data consistently shows EARLY_CUT firing on temporary dips that
-          // recover: $WLD shadow=-2.13% vs paper=-8.27% (-6.14% paper inflation).
-          const earlyCutMinHold =
-            trade.mode === "HWR"    ? 360 :  // 6 min — HWR needs sustained pressure to develop
-            trade.mode === "MG"     ? 240 :  // 4 min — momentum needs time to play out
-            trade.mode === "SNIPER" ? 180 :  // 3 min — sniper positions move fast, shorter min OK
-            240;
-          if (holdTime >= earlyCutMinHold) {
-            shouldClose = true; reason = `EARLY_CUT (pnl ${pnlPct.toFixed(1)}% < halfStop ${halfStopPct.toFixed(1)}%)`;
-          }
-        }
-        else if (holdTime > 120 && pnlPct < stopLossPct * 0.7) { shouldClose = true; reason = `FAST_CUT (pnl ${pnlPct.toFixed(1)}% past 70% of stop ${(stopLossPct * 0.7).toFixed(1)}%)`; }
-        else if (pnlPct > 10 && (() => { const bp = pair && pair.txns?.m5 ? ((pair.txns.m5.buys + pair.txns.m5.sells) > 0 ? pair.txns.m5.buys / (pair.txns.m5.buys + pair.txns.m5.sells) : 0.5) : 0.5; const pc5m = pair?.priceChange?.m5 || 0; return bp < 0.43 && pc5m < -3; })()) { const bp = pair && pair.txns?.m5 ? ((pair.txns.m5.buys + pair.txns.m5.sells) > 0 ? pair.txns.m5.buys / (pair.txns.m5.buys + pair.txns.m5.sells) : 0.5) : 0.5; const pc5m = pair?.priceChange?.m5 || 0; shouldClose = true; reason = `EARLY_EXIT_WEAK_BP (bp=${bp.toFixed(2)}, Δ5m=${pc5m.toFixed(1)}%)`; }
-        else if (pair && pnlPct > 5 && ((pair.volume?.m5 || 0) / (pair.liquidity?.usd || 1)) > 7) { const volLiq = (pair.volume?.m5 || 0) / (pair.liquidity?.usd || 1); shouldClose = true; reason = `LIQUIDITY_EXHAUSTION (${volLiq.toFixed(2)}x)`; }
-        else if (!shouldClose && pair && holdTime > 45) { const m5b = pair.txns?.m5?.buys || 0, m5s = pair.txns?.m5?.sells || 0; const currentBP = (m5b + m5s) > 0 ? m5b / (m5b + m5s) : 0.5; const priceChange5m = pair.priceChange?.m5 || 0; if (currentBP < 0.38 && priceChange5m < -2) { shouldClose = true; reason = `MOMENTUM_FADE (BP=${currentBP.toFixed(2)}, Δ5m=${priceChange5m.toFixed(1)}%)`; } else if (pnlPct > 5 && currentBP < 0.43 && priceChange5m < -4) { shouldClose = true; reason = `PROFIT_PROTECT_FADE (BP=${currentBP.toFixed(2)}, Δ5m=${priceChange5m.toFixed(1)}%, PNL=+${pnlPct.toFixed(1)}%)`; } }
-        // FIX: VOL_COLLAPSE must be an independent `if`, not `else if`.
-        // When holdTime > 45, the MOMENTUM_FADE branch above consumes the else-if,
-        // and VOL_COLLAPSE (holdTime > 180) is never evaluated — tokens bleed to
-        // zero indefinitely. Using a separate if allows both checks to run.
-        if (!shouldClose && pair && holdTime > 180 && pnlPct > 1) { const currentVol5m = pair.volume?.m5 || 0; const vol1hNow = pair.volume?.h1 || 0; const expectedVol5m = vol1hNow / 12; if (expectedVol5m > 100 && currentVol5m < expectedVol5m * 0.15) { shouldClose = true; reason = `VOL_COLLAPSE (5m vol ${currentVol5m.toFixed(0)} is <15% of expected ${expectedVol5m.toFixed(0)})`; } }
-        // FIX(mg-stale-entry): IMMEDIATE_UNDERWATER exit — cut stale entries that go red on
-        // entry and never recover, instead of waiting 60s for SLOW_BLEED.
-        // FIX(immediate-underwater-spread): every position opens at the modeled entry/exit spread
-        // (~-1.19%), so "red on tick 1" alone flags essentially EVERY trade and the rule degenerated
-        // to "be green by 30s or get cut" — which can clip a slow-developing winner. Three guards now
-        // make it precise:
-        //   1) grace extended 30s -> 45s (more time to turn);
-        //   2) only fire if currently bled BELOW the spread floor (pnlPct < -2.5%), i.e. genuinely
-        //      falling — not just sitting at the static entry spread;
-        //   3) only fire if it never showed real momentum (peakPnl < 3%); anything that pumped is left
-        //      to the trail / profit-decline logic so early-pumpers aren't clipped.
-        const IMMEDIATE_UNDERWATER_FLOOR_PCT = -2.5; // clearly beyond the ~-1.19% entry spread
-        if (!shouldClose && firstTickRedTrades.has(trade.id) && peakPnl < 3 && holdTime > 45 && pnlPct < IMMEDIATE_UNDERWATER_FLOOR_PCT) {
-          shouldClose = true;
-          reason = `IMMEDIATE_UNDERWATER (no momentum: peak +${peakPnl.toFixed(1)}%, bled to ${pnlPct.toFixed(1)}% by ${Math.round(holdTime)}s)`;
-        }
-        // PATCH #4: PRICE-DROP RUG DETECTOR — leading indicator that does NOT depend
-        // on DexScreener's liquidity field (which lags on-chain state by 30-90s during a rug).
-        // Price updates propagate faster than liquidity aggregates, so a sharp price drop
-        // from peak is the earliest reliable signal of an active rug. $Taz bled from +5.64%
-        // to -100% over ~3 minutes without firing LIQ_COLLAPSE because DexScreener still
-        // reported stale liq until the pool was already empty.
-        if (!shouldClose && holdTime > 20) {
-          const _patchPeak = peakPrices.get(trade.id) ?? entryPrice;
-          const _patchDropFromPeakPct = _patchPeak > 0 ? ((_patchPeak - currentPrice) / _patchPeak) * 100 : 0;
-          // Fast rug: -25% from peak in any window — unconditional exit
-          if (_patchDropFromPeakPct >= 25) {
-            shouldClose = true;
-            reason = `PRICE_RUG (-${_patchDropFromPeakPct.toFixed(1)}% from peak $${_patchPeak.toExponential(4)} -> $${currentPrice.toExponential(4)})`;
-          }
-          // SLOW_BLEED: -5% from peak AND below entry AND hold > 60s AND peakPnl in (2%, trailingStopActivation).
-          // Covers the gap below trailing activation where TRAIL_STOP never arms.
-          // FIX(no-peak-no-bleed): added peakPnl >= 2 floor. Previously this fired on tokens that
-          // never pumped at all (e.g. $TOAD: peakPnl 0.00%, exited via SLOW_BLEED at -5.7% from peak
-          // + 3.8% exit cost = -9.45% net). Those trades should fall to the normal stopLoss (-6%) gate
-          // instead of being killed early at -5%. With trailingStopActivation now 12, the SLOW_BLEED
-          // window without this floor was (0, 12) which swallowed every losing trade. With the floor
-          // it becomes (2, 12) — a real "pumped then died" pattern.
-          else if (_patchDropFromPeakPct >= 5 && currentPrice < entryPrice && holdTime > 60 && peakPnl >= 2 && peakPnl < engineSettings.trailingStopActivation) {
-            shouldClose = true;
-            reason = `SLOW_BLEED (-${_patchDropFromPeakPct.toFixed(1)}% from peak, below entry, peakPnl ${peakPnl.toFixed(2)}%)`;
-          }
-        }
-        // FIX D: Liquidity collapse emergency exit. A rug pull drains LP before it crashes
-        // price — our stop-loss fires too late because price is calculated against drained
-        // liquidity. If current liquidity is below $300 (un-tradeable) OR has dropped >70%
-        // from entry while we're still holding, exit immediately at any PNL.
-        // This fires regardless of holdTime because rugs don't wait.
-        if (!shouldClose && pair) {
-          const currentLiq = pair.liquidity?.usd ?? 0;
-          // BUGFIX #16: if DexScreener returns no liquidity field (undefined),
-          // currentLiq=0 triggers false LIQ_COLLAPSE. Only fire if liquidity
-          // was actually reported (field exists and is a number).
-          const liqReported = typeof pair.liquidity?.usd === "number";
-          // FIX LIQ_CO: "0" is a truthy string so the old ternary (trade.liquidity ? parseFloat(...) : 0)
-          // resolved to parseFloat("0") = 0 for every trade stored with zero liquidity — making the
-          // relative 50% drop check permanently false (0 > 1000 is never true). Use parseFloat with
-          // nullish coalesce and a || 0 fallback so NaN / "0" / null / undefined all produce 0, and
-          // log a warning so we can confirm the stored value is non-zero going forward.
-          const entryLiqUsd = parseFloat(trade.liquidity ?? "0") || 0;
-          // FIX #5: when entry liquidity is zero the relative 70% drop check was permanently disabled.
-          // Use sniperMinLiquidity as a conservative floor so the relative check stays active.
-          // This doesn't mean the token actually had that liquidity — it means slow-rug detection
-          // will use the floor as a baseline rather than being silently bypassed.
-          const effectiveEntryLiq = entryLiqUsd > 0 ? entryLiqUsd : (engineSettings.sniperMinLiquidity ?? 3000);
-          if (entryLiqUsd === 0 && !liqCoWarnedTrades.has(trade.id)) {
-            liqCoWarnedTrades.add(trade.id);
-            console.warn(`[LIQ_CO] #${trade.id} $${trade.tokenSymbol} ��� entry liquidity zero, using floor $${effectiveEntryLiq} for relative drop check (FIX #5)`);
-          }
-          // BUGFIX #16: only fire if liquidity was actually reported. Missing
-          // liquidity field is a data gap, not a real $0 pool.
-          const liqCollapsed = liqReported && currentLiq < 300;
-          // FIX #6: threshold tightened from 30% remaining (70% drain) to 50% remaining (50% drain).
-          // A 55% LP drain already compromises the token — waiting for 70% drain costs an extra
-          // ~20% of exit value. Catching the collapse at 50% drain gives the SL a wider price window
-          // to execute before the token becomes un-tradeable. Safe to lower because the absolute
-          // $300 floor (liqCollapsed) is unchanged and still catches near-zero LP situations.
-          const liqDropped50pct = effectiveEntryLiq > 1000 && currentLiq < effectiveEntryLiq * 0.50; // was 0.30 (70% drain gate)
-          if (liqCollapsed || liqDropped50pct) {
-            shouldClose = true;
-            reason = `LIQ_COLLAPSE (entry $${effectiveEntryLiq.toFixed(0)} → now $${currentLiq.toFixed(0)}, ${liqCollapsed ? "below floor" : ">50% drain"})`;
-          }
-        }
+
         if (shouldClose) {
           // FIX H: CONSOLIDATED FLOOR — applies to every exit path, not just TRAIL_STOP
           // and PROFIT_DECLINE. LIQ_COLLAPSE and VOL_COLLAPSE set shouldClose in independent
@@ -3940,8 +3981,7 @@ async function checkOpenPositions() {
           // meaningful peak — applying the floor there would be misleading.
           const isHardLoss = reason.startsWith("STOP_LOSS") || reason.startsWith("HARD_LOSS_KILL") ||
                              reason.startsWith("DEEP_RUG_KILL") ||
-                             reason.startsWith("EARLY_CUT") || reason.startsWith("FAST_CUT") ||
-                             reason.startsWith("IMMEDIATE_UNDERWATER");
+                             reason.startsWith("EARLY_CUT") || reason.startsWith("FAST_CUT");
           // FIX (paper inflation): trailingFloor only represents an achievable exit if the
           // trailing stop was actually ARMED (peakPnl >= trailingStopActivation). Below
           // activation there is NO protective stop, so flooring fabricates wins on trades
@@ -4242,7 +4282,7 @@ async function checkOpenPositions() {
           }
           // ─────────────────────────────────────────────────────────────────
           tradedAddresses.set(trade.tokenAddress, Date.now());
-          if (reason.startsWith("STOP_LOSS") || reason.startsWith("HARD_LOSS_KILL") || reason.startsWith("DEEP_RUG_KILL") || reason.startsWith("EARLY_CUT") || reason.startsWith("FAST_CUT") || reason.startsWith("LIQ_COLLAPSE") || reason.startsWith("VOL_COLLAPSE") || reason.startsWith("SLOW_BLEED") || reason.startsWith("IMMEDIATE_UNDERWATER")) {
+          if (reason.startsWith("STOP_LOSS") || reason.startsWith("HARD_LOSS_KILL") || reason.startsWith("DEEP_RUG_KILL") || reason.startsWith("EARLY_CUT") || reason.startsWith("FAST_CUT") || reason.startsWith("LIQ_COLLAPSE") || reason.startsWith("VOL_COLLAPSE") || reason.startsWith("SLOW_BLEED")) {
             stoppedOutAddresses.set(trade.tokenAddress, Date.now());
             // Block re-entry on ANY new contract with the same symbol for the full slReentryDelayMs.
             // Fixes $SOS re-entering 11m47s after LIQ_COLLAPSE via a new contract address —
@@ -4284,7 +4324,16 @@ async function checkOpenPositions() {
         }
       } catch (tradeErr) { console.error(`[POSITION_MANAGER] Error processing $${trade.tokenSymbol}:`, tradeErr); }
     }
-  } catch (e) { console.error("[POSITION_MANAGER] Error:", e); } finally { priceCheckLock = false; }
+  } catch (e: any) {
+    if (isTransientDbConnectionError(e)) {
+      if (Date.now() - lastDbTimeoutLogMs > 15_000) {
+        lastDbTimeoutLogMs = Date.now();
+        console.warn(`[POSITION_MANAGER:DB-TRANSIENT] skipped one tick after DB connection blip: ${e?.message || e}`);
+      }
+    } else {
+      console.error("[POSITION_MANAGER] Error:", e);
+    }
+  } finally { priceCheckLock = false; }
 }
 
 async function startTradingEngine() {
