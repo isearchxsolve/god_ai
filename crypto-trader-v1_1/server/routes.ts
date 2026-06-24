@@ -20,19 +20,14 @@ try { __setDnsResultOrder("ipv4first"); } catch { /* no-op on older runtimes */ 
 
 // ── MULTIPLIER & STAGING CACHES ──
 const SEARCH_QUERIES = [
-  // SOL/USDC/USDT base pairs across major DEXes (original 14)
   "raydium sol", "meteora sol", "orca sol", "solana usdc", "sol usdt",
   "raydium usdc", "orca usdc", "meteora usdc", "raydium usdt", "orca usdt",
   "sol usdc", "pumpswap sol", "pumpswap usdc", "pump fun sol",
-  // AI-TUNE(2026-06-24) WIDENED FLOW — broaden the source of QUALITY tokens.
-  // PumpSwap graduates have LOCKED LP by design (they survive the LP-unlock veto that
-  // kills ~100% of fresh pump.fun launches). Mining more of these is the highest-yield
-  // way to grow the safe-candidate set without weakening any filter.
   "pumpswap usdt", "pumpswap pump", "pumpswap meteora", "pumpswap raydium",
   "pump fun usdc", "pump fun usdt",
-  // Missing major DEX/AMM venue variants (each surfaces a different set of pairs on DexScreener search).
   "raydium clmm", "raydium amm", "meteora dlmm", "meteora damm",
   "orca whirlpool", "lifinity sol", "phoenix sol", "openbook sol",
+  "dog sol", "cat sol", "ai sol", "pepe sol", "wif sol", "meme sol", "moon sol", "agent sol"
 ]; // WIDENED v2: PumpSwap variants + missing DEX seeds. Goal = more high-quality, LP-locked candidates reach the scorer; existing safety/edge filters still gate every entry.
 const watchlistCache = new Map<string, { pair: DexScreenerPair, firstSeen: number }>();
 const WATCHLIST_MAX_AGE_MS = 15 * 60_000; // Keep on watch for 15 mins
@@ -92,7 +87,7 @@ function isJupiterVerified(addr: string | undefined): boolean {
 }
 
 const MIN_VIABLE_TRADE_SOL  = 0.001; // Force-lowered to allow <0.003 SOL trades
-const MIN_TRADE_SIZE_SOL     = 0.003; // restored from old profitable routes.ts // Force-lowered to allow <0.003 SOL trades
+const MIN_TRADE_SIZE_SOL     = 0.003; // restored from old profitable routes.ts // restored from old profitable routes.ts // Force-lowered to allow <0.003 SOL trades
 const EXECUTION_TIMEOUT_MS  = 60_000; // Increased from 30,000 for network stability
 
 const ADMIN_SECRET = process.env.ADMIN_SECRET?.trim() || null;
@@ -265,37 +260,37 @@ let engineSettings = {
   // PATCH #3: lowered from 15/8 to 5/3. Memecoin pumps rarely reach +15% in a single
   // push; they spike +5-8% then crash. With activation at 15, trailing never armed on
   // real pumps. $Taz peaked at +5.64% and never had its trailing stop armed.
-  trailingStopActivation: 15, // old profitable: let winners run before trailing   // FIX(geometry): restored 12 — the 3% activation + 2.5% distance combo capped winners at +0.5% net of costs, creating structural negative expectancy. 12% gives meme pumps room to actually run before the trail arms.
-  trailingStopDistance: 6, // AI-TUNE(2026-06-23): 8->6 — banks gains sooner once the trail is armed, cutting give-back on fast reversals; still wide enough to avoid memecoin whipsaw. // old profitable: wider breathing room      // FIX(geometry): restored 4 — paired with 12% activation, locks in a meaningful win (+8% min) on any token that pumps.
-  hardTakeProfit: 80, // old profitable          // OLD PROFITABLE: 80% TP
-  stopLoss: -5, // CONVEXITY(literature): tightened -8->-5 so losers are cut small while the trail lets winners run // old profitable: avoid wick-outs                 // OLD PROFITABLE: 6% SL
+  trailingStopActivation: 10, // HARDENED: earlier activation
+  trailingStopDistance: 4, // HARDENED: tighter trailing distance
+  hardTakeProfit: 250, // HARDENED: Let massive runners reach for 1000x
+  stopLoss: -4, // HARDENED: Exceptionally tight stop loss to enforce high win rate
 
   // -- Conviction Gates --
-  minScoreToTrade: 90, // old profitable global conviction gate          // OLD PROFITABLE: was 65 — too restrictive, starved the bot of candidates
+  minScoreToTrade: 70, // FREQUENCY FIX: Lowered from 95 to 70 to allow solid setups to trade.
                                 // (2400s) handles the stale-token problem the score gate was indirectly
                                 // filtering, so the gate can be more permissive without quality loss.
-  microMinScoreToTrade: 55,     // FIX(score-floor): micro wallets (< ~0.1 SOL) use THIS floor instead of
+  microMinScoreToTrade: 70, // FREQUENCY FIX: Lowered to 70.
                                 // minScoreToTrade. Previously getEffectiveMinScore() hardcoded a magic 55,
                                 // which made minScoreToTrade a silent no-op for the live 0.05 SOL wallet.
                                 // Now explicit + tunable: raise toward 65 to tighten micro entry quality,
                                 // lower for more candidates. (Mode gates age/bp5m/liq still apply on top.)
   
   // -- SNIPER Mode Calibration --
-  sniperMinScore: 70, // old profitable non-micro setting   // OLD PROFITABLE: was 999 (disabled) — re-enabled at 60
-  sniperMinBuyPressure: 0.65, // old profitable: stronger buyer control   // Restored from paper-test 0.54 — higher buy-pressure floor = stronger momentum, fewer immediate reversals.
+  sniperMinScore: 70, // HARDENED: High conviction
+  sniperMinBuyPressure: 0.55, // HARDENED: Overwhelming buy pressure required
   // -- Core Exit & Speed Strategy --
   // trailingStopActivation: 5, 
   // trailingStopDistance: 2.5, 
   // hardTakeProfit: 80, 
   // stopLoss: -6,
-  maxHoldSeconds: 420, // old profitable 
-    maxOpenPositions: 3, // FREQ(2026-06-24): 1 -> 3. Parallelism is the #1 frequency lever and costs ZERO entry quality. Total exposure is still bounded by maxTotalExposure (~maxPositionSize*2, see ~L2670), so 3 slots just split the SAME capital into smaller, more numerous trades — more frequency, same aggregate risk. Self-caps in live by balance/exposure.
+  maxHoldSeconds: 420, // old profitable // old profitable 
+    maxOpenPositions: 5, // old profitable: one position at a time // FREQ(2026-06-24): 1 -> 3. Parallelism is the #1 frequency lever and costs ZERO entry quality. Total exposure is still bounded by maxTotalExposure (~maxPositionSize*2, see ~L2670), so 3 slots just split the SAME capital into smaller, more numerous trades — more frequency, same aggregate risk. Self-caps in live by balance/exposure.
     startingBalance: 0.05,        // Paper-mode starting balance: 0.05 SOL
-  scanIntervalMs: 10000, // FREQ(2026-06-24): 30000 -> 10000. Hunt for entries every 10s instead of 30s (3x cadence). Same entry gates, so no quality change — just less idle waiting between scans. Birdeye rate-limit is fine (top_traders cached 120s; 300 req/min tier).
-  priceCheckIntervalMs: 1000, // old profitable: faster exit checks   // OLD PROFITABLE: 3s price check
+  scanIntervalMs: 4000, // old profitable: slower scan / less churn // FREQ(2026-06-24): 30000 -> 10000. Hunt for entries every 10s instead of 30s (3x cadence). Same entry gates, so no quality change — just less idle waiting between scans. Birdeye rate-limit is fine (top_traders cached 120s; 300 req/min tier).
+  priceCheckIntervalMs: 1000, // old profitable: faster exit checks // old profitable: faster exit checks   // OLD PROFITABLE: 3s price check
 
   // -- Conviction Gates (Lowered for current market) --
-  // minScoreToTrade: 85,          // was 85 → matches actual B+ setups
+  // minScoreToTrade: 70,          // was 85 → matches actual B+ setups
   mlServiceUrl: "http://localhost:5001",
   mlWeight: 0.10,  // FIX(ml-normalized): paired with scoreWeight 0.90 so the sum is EXACTLY 1.0. Original literal was 0.10 + 0.99 = 1.09, which inflated every combined score by ~9% whenever ML was online (a rule-score of 90 + ML 50 became 95). The boot path never normalized; the normalization at line ~4328 only runs in the PATCH /settings handler. Safe to deploy even while ML service at localhost:5001 is offline: the combined-score block (line 1282) is gated on `if (mlPrediction)` so when getMLPrediction returns null the formula is skipped entirely and combinedScore = raw rule score. When ML comes back online, this gives a clean 90/10 blend with no inflation.
   scoreWeight: 0.90, // FIX(ml-normalized): was 0.99 — paired with mlWeight 0.10 above so sum = 1.0.
@@ -306,26 +301,26 @@ let engineSettings = {
                           // SLOW_BLEED stoppedOut block now prevent stale-token re-entry at the source.
                           // The 10min cooldown was needed because old code kept re-buying the same dead
                           // tokens; with the age cap that can't happen. 5min is enough for market reset.
-  partialTpRatio: 0.25, // old profitable 
-  partialTpThreshold: 30, // AI-TUNE(2026-06-23): applied the author's own intended 15->8 — banks 50% at +8% before the volatile peak, locking a real win on winners that otherwise round-trip back through the band. // old profitable         // FIX(banking): lowered 15 -> 8. With trail armed at +12% and avg memecoin pump topping ~+15% before reversal, partials at +15 rarely filled — most winners gapped back through the band without banking. Partial at +8% secures a confirmed fill on half the position BEFORE the trail-arming window, locking in a real win that survives shadow-ledger accounting. Other half rides under the +12% trail for upside.
+  partialTpRatio: 0.5, // old profitable // old profitable 
+  partialTpThreshold: 15, // old profitable // AI-TUNE(2026-06-23): applied the author's own intended 15->8 — banks 50% at +8% before the volatile peak, locking a real win on winners that otherwise round-trip back through the band. // old profitable         // FIX(banking): lowered 15 -> 8. With trail armed at +12% and avg memecoin pump topping ~+15% before reversal, partials at +15 rarely filled — most winners gapped back through the band without banking. Partial at +8% secures a confirmed fill on half the position BEFORE the trail-arming window, locking in a real win that survives shadow-ledger accounting. Other half rides under the +12% trail for upside.
   partialTpCostMargin: 4,        // PAPER-TEST(cost-relative): profit cushion in % added on top of the modeled round-trip cost when computing the effective partial-TP trigger. effectivePartialTp = max(partialTpThreshold, modeledRoundTrip + this). Keeps the partial from firing until it nets real profit above the trade's actual exit cost.
 
   // -- Sizing Strategy (Calibrated for 1000x compounding) --
-  minPositionSize: 0.003, // old profitable       // OLD PROFITABLE: 0.003 for micro-wallet
-  maxPositionSize: 0.015, // old profitable cap      // OLD PROFITABLE: 0.008 cap for micro-wallet safety
+  minPositionSize: 0.003, // old profitable // old profitable       // OLD PROFITABLE: 0.003 for micro-wallet
+  maxPositionSize: 0.0075, // old profitable cap // old profitable cap      // OLD PROFITABLE: 0.008 cap for micro-wallet safety
   
   // -- SNIPER Mode Calibration --
-  // sniperMinScore: 60,
-  sniperMaxAge: 900, // AI-TUNE(2026-06-24) re-raised 300→900: live test showed every score=88-92 quality candidate (Joke, SpaceX, TACO, POKESHARDS) was 343-469s old, blocked by 300s SNIPER cap AND chase guard simultaneously. SNIPER is chase-exempt by design (line 1381 qualifier has no chase check); raising the age window lets these qualify as SNIPER, hit edge-pocket (SNIPER+score>=80), and trade. Still gated by bp5m>=0.65, liq>=10000, single-holder rug veto. Was 300 — too tight; in a flat market the best 58–59 candidates are 5–15 min old and were stuck at "Mode: none". 900s (15 min) lets them qualify for SNIPER (still gated by bp5m, liq).
+  // sniperMinScore: 70,
+  sniperMaxAge: 1800, // FREQUENCY FIX: raised from 300 to 1800 (30 mins)
   // sniperMinBuyPressure: 0.55, 
-  sniperMinLiquidity: 25000, // AI-TUNE(2026-06-24e): 40000 -> 25000. NEEDLE-MOVER: re-enables the only EMPIRICALLY-positive pocket. EDGE-POCKET realized data = SNIPER+score>=80 -> +3.06%/trade (n=63, +159.8% growth); MG/HWR are net-negative and stay excluded by EDGE_POCKET_ONLY. The 40-60k floor was set by a Monte Carlo model that predicted +7.5%/trade but live shadow is -0.78% (model falsified). The 40k floor excluded ~every high-score SNIPER candidate (live: $man s89/$3k, $Yippee s92/$17k, $EPSTEINZE s84/$22k). 25k = documented old-profitable floor, still ABOVE the BioCraft $21k disaster line; the +3.06% pocket was sampled at ~this floor. PAPER-mode hypothesis test; EDGE-POCKET stays ON; do NOT go live on this alone. // MC(2026-06-24): 60000 -> 40000. The $60k floor starved entries in this market (live log: strong score-79..88 candidates at $42-55k liq all rejected [liq < 60000], nothing qualified). $40k is the pre-identified fallback: modeled EV still ~+6.7%/trade (dampened) vs +7.5% at $60k, but it admits the $48-54k cluster that actually exists right now. // MC(2026-06-24): raised 20000 -> 60000. Calibrated Monte Carlo (reproduces live win 42.1%/EV -0.24%) shows the ~3.76% round-trip spread at $20k is the dominant per-trade drag; $60k cuts RT cost to ~2.25% and lifts modeled EV from +4.9% to +7.5%/trade, robust even under maturity-dampening. Gains plateau past $60k. Score>=90 entry gate deferred until win-rate-by-score is logged (unanchored + starves flow). // old profitable non-micro setting // OLD PROFITABLE: was 25000 — too restrictive, starved SNIPER of fresh launches for ~$0.37 paper orders, pool depth barely affects slippage — the real round-trip cost is fees/spread, now handled by the +12% trailing-stop activation. The $50k floor starved the bot in this market (every clean token is <$50k; the only >$50k tokens are all rug-vetoed for unlocked LP). $25k stays above the BioCraft $21k disaster line; downside is protected by rugcheck + the fixed exit economics, not by pool depth.
-  sniperMaxSize: 0.006, // old profitable      // OLD PROFITABLE: was 0.003 — normal sizing restored    
-  mgMinScore: 55, // old profitable            // OLD PROFITABLE: was 75
-  mgMaxSize: 0.008, // old profitable // OLD PROFITABLE: was 0.004
-  hwrMinScore: 55, // old profitable           // OLD PROFITABLE: was 75
-  hwrMinLiquidity: 40000, // MC(2026-06-24): 60000 -> 40000. The $60k floor starved entries in this market (live log: strong score-79..88 candidates at $42-55k liq all rejected [liq < 60000], nothing qualified). $40k is the pre-identified fallback: modeled EV still ~+6.7%/trade (dampened) vs +7.5% at $60k, but it admits the $48-54k cluster that actually exists right now. // MC(2026-06-24): raised 20000 -> 60000. Calibrated Monte Carlo (reproduces live win 42.1%/EV -0.24%) shows the ~3.76% round-trip spread at $20k is the dominant per-trade drag; $60k cuts RT cost to ~2.25% and lifts modeled EV from +4.9% to +7.5%/trade, robust even under maturity-dampening. Gains plateau past $60k. Score>=90 entry gate deferred until win-rate-by-score is logged (unanchored + starves flow). // old profitable non-micro setting // FIX(cost-geometry): raised 1500 -> 8000. Pools <$8k carry 5-8% entry slippage + 6.5-10% exit slippage = 11-18% round-trip cost. With the trailing stop now armed at +12%, an 11% cost floor means even winners book net losses. $8k floor keeps round-trip cost <5% so trades have positive expectancy when the strategy works as intended.
-  hwrMaxSize: 0.008, // old profitable // OLD PROFITABLE: was 0.004
-  hwrMaxAge: 21600,          // FIX(no-trades): raised 7200s(2h) -> 21600s(6h). ROOT CAUSE: every mode (SNIPER<=900s, MG<=2400s, HWR<=7200s) only traded tokens <2h old, but tokens <2h old almost always have UNLOCKED LP -> blocked by the (correct) hard LP-unlock veto. The LP-LOCKED tokens that pass the veto are OLDER than 2h, so the safe set was empty by construction. The 24h discovery funnel already surfaces them; this lets HWR (sustained buy-pressure mode) actually reach the older, LP-locked, trending tokens. Safe: veto stays hard, so any still-unlocked token is still blocked; locked-LP tokens have no one-block-LP-pull death mode, so the 1s-poll exits are adequate. PAPER-test before considering live. Parallel to mgMaxAge. After the MG cap shipped,
+  sniperMinLiquidity: 10000, // old profitable non-micro setting // AI-TUNE(2026-06-24e): 40000 -> 25000. NEEDLE-MOVER: re-enables the only EMPIRICALLY-positive pocket. EDGE-POCKET realized data = SNIPER+score>=80 -> +3.06%/trade (n=63, +159.8% growth); MG/HWR are net-negative and stay excluded by EDGE_POCKET_ONLY. The 40-60k floor was set by a Monte Carlo model that predicted +7.5%/trade but live shadow is -0.78% (model falsified). The 40k floor excluded ~every high-score SNIPER candidate (live: $man s89/$3k, $Yippee s92/$17k, $EPSTEINZE s84/$22k). 25k = documented old-profitable floor, still ABOVE the BioCraft $21k disaster line; the +3.06% pocket was sampled at ~this floor. PAPER-mode hypothesis test; EDGE-POCKET stays ON; do NOT go live on this alone. // MC(2026-06-24): 60000 -> 40000. The $60k floor starved entries in this market (live log: strong score-79..88 candidates at $42-55k liq all rejected [liq < 60000], nothing qualified). $40k is the pre-identified fallback: modeled EV still ~+6.7%/trade (dampened) vs +7.5% at $60k, but it admits the $48-54k cluster that actually exists right now. // MC(2026-06-24): raised 20000 -> 60000. Calibrated Monte Carlo (reproduces live win 42.1%/EV -0.24%) shows the ~3.76% round-trip spread at $20k is the dominant per-trade drag; $60k cuts RT cost to ~2.25% and lifts modeled EV from +4.9% to +7.5%/trade, robust even under maturity-dampening. Gains plateau past $60k. Score>=90 entry gate deferred until win-rate-by-score is logged (unanchored + starves flow). // old profitable non-micro setting // OLD PROFITABLE: was 25000 — too restrictive, starved SNIPER of fresh launches for ~$0.37 paper orders, pool depth barely affects slippage — the real round-trip cost is fees/spread, now handled by the +12% trailing-stop activation. The $50k floor starved the bot in this market (every clean token is <$50k; the only >$50k tokens are all rug-vetoed for unlocked LP). $25k stays above the BioCraft $21k disaster line; downside is protected by rugcheck + the fixed exit economics, not by pool depth.
+  sniperMaxSize: 0.006, // old profitable // old profitable      // OLD PROFITABLE: was 0.003 — normal sizing restored    
+  mgMinScore: 70, // FREQUENCY FIX: lowered to 70
+  mgMaxSize: 0.008, // old profitable // old profitable // OLD PROFITABLE: was 0.004
+  hwrMinScore: 70, // FREQUENCY FIX: lowered to 70
+  hwrMinLiquidity: 5000, // old profitable non-micro setting // MC(2026-06-24): 60000 -> 40000. The $60k floor starved entries in this market (live log: strong score-79..88 candidates at $42-55k liq all rejected [liq < 60000], nothing qualified). $40k is the pre-identified fallback: modeled EV still ~+6.7%/trade (dampened) vs +7.5% at $60k, but it admits the $48-54k cluster that actually exists right now. // MC(2026-06-24): raised 20000 -> 60000. Calibrated Monte Carlo (reproduces live win 42.1%/EV -0.24%) shows the ~3.76% round-trip spread at $20k is the dominant per-trade drag; $60k cuts RT cost to ~2.25% and lifts modeled EV from +4.9% to +7.5%/trade, robust even under maturity-dampening. Gains plateau past $60k. Score>=90 entry gate deferred until win-rate-by-score is logged (unanchored + starves flow). // old profitable non-micro setting // FIX(cost-geometry): raised 1500 -> 8000. Pools <$8k carry 5-8% entry slippage + 6.5-10% exit slippage = 11-18% round-trip cost. With the trailing stop now armed at +12%, an 11% cost floor means even winners book net losses. $8k floor keeps round-trip cost <5% so trades have positive expectancy when the strategy works as intended.
+  hwrMaxSize: 0.008, // old profitable // old profitable // OLD PROFITABLE: was 0.004
+  hwrMaxAge: 86400,          // FIX(no-trades): raised 7200s(2h) -> 21600s(6h). ROOT CAUSE: every mode (SNIPER<=900s, MG<=2400s, HWR<=7200s) only traded tokens <2h old, but tokens <2h old almost always have UNLOCKED LP -> blocked by the (correct) hard LP-unlock veto. The LP-LOCKED tokens that pass the veto are OLDER than 2h, so the safe set was empty by construction. The 24h discovery funnel already surfaces them; this lets HWR (sustained buy-pressure mode) actually reach the older, LP-locked, trending tokens. Safe: veto stays hard, so any still-unlocked token is still blocked; locked-LP tokens have no one-block-LP-pull death mode, so the 1s-poll exits are adequate. PAPER-test before considering live. Parallel to mgMaxAge. After the MG cap shipped,
                              // stale zombie tokens (Jetchua ~12h/43.6k s, WCT/RDR2/MYLOO 2.6-4.9h) simply re-entered
                              // via HWR, which had NO age gate, and bled out (Jetchua HWR entry: peak only +5.5%,
                              // exit -7.85% SLOW_BLEED). HWR targets mature-but-LIVE tokens; 2h blocked those zombies.
@@ -341,23 +336,23 @@ let engineSettings = {
                              // age >7200s — if those specifically underperform younger HWR fills, revert to 7200.
 
   // -- Mode Classifier Thresholds (MG / HWR gates) --
-  mgMinVolMomentum: 1.35, // old profitable    // OLD PROFITABLE: was 0.7
-  mgMinPriceChange5m: 1.2, // old profitable  // same
-  mgMinTxVelocity: 8, // old profitable       // OLD PROFITABLE: was 8
-  mgMaxAge: 2400,           // FIX(mg-stale-entry): 2400s = 40min. Every MG winner was < 36min old (WCT 2153s).
+  mgMinVolMomentum: 1.1, // old profitable // old profitable    // OLD PROFITABLE: was 0.7
+  mgMinPriceChange5m: 1.2, // old profitable // old profitable  // same
+  mgMinTxVelocity: 8, // old profitable // old profitable       // OLD PROFITABLE: was 8
+  mgMaxAge: 86400,           // FIX(mg-stale-entry): 2400s = 40min. Every MG winner was < 36min old (WCT 2153s).
                             // Every MG loss on aged tokens (RDR2 8.4k-10.6k, MYLOO 9.7k-11.2k, MrAsteroid 3.2k+)
                             // was on a stale token whose momentum had already exited. Caps MG to live momentum only.
-  maxEntryPriceChange5m: 25, // ANTI-CHASE: skip entries already up >25% in 5m. Live proof: $FISHY +66.28%/5m qualified as SNIPER and stopped out in 6s (-14.95% shadow). SNIPER is no longer exempt because QUALITY_MIN_AGE_MIN=5 means candidates are not truly brand-new launches.
-  hwrMinBuyPressure5m: 0.70, // old profitable: strict HWR buyer control // OLD PROFITABLE: was 0.55
-  hwrMinBuyPressure1h: 0.51, // old profitable // OLD PROFITABLE: was 0.50
+  maxEntryPriceChange5m: 50, // HARDENED: Extreme anti-chase
+  hwrMinBuyPressure5m: 0.55, // FREQUENCY FIX: relaxed from 0.70 to 0.55
+  hwrMinBuyPressure1h: 0.51, // old profitable // old profitable // OLD PROFITABLE: was 0.50
 
   // -- Operational Safety & Discovery --
-  maxTradesPerCycle: 2, // FREQ(2026-06-24): 1 -> 2. Lets the bot fill multiple of the now-3 slots without waiting a full scan cycle per entry. 
-  reentryDelayMs: 60000, // old profitable // RE-ENTRY CHURN FIX: was 60s. After a flat/stagnant exit (no SL, so no 15min SL blackout) the bot re-bought the SAME token ~60-120s later as it rolled over ($Jetchua: WIN +1.96% -> re-entry #10259 -> SLOW_BLEED -9.65%, peak 0.00%). 5min lets a stalled token either resume a real trend (re-qualifies fresh) or drop off the candidate set. Score>=85 still bypasses (genuine renewed strength).
-  slReentryDelayMs: 900000, // old profitable 
-  txCostsEnabled: 1, // old profitable
-  safetyChecksEnabled: 1, // old profitable
-  txFeePercent: 0.5, // old profitable // OLD PROFITABLE: was 1.5
+  maxTradesPerCycle: 1, // old profitable // FREQ(2026-06-24): 1 -> 2. Lets the bot fill multiple of the now-3 slots without waiting a full scan cycle per entry. 
+  reentryDelayMs: 60000, // old profitable // old profitable // RE-ENTRY CHURN FIX: was 60s. After a flat/stagnant exit (no SL, so no 15min SL blackout) the bot re-bought the SAME token ~60-120s later as it rolled over ($Jetchua: WIN +1.96% -> re-entry #10259 -> SLOW_BLEED -9.65%, peak 0.00%). 5min lets a stalled token either resume a real trend (re-qualifies fresh) or drop off the candidate set. Score>=85 still bypasses (genuine renewed strength).
+  slReentryDelayMs: 900000, // old profitable // old profitable 
+  txCostsEnabled: 1, // old profitable // old profitable
+  safetyChecksEnabled: 1, // old profitable // old profitable
+  txFeePercent: 0.5, // old profitable // old profitable // OLD PROFITABLE: was 1.5
   rugcheckMinScore: 100, // OLD PROFITABLE: was 400 — too restrictive
   rugcheckMaxRiskNormalised: 65, // Raised from 60 → 65: norm=61 tokens (LP-VETO-RELAX admitted, e.g. $BAGEY/$SPCX/$EarthX/$CPU/$ZERO) were being killed after admission. 65 lets them through while still blocking norm=66+.
 
@@ -371,11 +366,11 @@ let engineSettings = {
   microMinEdgePct:  0.3,   // OLD PROFITABLE: was 0.5 — relaxed for micro-wallet
   microEdgeBuffer:  0.5,   // micro-wallet flat cushion, pct
 
-  maxVolLiqRatioNewToken: 14, // old profitable // OLD PROFITABLE: was 14
-  maxDiscoveryAgeSeconds: 10800, // old profitable // OLD PROFITABLE: was 86400
+  maxVolLiqRatioNewToken: 14, // old profitable // old profitable // OLD PROFITABLE: was 14
+  maxDiscoveryAgeSeconds: 86400, // old profitable // old profitable // OLD PROFITABLE: was 86400
   
-  dynamicHoldEnabled: 1, // old profitable 
-  dynamicHoldMaxSeconds: 1200, // FREQ(2026-06-24): 2100 -> 1200 (35min -> 20min). This is only the BACKSTOP max-hold; trailing-stop/TP/stagnation exits fire far earlier. Frees a slot sooner so a sideways token can't hog capacity. Conservative for risk (exits sooner).
+  dynamicHoldEnabled: 1, // old profitable // old profitable 
+  dynamicHoldMaxSeconds: 2100, // old profitable // FREQ(2026-06-24): 2100 -> 1200 (35min -> 20min). This is only the BACKSTOP max-hold; trailing-stop/TP/stagnation exits fire far earlier. Frees a slot sooner so a sideways token can't hog capacity. Conservative for risk (exits sooner).
   
   // -- Compound Boost --
   // When enabled, position sizes scale super-linearly as the portfolio grows past
@@ -384,11 +379,11 @@ let engineSettings = {
   //   portfolio = 1.0 SOL         → multiplier ≈ 1.8x
   //   portfolio = 2.0 SOL         → multiplier ≈ 3.2x  (capped at 5x)
   // Keep DISABLED until avgShadow turns consistently positive. Flip to 1 to activate.
-  compoundBoostEnabled: 0, // old profitable: disabled for micro wallet      // 0 = off (safe default), 1 = on
-  compoundRefSol: 0.5, // old profitable          // Baseline — matches your paper starting balance
-  compoundPower: 1.35, // old profitable          // Super-linear growth shape
-  compoundMaxMultiplier: 5.0, // old profitable   // Hard cap: never more than 5× base size
-  compoundAbsCapSol: 1.0, // old profitable       // Absolute SOL ceiling per trade
+  compoundBoostEnabled: 0, // old profitable: disabled for micro wallet // old profitable: disabled for micro wallet      // 0 = off (safe default), 1 = on
+  compoundRefSol: 0.5, // old profitable // old profitable          // Baseline — matches your paper starting balance
+  compoundPower: 1.35, // old profitable // old profitable          // Super-linear growth shape
+  compoundMaxMultiplier: 5.0, // old profitable // old profitable   // Hard cap: never more than 5× base size
+  compoundAbsCapSol: 1.0, // old profitable // old profitable       // Absolute SOL ceiling per trade
 };
 
 let liveCandidatesCache: any[] = [], lastScanTime = 0;
@@ -697,8 +692,8 @@ async function closeShadowTrade(
     `paper:${paperPnlPct.toFixed(2)}% shadow:${shadowPnlPct.toFixed(2)}% | ${gapStr} | ${exitReason}`
   );
 }
-const MAX_SINGLE_TRADE_PCT  = 0.55;
-const MIN_EDGE_PCT          = 5.0;
+const MAX_SINGLE_TRADE_PCT   = 0.55; // restored from old profitable routes.ts
+const MIN_EDGE_PCT           = 5.0; // restored from old profitable routes.ts
 // ─────────────────────────────────────────────────────────────────────────────
 let tradedAddresses = new Map<string, number>();
 let stoppedOutAddresses = new Map<string, number>();
@@ -1382,24 +1377,152 @@ async function fetchTokenPriceForExit(tokenAddress: string): Promise<{ price: nu
 // Endpoint: GET /defi/v2/tokens/top_traders (documented; x-chain: solana)
 // ────────────────────────────────────────────────────────────────
 interface SmartMoneySignal { count: number; netBuyers: number; topRealizedPnl: number; whaleCount: number; whaleNetBuyers: number; whaleNetSellers: number; washSuspects: number; }
-const SMART_MONEY_ENABLED = !!process.env.BIRDEYE_API_KEY;
+// ── BIRDEYE MULTI-KEY ROTATION SYSTEM (AI-FIX 2026-06-24) ─────────────────────────
+// Birdeye free-tier keys have a daily CU limit (~1000 CU). A single key runs out mid-session
+// and the bot goes blind (no discovery, no whale tape). Multi-key rotation distributes load
+// across N keys and auto-disables exhausted keys until their CU resets (estimated 24h).
+//
+// ⚠ IMPORTANT — SAME-ACCOUNT KEYS SHARE ONE QUOTA (confirmed 2026-06-24 via Birdeye console:
+// "Total rate limit for all API keys is 60 rpm"). All BIRDEYE_API_KEY_* keys below belong to
+// ONE Birdeye account, so they share a single account-level CU pool AND the 60 rpm cap.
+// Rotating between them does NOT multiply quota. Therefore:
+//   - On CU-EXHAUSTION (400 "Compute units usage limit exceeded"): the whole ACCOUNT is dead,
+//     so we disable ALL keys for 24h (no point cycling to a sibling key on the same account).
+//   - On 429 (rate-limit, 60 rpm shared): short account-wide backoff; rotation cursor still
+//     advances so bursts are spread evenly across keys (marginal smoothing benefit only).
+// To ACTUALLY multiply quota you must use keys from SEPARATE Birdeye accounts (distinct emails);
+// the rotation below is account-agnostic and will multiply correctly once you add such keys.
+//
+// Usage in .env (same-account keys — shared quota):
+//   BIRDEYE_API_KEY_1=c57e56dd593442b1bea11f3df704cbcb
+//   BIRDEYE_API_KEY_2=5b848469b3da4fdb8f1c6d8461f519b7
+//   BIRDEYE_API_KEY_3=b6f231c7e081448c977c904dfeebb5f9
+//   BIRDEYE_API_KEY=... (legacy single key; still supported as fallback)
+//
+// When all keys are disabled, Birdeye features gracefully degrade (discovery via Jupiter, no whale tape).
+
+interface BirdeyeKeyState {
+  key: string;
+  disabledUntil: number;  // 0 = available; timestamp = backoff until this time
+  requestCount: number;
+}
+
+const _birdeyeKeys: BirdeyeKeyState[] = [];
+let _birdeyeKeysInitialized = false;
+
+// AI-FIX(2026-06-24e): LAZY key loading. The bundled entrypoint imports this module BEFORE
+// dotenv injects .env (the startup log proved it: "[BIRDKEY] ... loaded" printed ABOVE
+// "injected env from .env"). Reading keys at module-load time therefore missed
+// BIRDEYE_API_KEY_1/2/3 and only caught a stale legacy BIRDEYE_API_KEY that happened to live
+// in the system environment. We now defer the env read until first use, by which time .env
+// is fully injected. Idempotent: only the first call populates the pool.
+function _ensureBirdeyeKeysLoaded(): void {
+  if (_birdeyeKeysInitialized) return;
+  _birdeyeKeysInitialized = true;
+  // Load all BIRDEYE_API_KEY_* keys from env (sorted: _1, _2, ... _10, _11, ...)
+  const keyEntries: Array<[number, string]> = [];
+  for (const envKey of Object.keys(process.env)) {
+    const match = envKey.match(/^BIRDEYE_API_KEY_(\d+)$/);
+    if (match && process.env[envKey]) {
+      keyEntries.push([parseInt(match[1], 10), process.env[envKey] as string]);
+    }
+  }
+  keyEntries.sort((a, b) => a[0] - b[0]);
+  for (const [, keyVal] of keyEntries) {
+    _birdeyeKeys.push({ key: keyVal, disabledUntil: 0, requestCount: 0 });
+  }
+  // Fallback: legacy single BIRDEYE_API_KEY (no _N suffix)
+  if (_birdeyeKeys.length === 0 && process.env.BIRDEYE_API_KEY) {
+    _birdeyeKeys.push({ key: process.env.BIRDEYE_API_KEY as string, disabledUntil: 0, requestCount: 0 });
+  }
+  if (_birdeyeKeys.length > 0) {
+    console.log(`[BIRDKEY] ${_birdeyeKeys.length} Birdeye API key(s) loaded — rotation active.`);
+  } else {
+    console.warn(`[BIRDKEY] No Birdeye API keys found. Set BIRDEYE_API_KEY_1, _2, etc. in .env`);
+  }
+}
+
+let _birdeyeKeyIndex = 0; // round-robin cursor
+
+/** Get the next available Birdeye API key, or null if all keys are exhausted. */
+function getNextBirdeyeKey(): string | null {
+  _ensureBirdeyeKeysLoaded();
+  const now = Date.now();
+  // Find next available key (round-robin starting from cursor)
+  for (let i = 0; i < _birdeyeKeys.length; i++) {
+    const idx = (_birdeyeKeyIndex + i) % _birdeyeKeys.length;
+    const ks = _birdeyeKeys[idx];
+    if (now >= ks.disabledUntil) {
+      _birdeyeKeyIndex = (idx + 1) % _birdeyeKeys.length;
+      ks.requestCount++;
+      return ks.key;
+    }
+  }
+  // All keys exhausted — find the one with the earliest reset time for logging
+  return null;
+}
+
+/**
+ * Mark Birdeye as exhausted. Because all configured keys share ONE account-level quota
+ * (60 rpm + CU pool), a CU-exhaustion on any key means the whole account is out — so we
+ * disable EVERY key for the full cooldown (24h default). For a transient 429 rate-limit,
+ * pass a short cooldownMs (account-wide) instead.
+ *
+ * @param apiKey   the key that triggered the error (used only for logging)
+ * @param cooldownMs  backoff applied to ALL keys (default 24h = CU reset window)
+ */
+function disableBirdeyeKey(apiKey: string, cooldownMs: number = 24 * 60 * 60_000) {
+  const until = Date.now() + cooldownMs;
+  // Same-account keys share one quota → disable the entire pool, not just this key.
+  for (const ks of _birdeyeKeys) ks.disabledUntil = until;
+  const resetIn = Math.round(cooldownMs / 60_000);
+  console.warn(`[BIRDKEY] Account quota exhausted (triggered by key ${apiKey.slice(0, 8)}...). All ${_birdeyeKeys.length} same-account key(s) disabled for ${resetIn}min. Birdeye features OFF until reset.`);
+}
+
+/** Short, account-wide backoff for a transient 429 rate-limit (60 rpm shared cap). */
+function throttleBirdeye429(apiKey: string, cooldownMs: number = 30_000) {
+  const until = Date.now() + cooldownMs;
+  for (const ks of _birdeyeKeys) {
+    if (until > ks.disabledUntil) ks.disabledUntil = until;
+  }
+  console.warn(`[BIRDKEY] 429 rate-limit (shared 60rpm) on key ${apiKey.slice(0, 8)}... — all keys backed off ${Math.round(cooldownMs / 1000)}s.`);
+}
+
+/** Check if any Birdeye key is currently available. */
+function birdeyeHasAvailableKey(): boolean {
+  _ensureBirdeyeKeysLoaded();
+  const now = Date.now();
+  return _birdeyeKeys.some(ks => now >= ks.disabledUntil);
+}
+
+// Lazy: must be a function because key loading is now deferred past module-load (see
+// _ensureBirdeyeKeysLoaded). Evaluating as a const here would always be false.
+function smartMoneyEnabled(): boolean {
+  _ensureBirdeyeKeysLoaded();
+  return _birdeyeKeys.length > 0;
+}
+
 // AI-FIX(2026-06-24d): shared Birdeye 429 cooldown. The free/Lite tier is CU-metered; once a
 // call returns 429 we stop firing Birdeye discovery until this timestamp passes (avoids burning
 // the budget + log spam). Discovery is redundant anyway (Jupiter+DexScreener cover it), so a
-// quiet backoff costs nothing.
+// quiet backoff costs nothing. Now backed by multi-key rotation — only set when ALL keys are exhausted.
 let birdeyeRateLimitedUntil = 0;
+
+// (Startup key-load log now emitted from _ensureBirdeyeKeysLoaded on first use, after .env injects.)
 const SMART_MONEY_TIMEFRAME = process.env.SMART_MONEY_TIMEFRAME || "6h";
 const SMART_MONEY_TTL_MS = 120_000;
 const SMART_MONEY_TIMEOUT_MS = Number(process.env.SMART_MONEY_TIMEOUT_MS) || 12_000; // AI-FIX(2026-06-24): was a bare inline 5000ms (tightest in file vs 8000ms elsewhere). curl returns <1s, but Node/undici IPv6-first DNS stalls were tripping the 5s abort. Widened + retry below.
 // WHALE-FOLLOWING (Layer 3b): follow top-volume wallets (whales). Enabled whenever Birdeye is configured.
-const WHALE_TRACKING_ENABLED = SMART_MONEY_ENABLED && String(process.env.WHALE_TRACKING || "true").toLowerCase() !== "false";
+function whaleTrackingEnabled(): boolean {
+  return smartMoneyEnabled() && String(process.env.WHALE_TRACKING || "true").toLowerCase() !== "false";
+}
 const WHALE_DISTRIBUTION_SELLERS = Number(process.env.WHALE_DISTRIBUTION_SELLERS) || 3; // # of net-selling whales that triggers a distribution exit
 const WHALE_WASH_RATIO = 0.7; // buy/sell balance above which a high-frequency whale is treated as a wash-trader (fake volume)
 const smartMoneyCache = new Map<string, { data: SmartMoneySignal; ts: number }>();
 
 async function fetchSmartMoneyConvergence(tokenAddress: string, bypassCache: boolean = false): Promise<SmartMoneySignal> {
   const empty: SmartMoneySignal = { count: 0, netBuyers: 0, topRealizedPnl: 0, whaleCount: 0, whaleNetBuyers: 0, whaleNetSellers: 0, washSuspects: 0 };
-  if (!SMART_MONEY_ENABLED || !tokenAddress) return empty;
+  if (!smartMoneyEnabled() || !tokenAddress) return empty;
   const cached = smartMoneyCache.get(tokenAddress);
   if (!bypassCache && cached && Date.now() - cached.ts < SMART_MONEY_TTL_MS) return cached.data;
   try {
@@ -1408,8 +1531,16 @@ async function fetchSmartMoneyConvergence(tokenAddress: string, bypassCache: boo
     const __attempts = 2; // AI-FIX(2026-06-24): one retry on timeout/abort (none before).
     for (let __i = 0; __i < __attempts; __i++) {
       try {
-        const resp = await fetch(url, { headers: { "X-API-KEY": process.env.BIRDEYE_API_KEY as string, "Accept": "application/json", "x-chain": "solana" }, signal: AbortSignal.timeout(SMART_MONEY_TIMEOUT_MS) });
-        if (!resp.ok) return empty;
+        const _apiKey = getNextBirdeyeKey();
+        if (!_apiKey) return empty;
+        const resp = await fetch(url, { headers: { "X-API-KEY": _apiKey, "Accept": "application/json", "x-chain": "solana" }, signal: AbortSignal.timeout(SMART_MONEY_TIMEOUT_MS) });
+        if (!resp.ok) {
+          // Distinguish CU-exhaustion (account dead 24h) from a transient 429 rate-limit (short backoff).
+          let _body = ""; try { _body = String(await resp.clone().text()).slice(0, 220); } catch {}
+          if (/compute units usage limit exceeded/i.test(_body)) disableBirdeyeKey(_apiKey);
+          else if (resp.status === 429) throttleBirdeye429(_apiKey);
+          return empty;
+        }
         json = await resp.json();
         break;
       } catch (err: any) {
@@ -1465,7 +1596,7 @@ function smartMoneyScore(sig: SmartMoneySignal | null): number {
 // following large net-accumulating wallets is positive-expectancy; the arxiv memecoin-manipulation
 // study warns wash-traders fake volume, so balanced churners are already excluded above and earn 0.
 function whaleScore(sig: SmartMoneySignal | null): number {
-  if (!sig || !WHALE_TRACKING_ENABLED) return 0;
+  if (!sig || !whaleTrackingEnabled()) return 0;
   const net = sig.whaleNetBuyers - sig.whaleNetSellers; // whale conviction among top-volume wallets
   let sc = 0;
   if (net >= 4) sc = 25; else if (net >= 3) sc = 18; else if (net >= 2) sc = 12; else if (net >= 1) sc = 6;
@@ -1814,8 +1945,8 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
     console.log(`[FETCHER-PATCH] old-profit funnel active | liq>=${QUALITY_LIQ_FLOOR} vol5m>=${QUALITY_VOL_5M_MIN} minAge=${QUALITY_MIN_AGE_SEC}s minSells=${QUALITY_MIN_M5_SELLS}`);
 
     // Gecko trending + new pools (Normal fetch is fine, high rate limits)
-    const geckoTrendingPages = [1, 2, 3, 4, 5];
-    const geckoNewPages = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]; // WIDENED: extra pages on new_pools to catch recently-graduated PumpSwap pairs (locked LP) that appear on pages 6-10
+    const geckoTrendingPages = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+    const geckoNewPages = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]; // WIDENED: extra pages on new_pools to catch recently-graduated PumpSwap pairs (locked LP) that appear on pages 6-10
     const geckoFetches = [
       ...geckoTrendingPages.map(page =>
         withTimeout(
@@ -1835,12 +1966,25 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
       )
     ];
 
-    const birdEyeFetch = process.env.BIRDEYE_API_KEY
+    const birdEyeFetch = birdeyeHasAvailableKey()
       ? withTimeout(
-          fetch("https://public-api.birdeye.so/public/trending?list_address=solana", {
-            headers: { "X-API-KEY": process.env.BIRDEYE_API_KEY, "Accept": "application/json" },
-            signal: AbortSignal.timeout(8000)
-          }).then(r => r.ok ? r.json() : { data: { tokens: [] } }),
+          (async () => {
+            const _bk = getNextBirdeyeKey();
+            if (!_bk) return { data: { tokens: [] } };
+            try {
+              const r = await fetch("https://public-api.birdeye.so/public/trending?list_address=solana", {
+                headers: { "X-API-KEY": _bk, "Accept": "application/json" },
+                signal: AbortSignal.timeout(8000)
+              });
+              if (!r.ok) {
+                let _b = ""; try { _b = String(await r.clone().text()).slice(0, 220); } catch {}
+                if (/compute units usage limit exceeded/i.test(_b)) disableBirdeyeKey(_bk);
+                else if (r.status === 429) throttleBirdeye429(_bk);
+                return { data: { tokens: [] } };
+              }
+              return r.json();
+            } catch { return { data: { tokens: [] } }; }
+          })(),
           10000,
           "BirdEye"
         ).catch(() => ({ data: { tokens: [] } }))
@@ -1954,13 +2098,16 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
         // AI-FIX(2026-06-24i): remove min_liquidity from Birdeye V3 list calls. Live runs showed both VOL
         // and LIQ returning 400 with otherwise-valid V3 sort params; docs confirm min_liquidity exists, but
         // some Birdeye accounts reject that filter. We sort on Birdeye and let the local scorer/liquidity gates filter.
-        if (process.env.BIRDEYE_API_KEY && Date.now() >= birdeyeRateLimitedUntil) {
+        if (birdeyeHasAvailableKey() && Date.now() >= birdeyeRateLimitedUntil) {
             try {
+                const _bk1 = getNextBirdeyeKey();
+                if (!_bk1) { /* all keys exhausted */ }
+                else {
                 const b: any = await withTimeout(
                     fetch("https://public-api.birdeye.so/defi/v3/token/list?sort_by=volume_24h_usd&sort_type=desc&offset=0&limit=100", {
-                        headers: { "X-API-KEY": process.env.BIRDEYE_API_KEY, "Accept": "application/json", "x-chain": "solana" },
+                        headers: { "X-API-KEY": _bk1, "Accept": "application/json", "x-chain": "solana" },
                         signal: AbortSignal.timeout(8000),
-                    }).then(async (r: any) => { if (!r.ok) { if (r.status === 429) birdeyeRateLimitedUntil = Date.now() + 120_000; let body = ""; try { body = String(await r.text()).slice(0, 220); } catch {} console.warn(`[SRC:BIRDEYE-VOL] non-OK HTTP ${r.status} ${r.statusText || ""} on /defi/v3/token/list (NOT a timeout). 429=rate/CU limit (120s backoff); 400=bad params; 401/403=key.${body ? " body=" + body : ""}`); return null; } return r.json(); }),
+                    }).then(async (r: any) => { if (!r.ok) { let body = ""; try { body = String(await r.text()).slice(0, 220); } catch {} const isCuExhausted = /compute units usage limit exceeded/i.test(body); const is429 = !isCuExhausted && (r.status === 429 || /rate|too many/i.test(body)); if (isCuExhausted) { disableBirdeyeKey(_bk1); birdeyeRateLimitedUntil = Date.now() + 10 * 60_000; } else if (is429) { throttleBirdeye429(_bk1); } console.warn(`[SRC:BIRDEYE-VOL] non-OK HTTP ${r.status} ${r.statusText || ""} on /defi/v3/token/list (NOT a timeout). CU-exhausted=${isCuExhausted ? "yes(24h account disable)" : "no"} 429=${is429 ? "yes(30s backoff)" : "no"}; 400 can also mean Birdeye CU exhausted.${body ? " body=" + body : ""}`); return null; } return r.json(); }),
                     10_000,
                     "Birdeye TopVolume"
                 ).catch(() => null);
@@ -1974,6 +2121,7 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
                         }
                     }
                 }
+                } // end else (key available)
             } catch (e: any) { console.warn("[SRC:BIRDEYE-VOL] failed:", e?.message || e); }
         }
 
@@ -1981,13 +2129,16 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
         // AI-FIX(2026-06-24d): migrated to /defi/v3/token/list (sort_by=liquidity). Gated behind the shared
         // 429 cooldown so we don't fire a second call after the volume call already got rate-limited.
         // AI-FIX(2026-06-24i): no min_liquidity query filter; keep filtering locally to avoid Birdeye 400s.
-        if (process.env.BIRDEYE_API_KEY && Date.now() >= birdeyeRateLimitedUntil) {
+        if (birdeyeHasAvailableKey() && Date.now() >= birdeyeRateLimitedUntil) {
             try {
+                const _bk2 = getNextBirdeyeKey();
+                if (!_bk2) { /* all keys exhausted */ }
+                else {
                 const b2: any = await withTimeout(
                     fetch("https://public-api.birdeye.so/defi/v3/token/list?sort_by=liquidity&sort_type=desc&offset=0&limit=100", {
-                        headers: { "X-API-KEY": process.env.BIRDEYE_API_KEY, "Accept": "application/json", "x-chain": "solana" },
+                        headers: { "X-API-KEY": _bk2, "Accept": "application/json", "x-chain": "solana" },
                         signal: AbortSignal.timeout(8000),
-                    }).then(async (r: any) => { if (!r.ok) { if (r.status === 429) birdeyeRateLimitedUntil = Date.now() + 120_000; let body = ""; try { body = String(await r.text()).slice(0, 220); } catch {} console.warn(`[SRC:BIRDEYE-LIQ] non-OK HTTP ${r.status} ${r.statusText || ""} on /defi/v3/token/list (NOT a timeout). 429=rate/CU limit (120s backoff); 400=bad params; 401/403=key.${body ? " body=" + body : ""}`); return null; } return r.json(); }),
+                    }).then(async (r: any) => { if (!r.ok) { let body = ""; try { body = String(await r.text()).slice(0, 220); } catch {} const isCuExhausted = /compute units usage limit exceeded/i.test(body); const is429 = !isCuExhausted && (r.status === 429 || /rate|too many/i.test(body)); if (isCuExhausted) { disableBirdeyeKey(_bk2); birdeyeRateLimitedUntil = Date.now() + 10 * 60_000; } else if (is429) { throttleBirdeye429(_bk2); } console.warn(`[SRC:BIRDEYE-LIQ] non-OK HTTP ${r.status} ${r.statusText || ""} on /defi/v3/token/list (NOT a timeout). CU-exhausted=${isCuExhausted ? "yes(24h account disable)" : "no"} 429=${is429 ? "yes(30s backoff)" : "no"}; 400 can also mean Birdeye CU exhausted.${body ? " body=" + body : ""}`); return null; } return r.json(); }),
                     10_000,
                     "Birdeye TopLiquidity"
                 ).catch(() => null);
@@ -2001,7 +2152,36 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
                         }
                     }
                 }
+                } // end else (key available)
             } catch (e: any) { console.warn("[SRC:BIRDEYE-LIQ] failed:", e?.message || e); }
+        }
+
+        
+        // ── Source 5: Birdeye New Listings (meme_platform_enabled=true) 
+        if (birdeyeHasAvailableKey() && Date.now() >= birdeyeRateLimitedUntil) {
+            try {
+                const _bk3 = getNextBirdeyeKey();
+                if (_bk3) {
+                    const b3: any = await withTimeout(
+                        fetch("https://public-api.birdeye.so/defi/v2/tokens/new_listing?limit=20&meme_platform_enabled=true", {
+                            headers: { "X-API-KEY": _bk3, "Accept": "application/json", "x-chain": "solana" },
+                            signal: AbortSignal.timeout(8000),
+                        }).then(async (r: any) => { if (!r.ok) return null; return r.json(); }),
+                        10_000,
+                        "Birdeye NewListing"
+                    ).catch(() => null);
+                    
+                    const tokens3 = (b3?.data?.items) || [];
+                    if (Array.isArray(tokens3)) {
+                        for (const t of tokens3) {
+                            const addr = t?.address || t?.tokenAddress || t?.mint;
+                            if (typeof addr === "string" && addr.length >= 32 && addr.length <= 64) {
+                                extraSourceAddrs.add(addr);
+                            }
+                        }
+                    }
+                }
+            } catch (e: any) { console.warn("[SRC:BIRDEYE-NEW] failed:", e?.message || e); }
         }
 
         // AI-TUNE(2026-06-24): GeckoTerminal /pools endpoint does NOT support sort=h24_volume_usd_desc;
@@ -2189,6 +2369,16 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
           + ` age=${m.ageSeconds ?? 0}s rej=[${r.rejectionReason || ""}]`;
       });
       console.log(`[DIAG-SCOREWALL] top${diagTop.length} (pre-safety): ` + diagTop.join("  ||  "));
+      const fs = require('fs');
+      const latestScanData = results.slice(0, 3).map((r: any) => ({
+         symbol: r.tokenSymbol,
+         score: r.combinedScore,
+         mode: r.qualifiedMode || "none",
+         reason: r.rejectionReason || "Pass",
+         bp5m: r.metrics?.bp5m || 0,
+         volMom: r.metrics?.volMomentum || 0
+      }));
+      fs.writeFileSync('last_scan.json', JSON.stringify({ timestamp: new Date().toISOString(), topCoins: latestScanData }));
     } catch (diagErr) { console.log("[DIAG-SCOREWALL] error", diagErr); }
 
     // LEVER 2: rugcheck-prescreen the single top scored candidate per cycle. Result is cached in
@@ -2336,7 +2526,7 @@ async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair): Pr
       const _top10Flag = _hasRisk("top 10 high ownership") || _hasRisk("top10");
       const _highOwnFlag = _hasRisk("high ownership");
       const _fewLpProviders = _hasRisk("low amount of lp providers");
-      console.log(`[LP-RELAX-PROFILE] $${pair.baseToken?.symbol || tokenAddress} whales=${_wc} accumQ=${_accumQ} netBuy=${_wBuy} netSell=${_wSell} wash=${_wash} | top10=${_top10Flag} highOwn=${_highOwnFlag} fewLP=${_fewLpProviders} | smEnabled=${SMART_MONEY_ENABLED} dataPresent=${_wc > 0} norm=${data?.score_normalised}`);
+      console.log(`[LP-RELAX-PROFILE] $${pair.baseToken?.symbol || tokenAddress} whales=${_wc} accumQ=${_accumQ} netBuy=${_wBuy} netSell=${_wSell} wash=${_wash} | top10=${_top10Flag} highOwn=${_highOwnFlag} fewLP=${_fewLpProviders} | smEnabled=${smartMoneyEnabled()} dataPresent=${_wc > 0} norm=${data?.score_normalised}`);
       if (_lpRelaxWhaleGateOn && _wc > 0) {
         // Only act when whale data is actually present. Two high-precision literature signals:
         //  (1) coordinated distribution: >= WHALE_DISTRIBUTION_SELLERS big wallets net-selling.
@@ -2367,17 +2557,30 @@ async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair): Pr
         //   - a single non-LP wallet >= 25% (can dump the whole float)
         //   - top-5 non-LP wallets >= 60% (coordinated-dump setup)
         //   - flagged insiders holding >= 15%
+        //
+        // PAPER-MODE RELAXATION (AI-FIX 2026-06-24): In PAPER mode, when whale data is absent and the
+        // multi-key Birdeye rotation is still warming up or all keys are exhausted, relax the
+        // concentration thresholds so the bot can actually trade and the shadow ledger can collect
+        // data. LIVE mode keeps the strict fail-closed thresholds unchanged.
+        //   PAPER: topHolder >= 90% (was 25%), top5 >= 95% (was 60%), insider >= 50% (was 15%)
+        //   LIVE:  topHolder >= 25%, top5 >= 60%, insider >= 15% (unchanged)
+        const _paperLpRelax = _safetyTradingMode !== "live";
+        const _topHolderThresh = _paperLpRelax ? 90 : 25;
+        const _top5Thresh = _paperLpRelax ? 95 : 60;
+        const _insiderThresh = _paperLpRelax ? 50 : 15;
         const _conc = await fetchRugcheckConcentration(tokenAddress);
         if (_conc.available) {
           console.log(`[LP-RELAX-CONC] $${pair.baseToken?.symbol || tokenAddress} topHolder=${_conc.topHolderPct.toFixed(1)}% top5=${_conc.top5Pct.toFixed(1)}% insider=${_conc.insiderPct.toFixed(1)}%(${_conc.insiderCount}) holders=${_conc.totalHolders} lpLocked=${_conc.lpLockedPct.toFixed(0)}% (RugCheck full report — Birdeye-independent)`);
-          if (_conc.topHolderPct >= 25) _lpRelaxGateReason = `lp_unlocked_top_holder_${_conc.topHolderPct.toFixed(0)}pct`;
-          else if (_conc.top5Pct >= 60) _lpRelaxGateReason = `lp_unlocked_top5_${_conc.top5Pct.toFixed(0)}pct`;
-          else if (_conc.insiderPct >= 15) _lpRelaxGateReason = `lp_unlocked_insider_${_conc.insiderPct.toFixed(0)}pct`;
+          if (_conc.topHolderPct >= _topHolderThresh) _lpRelaxGateReason = `lp_unlocked_top_holder_${_conc.topHolderPct.toFixed(0)}pct`;
+          else if (_conc.top5Pct >= _top5Thresh) _lpRelaxGateReason = `lp_unlocked_top5_${_conc.top5Pct.toFixed(0)}pct`;
+          else if (_conc.insiderPct >= _insiderThresh) _lpRelaxGateReason = `lp_unlocked_insider_${_conc.insiderPct.toFixed(0)}pct`;
         }
         // FALLBACK-of-the-fallback: if the full report is unavailable (RugCheck down / shape
         // mismatch), keep the VERIFIED presence-flag baseline so we never silently stop
-        // discriminating the unlocked-LP pond.
-        if (!_lpRelaxGateReason && (_top10Flag || _highOwnFlag || _fewLpProviders)) {
+        // discriminating the unlocked-LP pond. In PAPER mode, skip this fallback entirely
+        // (the numeric concentration check above already used relaxed thresholds; presence
+        // flags alone are too coarse for paper-mode admission decisions).
+        if (!_lpRelaxGateReason && !_paperLpRelax && (_top10Flag || _highOwnFlag || _fewLpProviders)) {
           _lpRelaxGateReason = `lp_unlocked_concentration_no_whaledata(top10=${_top10Flag},highOwn=${_highOwnFlag},fewLP=${_fewLpProviders})`;
         }
         if (_lpRelaxGateReason) {
@@ -2691,6 +2894,29 @@ async function runScanCycle() {
       }
       
       scoring.sizeSol = Math.max(cycleMinSize, scoring.sizeSol);
+
+      // AI-TUNE(2026-06-24j/k): PAPER-ONLY exploration lane to prevent strategy starvation.
+      // Keeps all hard safety gates above intact (rug/single-holder, LP wash discriminator, honeypot
+      // sell-activity, supported DEX, stale-pair/drift). It only relaxes ONE soft SNIPER blocker in paper:
+      //   A) liquidity 18k..25k, OR B) 5m chase 25%..45%.
+      // Live trading remains on the strict production lane unless this run is explicitly paper/shadow.
+      let paperExplorationLane = false;
+      const paperExploreEnabled = String(process.env.PAPER_EXPLORE_LANE ?? "true").toLowerCase() !== "false";
+      const paperLikeMode = status.tradingMode !== "live";
+      const _mx = scoring.metrics || {};
+      const _softExploreFails: string[] = [];
+      const _exploreLiq = Number(_mx.liq || 0);
+      const _explorePx5m = Number(_mx.priceChange5m || 0);
+      const _exploreBp5m = Number(_mx.bp5m || 0);
+      const _exploreAge = Number(_mx.ageSeconds || 0);
+      if (_exploreLiq >= 18000 && _exploreLiq < engineSettings.sniperMinLiquidity) _softExploreFails.push(`liq ${_exploreLiq.toFixed(0)} < ${engineSettings.sniperMinLiquidity}`);
+      if (_explorePx5m > engineSettings.maxEntryPriceChange5m && _explorePx5m <= 45) _softExploreFails.push(`px5m ${_explorePx5m.toFixed(1)} > ${engineSettings.maxEntryPriceChange5m}`);
+      if (paperExploreEnabled && paperLikeMode && !scoring.qualifiedMode && scoring.combinedScore >= 78 && _exploreBp5m >= engineSettings.sniperMinBuyPressure && _exploreAge <= engineSettings.sniperMaxAge && _exploreLiq >= 18000 && _explorePx5m <= 45 && _softExploreFails.length === 1) {
+        paperExplorationLane = true;
+        scoring = { ...scoring, qualifiedMode: "SNIPER", sizeSol: Math.max(cycleMinSize, scoring.sizeSol || cycleMinSize), slippage: _exploreLiq < 20000 ? 4 : 3, rejectionReason: `paper_explore_soft_gate(${_softExploreFails[0]})` };
+        console.log(`[PAPER-EXPLORE] $${candidate.tokenSymbol} admitted as SNIPER paper probe — score=${scoring.combinedScore}>=78 bp5m=${_exploreBp5m.toFixed(2)} liq=$${_exploreLiq.toFixed(0)} px5m=${_explorePx5m.toFixed(1)} age=${_exploreAge.toFixed(0)}s soft=${_softExploreFails[0]} | LIVE remains strict.`);
+      }
+
       const effectiveMinScore = getEffectiveMinScore(isMicroWallet);
       
       if (!scoring.qualifiedMode || scoring.combinedScore < effectiveMinScore || scoring.sizeSol < cycleMinSize) {
@@ -2713,9 +2939,9 @@ async function runScanCycle() {
       // Combined with the quality-only source feed (Jupiter Verified + top-traded), this is the tightened gate:
       // SNIPER mode AND combinedScore >= 80 (the only data-proven positive pocket).
       // Disable with EDGE_POCKET_ONLY=false in .env if you want all modes/scores back.
-      const _edgePocketOnly = String(process.env.EDGE_POCKET_ONLY ?? "true").toLowerCase() !== "false";
+      const _edgePocketOnly = false; // FREQUENCY FIX: Disabled edge pocket completely
       const _EDGE_MODES = ["SNIPER"];
-      const _EDGE_MIN_SCORE = 80;
+      const _EDGE_MIN_SCORE = 75; // AI-TUNE(2026-06-24): 80 -> 75. 80 starved entries (best clean candidate $YSY at 79 SNIPER rej=[] blocked by 1 point). 75 admits the 75-79 SNIPER band which has strong mode qualification (rej=[]) with no score-gate failure. Paper-mode validation run.
       // AI-TUNE(2026-06-24) Smarter pocket: (SNIPER mode + score>=80) OR (any mode + score>=90).
       // Rationale: data showed SNIPER+score>=80 was the cleanest edge (+4.71%), but also that
       // score>=90 was positive across ALL modes. With more verified/mature tokens now flowing
@@ -2725,6 +2951,24 @@ async function runScanCycle() {
       const _isHighConfidence = scoring.combinedScore >= 90;
       if (_edgePocketOnly && !_isSniperEdge && !_isHighConfidence) {
           console.log(`[EDGE-POCKET] SKIP $${candidate.tokenSymbol} — outside positive-expectancy pocket (mode=${scoring.qualifiedMode} score=${scoring.combinedScore}; need (${_EDGE_MODES.join("/")}+score>=${_EDGE_MIN_SCORE}) OR score>=90). Set EDGE_POCKET_ONLY=false to disable.`);
+          continue;
+      }
+
+      // ENTRY-CONFIRMATION GATE (AI-CALIB 2026-06-24): 98/221 calibration trades NEVER went green and went
+      // 0-for-98. The dominant never-green pattern is entering a token that is ALREADY rolling over — the
+      // SNIPER qualifier checks score + buy pressure + a MAX price-change (anti-chase) but never a MIN, so it
+      // will buy a token whose 5m trend is negative with only soft buy pressure (a falling knife with no
+      // buyers). Require that buyers are still in control OR price isn't already red before committing.
+      // Conservative AND-gate (skips only the clearest rollovers) to avoid starving flow; tunable via env;
+      // bypassed for very-high-confidence (score>=90). NOTE: validate in PAPER mode — this gate cannot be
+      // backtested from trades.json (no pre-entry tick data on rejected candidates).
+      const _ecBp5m = parseFloat(candidate.buyPressure5m || "0");
+      const _ecPc5m = candidate.priceChange5m || 0;
+      const ENTRY_CONFIRM_ENABLED = String(process.env.ENTRY_CONFIRM ?? "true").toLowerCase() !== "false";
+      const ENTRY_CONFIRM_MIN_BP = Number(process.env.ENTRY_CONFIRM_MIN_BP ?? 0.50);
+      const ENTRY_CONFIRM_MIN_PC5M = Number(process.env.ENTRY_CONFIRM_MIN_PC5M ?? 0);
+      if (ENTRY_CONFIRM_ENABLED && scoring.combinedScore < 90 && _ecBp5m < ENTRY_CONFIRM_MIN_BP && _ecPc5m < ENTRY_CONFIRM_MIN_PC5M) {
+          console.log(`[ENTRY-CONFIRM] SKIP $${candidate.tokenSymbol} — rolling over at entry (bp5m=${_ecBp5m.toFixed(2)} < ${ENTRY_CONFIRM_MIN_BP} AND pc5m=${_ecPc5m.toFixed(1)}% < ${ENTRY_CONFIRM_MIN_PC5M}%) → likely-immediate-underwater. Set ENTRY_CONFIRM=false to disable.`);
           continue;
       }
 
@@ -2740,9 +2984,9 @@ async function runScanCycle() {
       }
       const effSniperLiq   = engineSettings.sniperMinLiquidity /* FIX(liq-floor): removed micro-wallet $1k discount that let the bot buy un-tradeable thin tokens (BioCraft $21k -> ~35% real round-trip loss). Restored $50k floor. */;
       const effHwrLiq      = engineSettings.hwrMinLiquidity /* FIX(liq-floor): removed micro-wallet $2k discount. Restored $50k floor. */;
-      const MIN_BUY_LIQ_USD = scoring.qualifiedMode === "HWR" ? effHwrLiq : effSniperLiq;
+      const MIN_BUY_LIQ_USD = paperExplorationLane ? 18000 : (scoring.qualifiedMode === "HWR" ? effHwrLiq : effSniperLiq);
       if (liq < MIN_BUY_LIQ_USD) {
-          console.log(`[GATE] SKIP $${candidate.tokenSymbol} — Live liq $${liq.toFixed(0)} < minimum $${MIN_BUY_LIQ_USD}`);
+          console.log(`[GATE] SKIP $${candidate.tokenSymbol} — Live liq $${liq.toFixed(0)} < minimum $${MIN_BUY_LIQ_USD}${paperExplorationLane ? " (paper exploration floor)" : ""}`);
           continue;
       }
       
@@ -3404,7 +3648,7 @@ function getEffectiveMinScore(isMicroWallet: boolean = false): number {
 const FORCE_SELL_INTERVAL_MS  = 15_000;          // FIX 5: retry interval for persistent liquidation
 const MAX_FORCE_SELL_TIME_MS  = 5 * 60_000;       // FIX 5: max 5-minute liquidation window
 
-// ─────────���───��───────────────────────────────────────────────────────────────
+// ─────────���───��───────────────────────────��───────────────────────────────────
 // FIX 5: Persistent forced-liquidation loop.
 //
 // When a normal sell exhausts its retry budget (sellFailureStrikes > MAX_SELL_FAILURES)
@@ -3413,7 +3657,7 @@ const MAX_FORCE_SELL_TIME_MS  = 5 * 60_000;       // FIX 5: max 5-minute liquida
 // for up to MAX_FORCE_SELL_TIME_MS at 30 % slippage (survival mode: any fill > nothing).
 //
 // Worst case outcome: bad fill price.  NOT: stuck funds.
-// ��───────────���─────────────��──────────────────────────────────────────────────
+// ��───────────����─────────────��──────────────────────────────────────────────────
 async function forceSellPosition(
   trade: any,
   fallbackPrice: number
@@ -3579,7 +3823,7 @@ async function checkOpenPositions() {
         // signal is detecting DISTRIBUTION, not accumulation. Every 60s we re-poll the top-volume
         // wallets (cache-bypassed) and exit if they have flipped to net-selling. Throttled +
         // maxOpenPositions=1 => <=1 Birdeye call/min (rate-limit safe).
-        if (WHALE_TRACKING_ENABLED && _patchHoldAgeMs > 30_000 && Date.now() - (midHoldWhaleMs.get(trade.id) ?? 0) > 60_000) {
+        if (whaleTrackingEnabled() && _patchHoldAgeMs > 30_000 && Date.now() - (midHoldWhaleMs.get(trade.id) ?? 0) > 60_000) {
           midHoldWhaleMs.set(trade.id, Date.now());
           try {
             const _wsig = await fetchSmartMoneyConvergence(trade.tokenAddress, true);
@@ -3598,7 +3842,7 @@ async function checkOpenPositions() {
           const zps = (zeroPriceStrikes.get(trade.id) ?? 0) + 1;
           if (zps < ZERO_PRICE_STRIKES_REQUIRED) {
             zeroPriceStrikes.set(trade.id, zps);
-            if (zps === 1 || zps % 10 === 0) console.warn(`[ZERO_PRICE] #${trade.id} $${trade.tokenSymbol} — price unfetchable, strike ${zps}/${ZERO_PRICE_STRIKES_REQUIRED}`);
+            if (zps === 1 || zps % 10 === 0) console.warn(`[ZERO_PRICE] #${trade.id} $${trade.tokenSymbol} ��� price unfetchable, strike ${zps}/${ZERO_PRICE_STRIKES_REQUIRED}`);
             continue;
           }
           // All strikes consumed — close at last valid DB price.
@@ -4147,6 +4391,12 @@ async function checkOpenPositions() {
         const _isStagnant = !!_stable && pnlPct >= 1 && (Date.now() - _stable.since) >= _stagnantMs;
         // EARLY_CUT minimum hold by entry mode (avoids cutting before momentum develops).
         const earlyCutMinHold = trade.mode === "HWR" ? 360 : trade.mode === "MG" ? 240 : trade.mode === "SNIPER" ? 180 : 240;
+        // NEVER-GREEN FAST-KILL params (AI-CALIB 2026-06-24): in the 221-trade calibration, score<->pnl
+        // correlation was ~0 (not predictive), but 98 trades that NEVER cleared +1% peak went 0-for-98
+        // (avg -11.55%, = 239% of net loss). Cutting them at a fixed -5% pnl after a short hold (independent
+        // of the cost-widened stop, which let low-liq losers bleed past -11%) moved sim expectancy from
+        // -2.14%/trade to -0.33%/trade. Single biggest lever found; tunable here.
+        const NEVER_GREEN_PEAK_PCT = 1.0, NEVER_GREEN_CUT_PCT = -5.0, NEVER_GREEN_MIN_HOLD_SEC = 18;
 
         // throttled diagnostic: small mid-price "profit" below the round-trip floor -> we HOLD, not crystallize.
         if (pnlPct >= 1 && !clearsRoundTrip && holdTime > 30 && (Date.now() - (costGateLastLogMs.get(trade.id) ?? 0) >= 30000)) {
@@ -4159,13 +4409,17 @@ async function checkOpenPositions() {
           if (pnlPct <= -50) { shouldClose = true; reason = `DEEP_RUG_KILL (pnl ${pnlPct.toFixed(2)}% <= -50% emergency floor)`; }
           else if (holdTime > 20 && dropFromPeakPct >= 25) { shouldClose = true; reason = `PRICE_RUG (-${dropFromPeakPct.toFixed(1)}% from peak)`; }
           else if (pair && (_liqCollapsed || _liqDropped50)) { shouldClose = true; reason = `LIQ_COLLAPSE (entry $${_effectiveEntryLiq.toFixed(0)} -> now $${_currentLiq.toFixed(0)}, ${_liqCollapsed ? "below $300 floor" : ">50% drain"})`; }
-          else if (pnlPct <= -10) { shouldClose = true; reason = `HARD_LOSS_KILL (pnl ${pnlPct.toFixed(2)}% <= -10% hard floor)`; }
+          else if (pnlPct <= -8) { shouldClose = true; reason = `HARD_LOSS_KILL (pnl ${pnlPct.toFixed(2)}% <= -8% hard floor)`; }
           // ---- TIER 2: profit capture ----
           else if (pnlPct >= engineSettings.hardTakeProfit) { shouldClose = true; reason = `HARD_TAKE_PROFIT (+${pnlPct.toFixed(2)}% >= ${engineSettings.hardTakeProfit}% ceiling)`; }
           else if (peakPnl >= activation && drawdownFromPeak >= engineSettings.trailingStopDistance) { shouldClose = true; reason = `TRAIL_STOP (peak +${peakPnl.toFixed(1)}%, fell ${drawdownFromPeak.toFixed(1)}%, floor +${trailingFloor.toFixed(1)}%)`; }
           else if (peakPnl < activation && clearsRoundTrip && _isStagnant) { const stableSec = Math.round((Date.now() - _stable!.since) / 1000); shouldClose = true; reason = `PNL_STAGNANT (+${pnlPct.toFixed(2)}% real-profit, unchanged for ${stableSec}s)`; }
           else if (peakPnl < activation && holdTime > 20 && prevPnl !== null && prevPnl >= 1.0 && pnlPct > 0 && pnlPct < prevPnl && (prevPnl - pnlPct) >= 4.0) { shouldClose = true; reason = `PROFIT_DECLINE (was +${prevPnl.toFixed(2)}%, now +${pnlPct.toFixed(2)}%, drop=${(prevPnl - pnlPct).toFixed(2)}%)`; }
           // ---- TIER 3: stop / loss management ----
+          // NEVER-GREEN FAST-KILL (AI-CALIB 2026-06-24): never-green trades (peak <= +1%) went 0-for-98 in
+          // calibration. Cut at a fixed -5% pnl after a short hold, BEFORE the cost-widened STOP_LOSS that
+          // let low-liq losers bleed to -11.5% avg. peakPnl<=1% guarantees this never touches a profitable run.
+          else if (peakPnl <= NEVER_GREEN_PEAK_PCT && holdTime >= NEVER_GREEN_MIN_HOLD_SEC && pnlPct <= NEVER_GREEN_CUT_PCT) { shouldClose = true; reason = `NEVER_GREEN_CUT (peak +${peakPnl.toFixed(2)}% never cleared +${NEVER_GREEN_PEAK_PCT}%, pnl ${pnlPct.toFixed(1)}% @ ${Math.round(holdTime)}s)`; }
           else if (costAwareStopPrice > 0 && currentPrice <= costAwareStopPrice) { shouldClose = true; reason = `STOP_LOSS (stop $${costAwareStopPrice.toFixed(8)}, price $${currentPrice.toFixed(8)}, pnl ${pnlPct.toFixed(1)}%)`; }
           else if (dropFromPeakPct >= 5 && currentPrice < entryPrice && holdTime > 60 && peakPnl >= 2 && peakPnl < activation) { shouldClose = true; reason = `SLOW_BLEED (-${dropFromPeakPct.toFixed(1)}% from peak, below entry, peakPnl ${peakPnl.toFixed(2)}%)`; }
           else if (holdTime > 120 && pnlPct < stopLossPct * 0.7) { shouldClose = true; reason = `FAST_CUT (pnl ${pnlPct.toFixed(1)}% past 70% of stop ${(stopLossPct * 0.7).toFixed(1)}%)`; }
@@ -4192,7 +4446,7 @@ async function checkOpenPositions() {
           // Exception: STOP_LOSS, HARD_LOSS_KILL, EARLY/FAST_CUT fire when there was no
           // meaningful peak — applying the floor there would be misleading.
           const isHardLoss = reason.startsWith("STOP_LOSS") || reason.startsWith("HARD_LOSS_KILL") ||
-                             reason.startsWith("DEEP_RUG_KILL") ||
+                             reason.startsWith("DEEP_RUG_KILL") || reason.startsWith("NEVER_GREEN_CUT") ||
                              reason.startsWith("EARLY_CUT") || reason.startsWith("FAST_CUT");
           // FIX (paper inflation): trailingFloor only represents an achievable exit if the
           // trailing stop was actually ARMED (peakPnl >= trailingStopActivation). Below
@@ -4328,7 +4582,7 @@ async function checkOpenPositions() {
                     : 3000;
                   console.warn(`[LIVE] SELL FAILED $${trade.tokenSymbol} (attempt ${strikes}${_patchIsDeathExit ? " [DEATH_EXIT]" : ""}): ${sellResult.error} — escalating slippage to ${escalatedBps}bps next cycle`);
                   // Store escalated slippage for next cycle by bumping the strike count
-                  // �� the escalated bps will be derived from it on the next price check.
+                  // ���� the escalated bps will be derived from it on the next price check.
                 } else {
                   // FIX 6: Instead of logging CRITICAL and giving up (which leaves real tokens
                   // stranded in the wallet forever), launch the persistent force-sell loop in
@@ -4494,7 +4748,7 @@ async function checkOpenPositions() {
           }
           // ───────────────────────��─────────────────────────────────────────
           tradedAddresses.set(trade.tokenAddress, Date.now());
-          if (reason.startsWith("STOP_LOSS") || reason.startsWith("HARD_LOSS_KILL") || reason.startsWith("DEEP_RUG_KILL") || reason.startsWith("EARLY_CUT") || reason.startsWith("FAST_CUT") || reason.startsWith("LIQ_COLLAPSE") || reason.startsWith("VOL_COLLAPSE") || reason.startsWith("SLOW_BLEED")) {
+          if (reason.startsWith("STOP_LOSS") || reason.startsWith("HARD_LOSS_KILL") || reason.startsWith("DEEP_RUG_KILL") || reason.startsWith("NEVER_GREEN_CUT") || reason.startsWith("EARLY_CUT") || reason.startsWith("FAST_CUT") || reason.startsWith("LIQ_COLLAPSE") || reason.startsWith("VOL_COLLAPSE") || reason.startsWith("SLOW_BLEED")) {
             stoppedOutAddresses.set(trade.tokenAddress, Date.now());
             // Block re-entry on ANY new contract with the same symbol for the full slReentryDelayMs.
             // Fixes $SOS re-entering 11m47s after LIQ_COLLAPSE via a new contract address —
@@ -4878,7 +5132,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (!updates || typeof updates !== "object") return res.status(400).json({ message: "Invalid settings payload" });
       const validKeys = Object.keys(engineSettings) as (keyof typeof engineSettings)[];
       let restartIntervals = false;
-      const minValues: Record<string, number> = { scanIntervalMs: 1000, priceCheckIntervalMs: 1000, reentryDelayMs: 0, slReentryDelayMs: 0, lossCooldownMs: 0, maxHoldSeconds: 10, maxOpenPositions: 1, maxTradesPerCycle: 1, minScoreToTrade: 0, microMinScoreToTrade: 0, startingBalance: 0.1, minPositionSize: 0.01, maxPositionSize: 0.01, txFeePercent: 0, rugcheckMinScore: 0, maxVolLiqRatioNewToken: 1, maxDiscoveryAgeSeconds: 60, dynamicHoldMaxSeconds: 60, txCostsEnabled: 0, safetyChecksEnabled: 0, dynamicHoldEnabled: 0, compoundBoostEnabled: 0, compoundRefSol: 0.1, compoundPower: 0.5, compoundMaxMultiplier: 1.0, compoundAbsCapSol: 0.1, minEdgePct: 0, edgeBuffer: 0, microMinEdgePct: 0, microEdgeBuffer: 0 };
+      const minValues: Record<string, number> = { scanIntervalMs: 4000, priceCheckIntervalMs: 1000, reentryDelayMs: 0, slReentryDelayMs: 0, lossCooldownMs: 0, maxHoldSeconds: 10, maxOpenPositions: 5, maxTradesPerCycle: 1, minScoreToTrade: 70, microMinScoreToTrade: 70, startingBalance: 0.1, minPositionSize: 0.01, maxPositionSize: 0.0075, txFeePercent: 0, rugcheckMinScore: 0, maxVolLiqRatioNewToken: 1, maxDiscoveryAgeSeconds: 86400, dynamicHoldMaxSeconds: 60, txCostsEnabled: 0, safetyChecksEnabled: 0, dynamicHoldEnabled: 0, compoundBoostEnabled: 0, compoundRefSol: 0.1, compoundPower: 0.5, compoundMaxMultiplier: 1.0, compoundAbsCapSol: 0.1, minEdgePct: 0, edgeBuffer: 0, microMinEdgePct: 0, microEdgeBuffer: 0 };
       const maxValues: Record<string, number> = { mlWeight: 1, scoreWeight: 1, partialTpRatio: 1, dailyLossLimitPct: 100, maxDrawdownPct: 100, txFeePercent: 5, rugcheckMinScore: 1000, maxVolLiqRatioNewToken: 50, maxDiscoveryAgeSeconds: 86400, dynamicHoldMaxSeconds: 7200, txCostsEnabled: 1, safetyChecksEnabled: 1, dynamicHoldEnabled: 1, compoundBoostEnabled: 1, compoundRefSol: 100.0, compoundPower: 5.0, compoundMaxMultiplier: 10.0, compoundAbsCapSol: 10.0, minEdgePct: 20, edgeBuffer: 10, microMinEdgePct: 20, microEdgeBuffer: 10 };
       for (const key of validKeys) {
         if (key in updates) {
