@@ -1951,13 +1951,16 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
         // AI-FIX(2026-06-24d): migrated /defi/tokenlist (deprecated, 400 Bad Request) -> /defi/v3/token/list
         // with the correct V3 enum sort_by=volume_24h_usd (old v24hUSD is now invalid). Gated behind the
         // shared 429 cooldown.
+        // AI-FIX(2026-06-24i): remove min_liquidity from Birdeye V3 list calls. Live runs showed both VOL
+        // and LIQ returning 400 with otherwise-valid V3 sort params; docs confirm min_liquidity exists, but
+        // some Birdeye accounts reject that filter. We sort on Birdeye and let the local scorer/liquidity gates filter.
         if (process.env.BIRDEYE_API_KEY && Date.now() >= birdeyeRateLimitedUntil) {
             try {
                 const b: any = await withTimeout(
-                    fetch("https://public-api.birdeye.so/defi/v3/token/list?sort_by=volume_24h_usd&sort_type=desc&offset=0&limit=100&min_liquidity=10000", {
+                    fetch("https://public-api.birdeye.so/defi/v3/token/list?sort_by=volume_24h_usd&sort_type=desc&offset=0&limit=100", {
                         headers: { "X-API-KEY": process.env.BIRDEYE_API_KEY, "Accept": "application/json", "x-chain": "solana" },
                         signal: AbortSignal.timeout(8000),
-                    }).then((r: any) => { if (!r.ok) { if (r.status === 429) birdeyeRateLimitedUntil = Date.now() + 120_000; console.warn(`[SRC:BIRDEYE-VOL] non-OK HTTP ${r.status} ${r.statusText || ""} on /defi/v3/token/list (NOT a timeout). 429=rate/CU limit (120s backoff); 400=bad params; 401/403=key.`); return null; } return r.json(); }),
+                    }).then(async (r: any) => { if (!r.ok) { if (r.status === 429) birdeyeRateLimitedUntil = Date.now() + 120_000; let body = ""; try { body = String(await r.text()).slice(0, 220); } catch {} console.warn(`[SRC:BIRDEYE-VOL] non-OK HTTP ${r.status} ${r.statusText || ""} on /defi/v3/token/list (NOT a timeout). 429=rate/CU limit (120s backoff); 400=bad params; 401/403=key.${body ? " body=" + body : ""}`); return null; } return r.json(); }),
                     10_000,
                     "Birdeye TopVolume"
                 ).catch(() => null);
@@ -1977,13 +1980,14 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
         // ── Source 4: Birdeye top-liquidity tokens (depth signal, different from volume). 24h liq = quality.
         // AI-FIX(2026-06-24d): migrated to /defi/v3/token/list (sort_by=liquidity). Gated behind the shared
         // 429 cooldown so we don't fire a second call after the volume call already got rate-limited.
+        // AI-FIX(2026-06-24i): no min_liquidity query filter; keep filtering locally to avoid Birdeye 400s.
         if (process.env.BIRDEYE_API_KEY && Date.now() >= birdeyeRateLimitedUntil) {
             try {
                 const b2: any = await withTimeout(
-                    fetch("https://public-api.birdeye.so/defi/v3/token/list?sort_by=liquidity&sort_type=desc&offset=0&limit=100&min_liquidity=10000", {
+                    fetch("https://public-api.birdeye.so/defi/v3/token/list?sort_by=liquidity&sort_type=desc&offset=0&limit=100", {
                         headers: { "X-API-KEY": process.env.BIRDEYE_API_KEY, "Accept": "application/json", "x-chain": "solana" },
                         signal: AbortSignal.timeout(8000),
-                    }).then((r: any) => { if (!r.ok) { if (r.status === 429) birdeyeRateLimitedUntil = Date.now() + 120_000; console.warn(`[SRC:BIRDEYE-LIQ] non-OK HTTP ${r.status} ${r.statusText || ""} on /defi/v3/token/list (NOT a timeout). 429=rate/CU limit (120s backoff); 400=bad params; 401/403=key.`); return null; } return r.json(); }),
+                    }).then(async (r: any) => { if (!r.ok) { if (r.status === 429) birdeyeRateLimitedUntil = Date.now() + 120_000; let body = ""; try { body = String(await r.text()).slice(0, 220); } catch {} console.warn(`[SRC:BIRDEYE-LIQ] non-OK HTTP ${r.status} ${r.statusText || ""} on /defi/v3/token/list (NOT a timeout). 429=rate/CU limit (120s backoff); 400=bad params; 401/403=key.${body ? " body=" + body : ""}`); return null; } return r.json(); }),
                     10_000,
                     "Birdeye TopLiquidity"
                 ).catch(() => null);
