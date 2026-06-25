@@ -304,8 +304,8 @@ let engineSettings = {
   partialTpCostMargin: 4,        // PAPER-TEST(cost-relative): profit cushion in % added on top of the modeled round-trip cost when computing the effective partial-TP trigger. effectivePartialTp = max(partialTpThreshold, modeledRoundTrip + this). Keeps the partial from firing until it nets real profit above the trade's actual exit cost.
 
   // -- Sizing Strategy (Calibrated for 1000x compounding) --
-  minPositionSize: 0.015, // UPGRADE: Reduced to 100 INR (0.015 SOL) to give 3 bullets.
-  maxPositionSize: 0.018, // UPGRADE: Cap at 0.018 SOL for micro-wallet safety.
+  minPositionSize: 0.012, // UPGRADE: Reduced to 100 INR (0.015 SOL) to give 3 bullets.
+  maxPositionSize: 0.015, // UPGRADE: Cap at 0.018 SOL for micro-wallet safety.
   
   // -- SNIPER Mode Calibration --
   // sniperMinScore: 70,
