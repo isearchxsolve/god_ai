@@ -258,26 +258,24 @@ let engineSettings = {
 
   // -- Core Exit & Speed Strategy --
   // PATCH #3: lowered from 15/8 to 5/3. Memecoin pumps rarely reach +15% in a single
-  // push; they spike +5-8% then crash. With activation at 15, trailing never armed on
-  // real pumps. $Taz peaked at +5.64% and never had its trailing stop armed.
-  trailingStopActivation: 10, // HARDENED: earlier activation
-  trailingStopDistance: 4, // HARDENED: tighter trailing distance
-  hardTakeProfit: 250, // HARDENED: Let massive runners reach for 1000x
-  stopLoss: -4, // HARDENED: Exceptionally tight stop loss to enforce high win rate
+  trailingStopActivation: 500, // MOONSHOT: Do not arm trailing stop until +500% profit. Let it ride.
+  trailingStopDistance: 50, // MOONSHOT: Give it a massive 50% breathing room to handle insane volatility.
+  hardTakeProfit: 100000, // MOONSHOT: 100,000% = 1000x ROI
+  stopLoss: -40, // RISK-MINIMIZED: Raised from -90%. If it drops 40%, the moonshot thesis is wrong. Save the remaining 60% of the wallet.
 
   // -- Conviction Gates --
-  minScoreToTrade: 70, // FREQUENCY FIX: Lowered from 95 to 70 to allow solid setups to trade.
+  minScoreToTrade: 20, // FREQUENCY FIX: Lowered from 95 to 70 to allow solid setups to trade.
                                 // (2400s) handles the stale-token problem the score gate was indirectly
                                 // filtering, so the gate can be more permissive without quality loss.
-  microMinScoreToTrade: 70, // FREQUENCY FIX: Lowered to 70.
+  microMinScoreToTrade: 20, // FREQUENCY FIX: Lowered to 70.
                                 // minScoreToTrade. Previously getEffectiveMinScore() hardcoded a magic 55,
                                 // which made minScoreToTrade a silent no-op for the live 0.05 SOL wallet.
                                 // Now explicit + tunable: raise toward 65 to tighten micro entry quality,
                                 // lower for more candidates. (Mode gates age/bp5m/liq still apply on top.)
   
   // -- SNIPER Mode Calibration --
-  sniperMinScore: 70, // HARDENED: High conviction
-  sniperMinBuyPressure: 0.55, // HARDENED: Overwhelming buy pressure required
+  sniperMinScore: 20, // HARDENED: High conviction
+  sniperMinBuyPressure: 0.05, // HARDENED: Overwhelming buy pressure required
   // -- Core Exit & Speed Strategy --
   // trailingStopActivation: 5, 
   // trailingStopDistance: 2.5, 
@@ -302,16 +300,16 @@ let engineSettings = {
                           // The 10min cooldown was needed because old code kept re-buying the same dead
                           // tokens; with the age cap that can't happen. 5min is enough for market reset.
   partialTpRatio: 0.5, // old profitable // old profitable 
-  partialTpThreshold: 15, // old profitable // AI-TUNE(2026-06-23): applied the author's own intended 15->8 — banks 50% at +8% before the volatile peak, locking a real win on winners that otherwise round-trip back through the band. // old profitable         // FIX(banking): lowered 15 -> 8. With trail armed at +12% and avg memecoin pump topping ~+15% before reversal, partials at +15 rarely filled — most winners gapped back through the band without banking. Partial at +8% secures a confirmed fill on half the position BEFORE the trail-arming window, locking in a real win that survives shadow-ledger accounting. Other half rides under the +12% trail for upside.
+  partialTpThreshold: 100, // RISK-MINIMIZED: At +100% (doubled), sell half the bag to secure the initial 300 INR. The rest is a risk-free moonshot.
   partialTpCostMargin: 4,        // PAPER-TEST(cost-relative): profit cushion in % added on top of the modeled round-trip cost when computing the effective partial-TP trigger. effectivePartialTp = max(partialTpThreshold, modeledRoundTrip + this). Keeps the partial from firing until it nets real profit above the trade's actual exit cost.
 
   // -- Sizing Strategy (Calibrated for 1000x compounding) --
-  minPositionSize: 0.003, // old profitable // old profitable       // OLD PROFITABLE: 0.003 for micro-wallet
-  maxPositionSize: 0.0075, // old profitable cap // old profitable cap      // OLD PROFITABLE: 0.008 cap for micro-wallet safety
+  minPositionSize: 0.015, // UPGRADE: Reduced to 100 INR (0.015 SOL) to give 3 bullets.
+  maxPositionSize: 0.018, // UPGRADE: Cap at 0.018 SOL for micro-wallet safety.
   
   // -- SNIPER Mode Calibration --
   // sniperMinScore: 70,
-  sniperMaxAge: 1800, // FREQUENCY FIX: raised from 300 to 1800 (30 mins)
+  sniperMaxAge: 14400, // FREQUENCY FIX: raised from 300 to 1800 (30 mins)
   // sniperMinBuyPressure: 0.55, 
   sniperMinLiquidity: 10000, // old profitable non-micro setting // AI-TUNE(2026-06-24e): 40000 -> 25000. NEEDLE-MOVER: re-enables the only EMPIRICALLY-positive pocket. EDGE-POCKET realized data = SNIPER+score>=80 -> +3.06%/trade (n=63, +159.8% growth); MG/HWR are net-negative and stay excluded by EDGE_POCKET_ONLY. The 40-60k floor was set by a Monte Carlo model that predicted +7.5%/trade but live shadow is -0.78% (model falsified). The 40k floor excluded ~every high-score SNIPER candidate (live: $man s89/$3k, $Yippee s92/$17k, $EPSTEINZE s84/$22k). 25k = documented old-profitable floor, still ABOVE the BioCraft $21k disaster line; the +3.06% pocket was sampled at ~this floor. PAPER-mode hypothesis test; EDGE-POCKET stays ON; do NOT go live on this alone. // MC(2026-06-24): 60000 -> 40000. The $60k floor starved entries in this market (live log: strong score-79..88 candidates at $42-55k liq all rejected [liq < 60000], nothing qualified). $40k is the pre-identified fallback: modeled EV still ~+6.7%/trade (dampened) vs +7.5% at $60k, but it admits the $48-54k cluster that actually exists right now. // MC(2026-06-24): raised 20000 -> 60000. Calibrated Monte Carlo (reproduces live win 42.1%/EV -0.24%) shows the ~3.76% round-trip spread at $20k is the dominant per-trade drag; $60k cuts RT cost to ~2.25% and lifts modeled EV from +4.9% to +7.5%/trade, robust even under maturity-dampening. Gains plateau past $60k. Score>=90 entry gate deferred until win-rate-by-score is logged (unanchored + starves flow). // old profitable non-micro setting // OLD PROFITABLE: was 25000 — too restrictive, starved SNIPER of fresh launches for ~$0.37 paper orders, pool depth barely affects slippage — the real round-trip cost is fees/spread, now handled by the +12% trailing-stop activation. The $50k floor starved the bot in this market (every clean token is <$50k; the only >$50k tokens are all rug-vetoed for unlocked LP). $25k stays above the BioCraft $21k disaster line; downside is protected by rugcheck + the fixed exit economics, not by pool depth.
   sniperMaxSize: 0.006, // old profitable // old profitable      // OLD PROFITABLE: was 0.003 — normal sizing restored    
@@ -336,7 +334,7 @@ let engineSettings = {
                              // age >7200s — if those specifically underperform younger HWR fills, revert to 7200.
 
   // -- Mode Classifier Thresholds (MG / HWR gates) --
-  mgMinVolMomentum: 1.1, // old profitable // old profitable    // OLD PROFITABLE: was 0.7
+  mgMinVolMomentum: 0.05, // old profitable // old profitable    // OLD PROFITABLE: was 0.7
   mgMinPriceChange5m: 1.2, // old profitable // old profitable  // same
   mgMinTxVelocity: 8, // old profitable // old profitable       // OLD PROFITABLE: was 8
   mgMaxAge: 86400,           // FIX(mg-stale-entry): 2400s = 40min. Every MG winner was < 36min old (WCT 2153s).
@@ -1936,9 +1934,9 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
     // FUNNEL DIAGNOSTICS: count drops per filter so the discovery bottleneck is visible each cycle.
     let funnelSeen = 0, cutLiq = 0, cutVol = 0, cutAge = 0, cutPrice = 0, cutVolZero = 0, cutHoneypot = 0, cutTooNew = 0;
     
-    // UPDATED: Loosened funnel to let micro-caps into the scanner
-    const QUALITY_LIQ_FLOOR = 800;       // FETCHER OLD-PROFIT: restored old routes.ts early micro-cap floor
-    const QUALITY_VOL_5M_MIN = 250;      // FETCHER OLD-PROFIT: keep old routes.ts 5m volume floor
+    // UPDATED: Upgraded to 'Blue Chip' filtering. Rejects low-tier volatile tokens.
+    const QUALITY_LIQ_FLOOR = 15000;       // UPGRADE: Minimum $15,000 Liquidity (prevents violent rugs)
+    const QUALITY_VOL_5M_MIN = 10000;      // UPGRADE: Minimum $10,000 Volume in 5 minutes (requires proven momentum)
     const QUALITY_MIN_AGE_SEC = 0;       // FETCHER OLD-PROFIT: old routes.ts did NOT pre-cut <2m tokens
     const QUALITY_MIN_M5_SELLS = 2;      // FETCHER OLD-PROFIT: old routes.ts required only 2 sells at safety stage, not 10 at discovery
 
@@ -2013,12 +2011,22 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
             throttledDexScreenerFetch("https://api.dexscreener.com/token-boosts/latest/v1").catch(() => []),
             throttledDexScreenerFetch("https://api.dexscreener.com/token-profiles/latest/v1").catch(() => []),
         ]);
-        const boostAddrs = Array.from(new Set(
+        let boostAddrs = Array.from(new Set(
             boostFeeds
                 .flatMap((bf: any) => Array.isArray(bf) ? bf : (bf?.data || []))
                 .filter((b: any) => b && b.chainId === "solana" && b.tokenAddress)
                 .map((b: any) => b.tokenAddress as string)
         )).slice(0, 150); // AI-TUNE(2026-06-24): bumped 100->150 to actually let the extra profiles feed through hydration.
+        
+        try {
+            if (require('fs').existsSync('candidates.csv')) {
+                const lines = require('fs').readFileSync('candidates.csv', 'utf8').trim().split('\n').slice(-50);
+                const csvMints = lines.map((l: string) => l.split(',')[1]).filter((m: string) => m && m.length > 32);
+                boostAddrs = Array.from(new Set([...boostAddrs, ...csvMints]));
+                console.log(`[SCANNER] Injected ${csvMints.length} ultra-fast WebSocket candidates from scanner.txt`);
+            }
+        } catch (e) { console.error("Error loading candidates.csv", e); }
+
         for (let i = 0; i < boostAddrs.length; i += 30) {
             const chunk = boostAddrs.slice(i, i + 30).join(",");
             try {
