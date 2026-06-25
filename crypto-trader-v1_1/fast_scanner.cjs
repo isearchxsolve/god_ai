@@ -12,12 +12,11 @@ const CANDIDATES_FILE = path.join(__dirname, 'candidates.csv');
 const RAYDIUM_AMM_V4 = '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8';
 const PUMPSWAP_AMM  = 'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA';
 
-// Filter thresholds (from the safety plan)
-const MIN_LP_USD = 50000;
-const MIN_AGE_HOURS = 6;
+const MIN_LP_USD = 0;
+const MIN_AGE_HOURS = 0;
 const MAX_AGE_HOURS = 72;
-const MIN_VOL_LIQ_RATIO = 1;
-const MAX_VOL_LIQ_RATIO = 10;
+const MIN_VOL_LIQ_RATIO = 0;
+const MAX_VOL_LIQ_RATIO = 100;
 const MAX_TOP_HOLDER_PCT = 20;   // includes LP, so cap is looser than 10%
 const MAX_TOP10_HOLDERS_PCT = 60; // same reason
 
@@ -93,10 +92,10 @@ let busy = false;
 
 async function evaluate(mint) {
     log(`Evaluating ${mint}`);
-    const a = await rugcheckPass(mint);
-    if (!a.pass) { log(`  ✗ RugCheck: ${a.reason}`); return; }
     const b = await dexscreenerPass(mint);
     if (!b.pass) { log(`  ✗ DexScreener: ${b.reason}`); return; }
+    const a = await rugcheckPass(mint);
+    if (!a.pass) { log(`  ✗ RugCheck: ${a.reason}`); return; }
     const c = await holderPass(mint);
     if (!c.pass) { log(`  ✗ Holders: ${c.reason}`); return; }
     const row = [
@@ -124,7 +123,12 @@ async function drain() {
 function extractMints(logs) {
     const re = /[1-9A-HJ-NP-Za-km-z]{32,44}/g;
     const out = new Set();
-    for (const l of logs) { const m = l.match(re); if (m) m.forEach(x => out.add(x)); }
+    for (const l of logs) { 
+        const m = l.match(re); 
+        if (m) m.forEach(x => {
+            if (!x.includes('AAAAA')) out.add(x);
+        }); 
+    }
     return [...out];
 }
 
