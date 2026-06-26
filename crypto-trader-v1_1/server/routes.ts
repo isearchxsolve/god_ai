@@ -4402,7 +4402,7 @@ async function checkOpenPositions() {
         // (avg -11.55%, = 239% of net loss). Cutting them at a fixed -5% pnl after a short hold (independent
         // of the cost-widened stop, which let low-liq losers bleed past -11%) moved sim expectancy from
         // -2.14%/trade to -0.33%/trade. Single biggest lever found; tunable here.
-        const NEVER_GREEN_PEAK_PCT = 1.0, NEVER_GREEN_CUT_PCT = -5.0, NEVER_GREEN_MIN_HOLD_SEC = 18;
+        const NEVER_GREEN_PEAK_PCT = 1.0, NEVER_GREEN_CUT_PCT = -25.0, NEVER_GREEN_MIN_HOLD_SEC = 18;
 
         // throttled diagnostic: small mid-price "profit" below the round-trip floor -> we HOLD, not crystallize.
         if (pnlPct >= 1 && !clearsRoundTrip && holdTime > 30 && (Date.now() - (costGateLastLogMs.get(trade.id) ?? 0) >= 30000)) {
@@ -4427,8 +4427,8 @@ async function checkOpenPositions() {
           // let low-liq losers bleed to -11.5% avg. peakPnl<=1% guarantees this never touches a profitable run.
           else if (peakPnl <= NEVER_GREEN_PEAK_PCT && holdTime >= NEVER_GREEN_MIN_HOLD_SEC && pnlPct <= NEVER_GREEN_CUT_PCT) { shouldClose = true; reason = `NEVER_GREEN_CUT (peak +${peakPnl.toFixed(2)}% never cleared +${NEVER_GREEN_PEAK_PCT}%, pnl ${pnlPct.toFixed(1)}% @ ${Math.round(holdTime)}s)`; }
           else if (costAwareStopPrice > 0 && currentPrice <= costAwareStopPrice) { shouldClose = true; reason = `STOP_LOSS (stop $${costAwareStopPrice.toFixed(8)}, price $${currentPrice.toFixed(8)}, pnl ${pnlPct.toFixed(1)}%)`; }
-          else if (dropFromPeakPct >= 5 && currentPrice < entryPrice && holdTime > 60 && peakPnl >= 2 && peakPnl < activation) { shouldClose = true; reason = `SLOW_BLEED (-${dropFromPeakPct.toFixed(1)}% from peak, below entry, peakPnl ${peakPnl.toFixed(2)}%)`; }
-          else if (holdTime > 120 && pnlPct < stopLossPct * 0.7) { shouldClose = true; reason = `FAST_CUT (pnl ${pnlPct.toFixed(1)}% past 70% of stop ${(stopLossPct * 0.7).toFixed(1)}%)`; }
+          else if (dropFromPeakPct >= 20 && currentPrice < entryPrice && holdTime > 60 && peakPnl >= 2 && peakPnl < activation) { shouldClose = true; reason = `SLOW_BLEED (-${dropFromPeakPct.toFixed(1)}% from peak, below entry, peakPnl ${peakPnl.toFixed(2)}%)`; }
+          else if (holdTime > 120 && pnlPct < stopLossPct * 0.95) { shouldClose = true; reason = `FAST_CUT (pnl ${pnlPct.toFixed(1)}% past 95% of stop ${(stopLossPct * 0.95).toFixed(1)}%)`; }
           else if (holdTime > dynamicMaxHold / 2 && holdTime >= earlyCutMinHold && pnlPct < halfStopPct) { shouldClose = true; reason = `EARLY_CUT (pnl ${pnlPct.toFixed(1)}% < halfStop ${halfStopPct.toFixed(1)}%)`; }
           // ---- TIER 4: momentum / structure fades (only meaningful while in some profit) ----
           else if (pnlPct > 10 && bp5m < 0.43 && pc5m < -3) { shouldClose = true; reason = `EARLY_EXIT_WEAK_BP (bp=${bp5m.toFixed(2)}, d5m=${pc5m.toFixed(1)}%)`; }
