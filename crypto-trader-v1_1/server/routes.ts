@@ -1800,8 +1800,8 @@ function getScoreBasedMaxHold(score: number, currentPnlPct: number, currentBuyPr
   if (currentPnlPct > 20 && currentBuyPressure > 0.60) base = Math.round(base * 1.6);
   else if (currentPnlPct > 10 && currentBuyPressure > 0.55) base = Math.round(base * 1.4);
   else if (currentPnlPct > 5 && currentBuyPressure > 0.52) base = Math.round(base * 1.2);
-  if (currentPnlPct < -2) base = Math.min(base, 300);
-  if (currentPnlPct < -3.5) base = Math.min(base, 180);
+  if (currentPnlPct < -2) base = Math.min(base, 1200);
+  if (currentPnlPct < -3.5) base = Math.min(base, 900);
   return Math.min(Math.round(base), engineSettings.dynamicHoldMaxSeconds);
 }
 
@@ -4420,7 +4420,7 @@ async function checkOpenPositions() {
           else if (pnlPct >= engineSettings.hardTakeProfit) { shouldClose = true; reason = `HARD_TAKE_PROFIT (+${pnlPct.toFixed(2)}% >= ${engineSettings.hardTakeProfit}% ceiling)`; }
           else if (peakPnl >= activation && drawdownFromPeak >= engineSettings.trailingStopDistance) { shouldClose = true; reason = `TRAIL_STOP (peak +${peakPnl.toFixed(1)}%, fell ${drawdownFromPeak.toFixed(1)}%, floor +${trailingFloor.toFixed(1)}%)`; }
           else if (peakPnl < activation && clearsRoundTrip && _isStagnant) { const stableSec = Math.round((Date.now() - _stable!.since) / 1000); shouldClose = true; reason = `PNL_STAGNANT (+${pnlPct.toFixed(2)}% real-profit, unchanged for ${stableSec}s)`; }
-          else if (peakPnl < activation && holdTime > 20 && prevPnl !== null && prevPnl >= 1.0 && pnlPct > 0 && pnlPct < prevPnl && (prevPnl - pnlPct) >= 4.0) { shouldClose = true; reason = `PROFIT_DECLINE (was +${prevPnl.toFixed(2)}%, now +${pnlPct.toFixed(2)}%, drop=${(prevPnl - pnlPct).toFixed(2)}%)`; }
+          else if (peakPnl < activation && holdTime > 20 && prevPnl !== null && prevPnl >= 1.0 && pnlPct > 0 && pnlPct < prevPnl && (prevPnl - pnlPct) >= 15.0) { shouldClose = true; reason = `PROFIT_DECLINE (was +${prevPnl.toFixed(2)}%, now +${pnlPct.toFixed(2)}%, drop=${(prevPnl - pnlPct).toFixed(2)}%)`; }
           // ---- TIER 3: stop / loss management ----
           // NEVER-GREEN FAST-KILL (AI-CALIB 2026-06-24): never-green trades (peak <= +1%) went 0-for-98 in
           // calibration. Cut at a fixed -5% pnl after a short hold, BEFORE the cost-widened STOP_LOSS that
