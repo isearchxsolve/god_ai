@@ -276,8 +276,8 @@ let engineSettings = {
   // trailingStopDistance: 2.5, 
   // hardTakeProfit: 80, 
   // stopLoss: -6,
-  maxHoldSeconds: 31536000, // MOONSHOT: 1 year hold time limit to allow indefinitely holding 
-    maxOpenPositions: 10, // old profitable: one position at a time // FREQ(2026-06-24): 1 -> 3. Parallelism is the #1 frequency lever and costs ZERO entry quality. Total exposure is still bounded by maxTotalExposure (~maxPositionSize*2, see ~L2670), so 3 slots just split the SAME capital into smaller, more numerous trades — more frequency, same aggregate risk. Self-caps in live by balance/exposure.
+  maxHoldSeconds: 2700, // MOONSHOT: 45 minute hard ceiling to purge non-runners 
+    maxOpenPositions: 3, // old profitable: one position at a time // FREQ(2026-06-24): 1 -> 3. Parallelism is the #1 frequency lever and costs ZERO entry quality. Total exposure is still bounded by maxTotalExposure (~maxPositionSize*2, see ~L2670), so 3 slots just split the SAME capital into smaller, more numerous trades — more frequency, same aggregate risk. Self-caps in live by balance/exposure.
     startingBalance: 0.05,        // Paper-mode starting balance: 0.05 SOL
   scanIntervalMs: 4000, // old profitable: slower scan / less churn // FREQ(2026-06-24): 30000 -> 10000. Hunt for entries every 10s instead of 30s (3x cadence). Same entry gates, so no quality change — just less idle waiting between scans. Birdeye rate-limit is fine (top_traders cached 120s; 300 req/min tier).
   priceCheckIntervalMs: 1000, // old profitable: faster exit checks // old profitable: faster exit checks   // OLD PROFITABLE: 3s price check
@@ -363,7 +363,7 @@ let engineSettings = {
   maxDiscoveryAgeSeconds: 86400, // old profitable // old profitable // OLD PROFITABLE: was 86400
   
   dynamicHoldEnabled: 1, // old profitable // old profitable 
-  dynamicHoldMaxSeconds: 31536000, // MOONSHOT: 1 year absolute maximum holding period
+  dynamicHoldMaxSeconds: 2700, // MOONSHOT: 45 minute absolute maximum holding period
   
   // -- Compound Boost --
   // When enabled, position sizes scale super-linearly as the portfolio grows past
@@ -4451,14 +4451,14 @@ async function checkOpenPositions() {
           // MOONSHOT: FAST_CUT disabled. Time-based exits destroy moonshot potential.
           // MOONSHOT: EARLY_CUT disabled. Time-based exits destroy moonshot potential.
           // ---- TIER 4: momentum / structure fades (only meaningful while in some profit) ----
-          // MOONSHOT: Disabled completely to allow 1,000,000x ROI holds without interruptions.
-          // else if (pnlPct > 10 && bp5m < 0.43 && pc5m < -3) { shouldClose = true; reason = `EARLY_EXIT_WEAK_BP (bp=${bp5m.toFixed(2)}, d5m=${pc5m.toFixed(1)}%)`; }
-          // else if (holdTime > 45 && bp5m < 0.38 && pc5m < -2) { shouldClose = true; reason = `MOMENTUM_FADE (BP=${bp5m.toFixed(2)}, d5m=${pc5m.toFixed(1)}%)`; }
-          // else if (holdTime > 45 && pnlPct > 5 && bp5m < 0.43 && pc5m < -4) { shouldClose = true; reason = `PROFIT_PROTECT_FADE (BP=${bp5m.toFixed(2)}, d5m=${pc5m.toFixed(1)}%, PNL=+${pnlPct.toFixed(1)}%)`; }
-          // else if (pnlPct > 5 && volLiqRatio > 7) { shouldClose = true; reason = `LIQUIDITY_EXHAUSTION (${volLiqRatio.toFixed(2)}x)`; }
-          // else if (holdTime > 180 && pnlPct > 1 && expVol5m > 100 && vol5m < expVol5m * 0.15) { shouldClose = true; reason = `VOL_COLLAPSE (5m vol ${vol5m.toFixed(0)} < 15% of expected ${expVol5m.toFixed(0)})`; }
-          // ---- TIER 5: time stops ----
-          // MOONSHOT: MAX_HOLD time-exit disabled. Diamond hands — we hold until the moon.
+          // MOONSHOT: Restored mundane-coin momentum fades to clear stagnant slots.
+          else if (pnlPct > 10 && bp5m < 0.43 && pc5m < -3) { shouldClose = true; reason = `EARLY_EXIT_WEAK_BP (bp=${bp5m.toFixed(2)}, d5m=${pc5m.toFixed(1)}%)`; }
+          else if (holdTime > 45 && bp5m < 0.38 && pc5m < -2) { shouldClose = true; reason = `MOMENTUM_FADE (BP=${bp5m.toFixed(2)}, d5m=${pc5m.toFixed(1)}%)`; }
+          else if (holdTime > 45 && pnlPct > 5 && bp5m < 0.43 && pc5m < -4) { shouldClose = true; reason = `PROFIT_PROTECT_FADE (BP=${bp5m.toFixed(2)}, d5m=${pc5m.toFixed(1)}%, PNL=+${pnlPct.toFixed(1)}%)`; }
+          else if (pnlPct > 5 && volLiqRatio > 7) { shouldClose = true; reason = `LIQUIDITY_EXHAUSTION (${volLiqRatio.toFixed(2)}x)`; }
+          else if (holdTime > 180 && pnlPct > 1 && expVol5m > 100 && vol5m < expVol5m * 0.15) { shouldClose = true; reason = `VOL_COLLAPSE (5m vol ${vol5m.toFixed(0)} < 15% of expected ${expVol5m.toFixed(0)})`; }
+          else if (holdTime > 1200 && pnlPct < -8 && pc5m < 0) { shouldClose = true; reason = `SLOW_BLEED_CUT (Held >20m, bleeding past -8%)`; }
+          else if (holdTime > 2400 && pnlPct < 0) { shouldClose = true; reason = `STAGNANT_CUT (Held >40m, failed to go green)`; }
           else if (holdTime > engineSettings.dynamicHoldMaxSeconds) { shouldClose = true; reason = `ABSOLUTE_MAX_HOLD(${Math.round(holdTime)}s > ${engineSettings.dynamicHoldMaxSeconds}s cap, pnl ${pnlPct.toFixed(2)}%)`; }
         }
 
@@ -5159,7 +5159,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (!updates || typeof updates !== "object") return res.status(400).json({ message: "Invalid settings payload" });
       const validKeys = Object.keys(engineSettings) as (keyof typeof engineSettings)[];
       let restartIntervals = false;
-      const minValues: Record<string, number> = { scanIntervalMs: 4000, priceCheckIntervalMs: 1000, reentryDelayMs: 0, slReentryDelayMs: 0, lossCooldownMs: 0, maxHoldSeconds: 10, maxOpenPositions: 5, maxTradesPerCycle: 1, minScoreToTrade: 30, microMinScoreToTrade: 30, startingBalance: 0.1, minPositionSize: 0.01, maxPositionSize: 0.0075, txFeePercent: 0, rugcheckMinScore: 0, maxVolLiqRatioNewToken: 1, maxDiscoveryAgeSeconds: 86400, dynamicHoldMaxSeconds: 60, txCostsEnabled: 0, safetyChecksEnabled: 0, dynamicHoldEnabled: 0, compoundBoostEnabled: 0, compoundRefSol: 0.1, compoundPower: 0.5, compoundMaxMultiplier: 1.0, compoundAbsCapSol: 0.1, minEdgePct: 0, edgeBuffer: 0, microMinEdgePct: 0, microEdgeBuffer: 0 };
+      const minValues: Record<string, number> = { scanIntervalMs: 4000, priceCheckIntervalMs: 1000, reentryDelayMs: 0, slReentryDelayMs: 0, lossCooldownMs: 0, maxHoldSeconds: 10, maxOpenPositions: 3, maxTradesPerCycle: 1, minScoreToTrade: 30, microMinScoreToTrade: 30, startingBalance: 0.1, minPositionSize: 0.01, maxPositionSize: 0.0075, txFeePercent: 0, rugcheckMinScore: 0, maxVolLiqRatioNewToken: 1, maxDiscoveryAgeSeconds: 86400, dynamicHoldMaxSeconds: 60, txCostsEnabled: 0, safetyChecksEnabled: 0, dynamicHoldEnabled: 0, compoundBoostEnabled: 0, compoundRefSol: 0.1, compoundPower: 0.5, compoundMaxMultiplier: 1.0, compoundAbsCapSol: 0.1, minEdgePct: 0, edgeBuffer: 0, microMinEdgePct: 0, microEdgeBuffer: 0 };
       const maxValues: Record<string, number> = { mlWeight: 1, scoreWeight: 1, partialTpRatio: 1, dailyLossLimitPct: 100, maxDrawdownPct: 100, txFeePercent: 5, rugcheckMinScore: 1000, maxVolLiqRatioNewToken: 50, maxDiscoveryAgeSeconds: 86400, dynamicHoldMaxSeconds: 7200, txCostsEnabled: 1, safetyChecksEnabled: 1, dynamicHoldEnabled: 1, compoundBoostEnabled: 1, compoundRefSol: 100.0, compoundPower: 5.0, compoundMaxMultiplier: 10.0, compoundAbsCapSol: 10.0, minEdgePct: 20, edgeBuffer: 10, microMinEdgePct: 20, microEdgeBuffer: 10 };
       for (const key of validKeys) {
         if (key in updates) {
