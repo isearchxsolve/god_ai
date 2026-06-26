@@ -71,7 +71,7 @@ async function holderPass(mint) {
             body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getTokenLargestAccounts', params: [mint] })
         })).json();
         const accs = lg.result?.value || [];
-        if (accs.length < 10) return { pass: false, reason: 'too few large holders' };
+        // if (accs.length < 10) return { pass: false, reason: 'too few large holders' };
         const sup = await (await fetch(HELIUS_RPC, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getTokenSupply', params: [mint] })
@@ -91,19 +91,11 @@ const q = [];
 let busy = false;
 
 async function evaluate(mint) {
-    log(`Evaluating ${mint}`);
-    const a = await rugcheckPass(mint);
-    if (!a.pass) { log(`  ✗ RugCheck: ${a.reason}`); return; }
-    const c = await holderPass(mint);
-    if (!c.pass) { log(`  ✗ Holders: ${c.reason}`); return; }
     const row = [
-        new Date().toISOString(), mint, (a.score || 0).toFixed(0),
-        b.liq.toFixed(0), b.ageH.toFixed(1),
-        c.top1.toFixed(1), c.top10.toFixed(1),
-        b.ratio.toFixed(2), b.url
+        new Date().toISOString(), mint, '0', '0', '0', '0', '0', '0', 'none'
     ].join(',') + '\n';
     fs.appendFileSync(CANDIDATES_FILE, row);
-    log(`★ CANDIDATE: ${mint} | LP $${b.liq.toFixed(0)} | age ${b.ageH.toFixed(1)}h | ${b.url}`);
+    log(`★ FAST INJECT: ${mint} | Queued to engine in milliseconds!`);
 }
 
 async function drain() {
@@ -119,13 +111,15 @@ async function drain() {
 }
 
 function extractMints(logs) {
-    const re = /[1-9A-HJ-NP-Za-km-z]{32,44}/g;
     const out = new Set();
-    for (const l of logs) { 
-        const m = l.match(re); 
-        if (m) m.forEach(x => {
-            if (!x.includes('AAAAA')) out.add(x);
-        }); 
+    const MINT_REGEX = /[1-9A-HJ-NP-Za-km-z]{32,44}/g;
+    for (const l of logs) {
+        if (l.includes('Program log: initialize2') || l.includes('InitializeMint')) {
+            const m = l.match(MINT_REGEX);
+            if (m) m.forEach(x => {
+                if (x.endsWith('pump')) out.add(x);
+            });
+        }
     }
     return [...out];
 }
@@ -139,33 +133,44 @@ function connect(program) {
             params: [{ mentions: [program] }, { commitment: 'confirmed' }]
         }));
     });
+    let msgCount = 0;
     ws.on('message', async raw => {
         try {
             const m = JSON.parse(raw);
             const signature = m?.params?.result?.value?.signature;
             const logs = m?.params?.result?.value?.logs;
             if (!signature || !logs) return;
-            const isInit = logs.some(l => l.includes('initialize2') || l.includes('InitializePool') || l.includes('CreatePool') || l.includes('InitializeMint2'));
+            const isInit = logs.some(l => l.includes('initialize2') || l.includes('InitializePool') || l.includes('CreatePool') || l.includes('InitializeMint2') || l.includes('Instruction: Create'));
             if (!isInit) return;
             
             log(`Detected init signature: ${signature}`);
-            const res = await fetch(HELIUS_RPC, {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    jsonrpc: '2.0', id: 1, method: 'getTransaction',
-                    params: [signature, { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0 }]
-                })
-            });
-            const data = await res.json();
-            if (data?.error) log(`RPC Error: ${JSON.stringify(data.error)}`);
-            const pBalances = data?.result?.meta?.postTokenBalances || [];
-            log(`Found ${pBalances.length} token balances in tx ${signature}`);
-            
-            const mints = new Set();
-            for (const b of pBalances) {
-                if (b.mint && b.mint !== SOL_MINT && b.mint.length >= 32) mints.add(b.mint);
+            let mints = new Set();
+            try {
+                const res = await fetch(HELIUS_RPC, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        jsonrpc: '2.0', id: 1, method: 'getTransaction',
+                        params: [signature, { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0 }]
+                    })
+                });
+                const data = await res.json();
+                if (data?.error) log(`RPC Error: ${JSON.stringify(data.error)}`);
+                const pBalances = data?.result?.meta?.postTokenBalances || [];
+                log(`Found ${pBalances.length} token balances in tx ${signature}`);
+                for (const b of pBalances) {
+                    if (b.mint && b.mint !== SOL_MINT && b.mint.length >= 32) mints.add(b.mint);
+                }
+            } catch (err) {
+                log(`RPC Fetch Error: ${err.message}`);
             }
             
+            if (mints.size === 0) {
+                log(`Fallback: extracting mints from logs for ${signature}`);
+                const extracted = extractMints(logs);
+                extracted.forEach(m => {
+                    if (m !== SOL_MINT) mints.add(m);
+                });
+            }
             if (mints.size === 0) log(`No valid new token mints found in tx ${signature}`);
             
             [...mints].forEach(x => {

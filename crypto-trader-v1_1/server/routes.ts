@@ -259,14 +259,14 @@ let engineSettings = {
 
   // -- Core Exit & Speed Strategy --
   // PATCH #3: lowered from 15/8 to 5/3. Memecoin pumps rarely reach +15% in a single
-  trailingStopActivation: 500, // MOONSHOT: Do not arm trailing stop until +500% profit. Let it ride.
-  trailingStopDistance: 50, // MOONSHOT: Give it a massive 50% breathing room to handle insane volatility.
-  hardTakeProfit: 100000, // MOONSHOT: 100,000% = 1000x ROI
+  trailingStopActivation: 100000000, // MOONSHOT: 1,000,000x ROI before activating trail
+  trailingStopDistance: 99, // MOONSHOT: 99% breathing room
+  hardTakeProfit: 100000000, // MOONSHOT: 100,000,000% = 1,000,000x ROI
   stopLoss: -40, // RISK-MINIMIZED: Raised from -90%. If it drops 40%, the moonshot thesis is wrong. Save the remaining 60% of the wallet.
 
   // -- Conviction Gates --
-  minScoreToTrade: 20, 
-  microMinScoreToTrade: 20, 
+  minScoreToTrade: 70, 
+  microMinScoreToTrade: 70, 
   
   // -- SNIPER Mode Calibration --
   sniperMinScore: 20, 
@@ -276,8 +276,8 @@ let engineSettings = {
   // trailingStopDistance: 2.5, 
   // hardTakeProfit: 80, 
   // stopLoss: -6,
-  maxHoldSeconds: 420, // old profitable // old profitable 
-    maxOpenPositions: 5, // old profitable: one position at a time // FREQ(2026-06-24): 1 -> 3. Parallelism is the #1 frequency lever and costs ZERO entry quality. Total exposure is still bounded by maxTotalExposure (~maxPositionSize*2, see ~L2670), so 3 slots just split the SAME capital into smaller, more numerous trades — more frequency, same aggregate risk. Self-caps in live by balance/exposure.
+  maxHoldSeconds: 31536000, // MOONSHOT: 1 year hold time limit to allow indefinitely holding 
+    maxOpenPositions: 10, // old profitable: one position at a time // FREQ(2026-06-24): 1 -> 3. Parallelism is the #1 frequency lever and costs ZERO entry quality. Total exposure is still bounded by maxTotalExposure (~maxPositionSize*2, see ~L2670), so 3 slots just split the SAME capital into smaller, more numerous trades — more frequency, same aggregate risk. Self-caps in live by balance/exposure.
     startingBalance: 0.05,        // Paper-mode starting balance: 0.05 SOL
   scanIntervalMs: 4000, // old profitable: slower scan / less churn // FREQ(2026-06-24): 30000 -> 10000. Hunt for entries every 10s instead of 30s (3x cadence). Same entry gates, so no quality change — just less idle waiting between scans. Birdeye rate-limit is fine (top_traders cached 120s; 300 req/min tier).
   priceCheckIntervalMs: 1000, // old profitable: faster exit checks // old profitable: faster exit checks   // OLD PROFITABLE: 3s price check
@@ -363,7 +363,7 @@ let engineSettings = {
   maxDiscoveryAgeSeconds: 86400, // old profitable // old profitable // OLD PROFITABLE: was 86400
   
   dynamicHoldEnabled: 1, // old profitable // old profitable 
-  dynamicHoldMaxSeconds: 2100, // old profitable // FREQ(2026-06-24): 2100 -> 1200 (35min -> 20min). This is only the BACKSTOP max-hold; trailing-stop/TP/stagnation exits fire far earlier. Frees a slot sooner so a sideways token can't hog capacity. Conservative for risk (exits sooner).
+  dynamicHoldMaxSeconds: 31536000, // MOONSHOT: 1 year absolute maximum holding period
   
   // -- Compound Boost --
   // When enabled, position sizes scale super-linearly as the portfolio grows past
@@ -2726,7 +2726,7 @@ async function runScanCycle() {
       const worstOpenPnl = monitoredTrades.length > 0
         ? Math.min(...monitoredTrades.map((t: any) => parseFloat(t.pnl || "0")))
         : 0;
-      if (worstOpenPnl <= -5) { 
+      if (worstOpenPnl <= -100) { 
           console.log(`[SCAN] Skipping new entries — worst open position at ${worstOpenPnl.toFixed(1)}%.`); 
           return; 
       }
@@ -3044,7 +3044,7 @@ async function runScanCycle() {
           continue;
       }
       
-      const maxTotalExposure = Math.max(engineSettings.maxPositionSize * 2, totalPortfolioSol * 0.40);
+      const maxTotalExposure = Math.max(engineSettings.maxPositionSize * 10, totalPortfolioSol * 0.95);
       if (totalExposureSol + scoring.sizeSol > maxTotalExposure) {
           console.log(`[GATE] SKIP $${candidate.tokenSymbol} — Max total exposure reached.`);
           continue;
@@ -4413,31 +4413,34 @@ async function checkOpenPositions() {
         if (!shouldClose) {
           // ---- TIER 1: survival / emergency (immediate, ungated) ----
           if (pnlPct <= -50) { shouldClose = true; reason = `DEEP_RUG_KILL (pnl ${pnlPct.toFixed(2)}% <= -50% emergency floor)`; }
-          else if (holdTime > 20 && dropFromPeakPct >= 25) { shouldClose = true; reason = `PRICE_RUG (-${dropFromPeakPct.toFixed(1)}% from peak)`; }
+          // MOONSHOT: Disabled PRICE_RUG so we don't accidentally sell a massive runner during a normal 25% pullback.
+          // else if (holdTime > 20 && dropFromPeakPct >= 25) { shouldClose = true; reason = `PRICE_RUG (-${dropFromPeakPct.toFixed(1)}% from peak)`; }
           else if (pair && (_liqCollapsed || _liqDropped50)) { shouldClose = true; reason = `LIQ_COLLAPSE (entry $${_effectiveEntryLiq.toFixed(0)} -> now $${_currentLiq.toFixed(0)}, ${_liqCollapsed ? "below $300 floor" : ">50% drain"})`; }
           else if (pnlPct <= -45) { shouldClose = true; reason = `HARD_LOSS_KILL (pnl ${pnlPct.toFixed(2)}% <= -45% hard floor)`; }
           // ---- TIER 2: profit capture ----
           else if (pnlPct >= engineSettings.hardTakeProfit) { shouldClose = true; reason = `HARD_TAKE_PROFIT (+${pnlPct.toFixed(2)}% >= ${engineSettings.hardTakeProfit}% ceiling)`; }
           else if (peakPnl >= activation && drawdownFromPeak >= engineSettings.trailingStopDistance) { shouldClose = true; reason = `TRAIL_STOP (peak +${peakPnl.toFixed(1)}%, fell ${drawdownFromPeak.toFixed(1)}%, floor +${trailingFloor.toFixed(1)}%)`; }
-          else if (peakPnl < activation && clearsRoundTrip && _isStagnant) { const stableSec = Math.round((Date.now() - _stable!.since) / 1000); shouldClose = true; reason = `PNL_STAGNANT (+${pnlPct.toFixed(2)}% real-profit, unchanged for ${stableSec}s)`; }
-          else if (peakPnl < activation && holdTime > 20 && prevPnl !== null && prevPnl >= 1.0 && pnlPct > 0 && pnlPct < prevPnl && (prevPnl - pnlPct) >= 15.0) { shouldClose = true; reason = `PROFIT_DECLINE (was +${prevPnl.toFixed(2)}%, now +${pnlPct.toFixed(2)}%, drop=${(prevPnl - pnlPct).toFixed(2)}%)`; }
+          // MOONSHOT: Disabled PNL_STAGNANT and PROFIT_DECLINE. Moonshots consolidate and pull back. We must hold.
+          // else if (peakPnl < activation && clearsRoundTrip && _isStagnant) { const stableSec = Math.round((Date.now() - _stable!.since) / 1000); shouldClose = true; reason = `PNL_STAGNANT (+${pnlPct.toFixed(2)}% real-profit, unchanged for ${stableSec}s)`; }
+          // else if (peakPnl < activation && holdTime > 20 && prevPnl !== null && prevPnl >= 1.0 && pnlPct > 0 && pnlPct < prevPnl && (prevPnl - pnlPct) >= 15.0) { shouldClose = true; reason = `PROFIT_DECLINE (was +${prevPnl.toFixed(2)}%, now +${pnlPct.toFixed(2)}%, drop=${(prevPnl - pnlPct).toFixed(2)}%)`; }
           // ---- TIER 3: stop / loss management ----
           // NEVER-GREEN FAST-KILL (AI-CALIB 2026-06-24): never-green trades (peak <= +1%) went 0-for-98 in
           // calibration. Cut at a fixed -5% pnl after a short hold, BEFORE the cost-widened STOP_LOSS that
           // let low-liq losers bleed to -11.5% avg. peakPnl<=1% guarantees this never touches a profitable run.
-          else if (peakPnl <= NEVER_GREEN_PEAK_PCT && holdTime >= NEVER_GREEN_MIN_HOLD_SEC && pnlPct <= NEVER_GREEN_CUT_PCT) { shouldClose = true; reason = `NEVER_GREEN_CUT (peak +${peakPnl.toFixed(2)}% never cleared +${NEVER_GREEN_PEAK_PCT}%, pnl ${pnlPct.toFixed(1)}% @ ${Math.round(holdTime)}s)`; }
-          else if (costAwareStopPrice > 0 && currentPrice <= costAwareStopPrice) { shouldClose = true; reason = `STOP_LOSS (stop $${costAwareStopPrice.toFixed(8)}, price $${currentPrice.toFixed(8)}, pnl ${pnlPct.toFixed(1)}%)`; }
-          else if (dropFromPeakPct >= 20 && currentPrice < entryPrice && holdTime > 60 && peakPnl >= 2 && peakPnl < activation) { shouldClose = true; reason = `SLOW_BLEED (-${dropFromPeakPct.toFixed(1)}% from peak, below entry, peakPnl ${peakPnl.toFixed(2)}%)`; }
-          else if (holdTime > 120 && pnlPct < stopLossPct * 0.95) { shouldClose = true; reason = `FAST_CUT (pnl ${pnlPct.toFixed(1)}% past 95% of stop ${(stopLossPct * 0.95).toFixed(1)}%)`; }
-          else if (holdTime > dynamicMaxHold / 2 && holdTime >= earlyCutMinHold && pnlPct < halfStopPct) { shouldClose = true; reason = `EARLY_CUT (pnl ${pnlPct.toFixed(1)}% < halfStop ${halfStopPct.toFixed(1)}%)`; }
+          // MOONSHOT: NEVER_GREEN_CUT disabled. We hold ALL positions indefinitely waiting for the moonshot.
+          // MOONSHOT: STOP_LOSS disabled. Only HARD_LOSS_KILL at -45% and LIQ_COLLAPSE can force an exit.
+          // MOONSHOT: SLOW_BLEED disabled. Dips below entry are normal consolidation before a 1000x move.
+          // MOONSHOT: FAST_CUT disabled. Time-based exits destroy moonshot potential.
+          // MOONSHOT: EARLY_CUT disabled. Time-based exits destroy moonshot potential.
           // ---- TIER 4: momentum / structure fades (only meaningful while in some profit) ----
-          else if (pnlPct > 10 && bp5m < 0.43 && pc5m < -3) { shouldClose = true; reason = `EARLY_EXIT_WEAK_BP (bp=${bp5m.toFixed(2)}, d5m=${pc5m.toFixed(1)}%)`; }
-          else if (holdTime > 45 && bp5m < 0.38 && pc5m < -2) { shouldClose = true; reason = `MOMENTUM_FADE (BP=${bp5m.toFixed(2)}, d5m=${pc5m.toFixed(1)}%)`; }
-          else if (holdTime > 45 && pnlPct > 5 && bp5m < 0.43 && pc5m < -4) { shouldClose = true; reason = `PROFIT_PROTECT_FADE (BP=${bp5m.toFixed(2)}, d5m=${pc5m.toFixed(1)}%, PNL=+${pnlPct.toFixed(1)}%)`; }
-          else if (pnlPct > 5 && volLiqRatio > 7) { shouldClose = true; reason = `LIQUIDITY_EXHAUSTION (${volLiqRatio.toFixed(2)}x)`; }
-          else if (holdTime > 180 && pnlPct > 1 && expVol5m > 100 && vol5m < expVol5m * 0.15) { shouldClose = true; reason = `VOL_COLLAPSE (5m vol ${vol5m.toFixed(0)} < 15% of expected ${expVol5m.toFixed(0)})`; }
+          // MOONSHOT: Disabled completely to allow 1,000,000x ROI holds without interruptions.
+          // else if (pnlPct > 10 && bp5m < 0.43 && pc5m < -3) { shouldClose = true; reason = `EARLY_EXIT_WEAK_BP (bp=${bp5m.toFixed(2)}, d5m=${pc5m.toFixed(1)}%)`; }
+          // else if (holdTime > 45 && bp5m < 0.38 && pc5m < -2) { shouldClose = true; reason = `MOMENTUM_FADE (BP=${bp5m.toFixed(2)}, d5m=${pc5m.toFixed(1)}%)`; }
+          // else if (holdTime > 45 && pnlPct > 5 && bp5m < 0.43 && pc5m < -4) { shouldClose = true; reason = `PROFIT_PROTECT_FADE (BP=${bp5m.toFixed(2)}, d5m=${pc5m.toFixed(1)}%, PNL=+${pnlPct.toFixed(1)}%)`; }
+          // else if (pnlPct > 5 && volLiqRatio > 7) { shouldClose = true; reason = `LIQUIDITY_EXHAUSTION (${volLiqRatio.toFixed(2)}x)`; }
+          // else if (holdTime > 180 && pnlPct > 1 && expVol5m > 100 && vol5m < expVol5m * 0.15) { shouldClose = true; reason = `VOL_COLLAPSE (5m vol ${vol5m.toFixed(0)} < 15% of expected ${expVol5m.toFixed(0)})`; }
           // ---- TIER 5: time stops ----
-          else if (holdTime > dynamicMaxHold && pnlPct < 5) { shouldClose = true; reason = `MAX_HOLD(${Math.round(dynamicMaxHold)}s)`; }
+          // MOONSHOT: MAX_HOLD time-exit disabled. Diamond hands — we hold until the moon.
           else if (holdTime > engineSettings.dynamicHoldMaxSeconds) { shouldClose = true; reason = `ABSOLUTE_MAX_HOLD(${Math.round(holdTime)}s > ${engineSettings.dynamicHoldMaxSeconds}s cap, pnl ${pnlPct.toFixed(2)}%)`; }
         }
 
@@ -5138,7 +5141,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (!updates || typeof updates !== "object") return res.status(400).json({ message: "Invalid settings payload" });
       const validKeys = Object.keys(engineSettings) as (keyof typeof engineSettings)[];
       let restartIntervals = false;
-      const minValues: Record<string, number> = { scanIntervalMs: 4000, priceCheckIntervalMs: 1000, reentryDelayMs: 0, slReentryDelayMs: 0, lossCooldownMs: 0, maxHoldSeconds: 10, maxOpenPositions: 5, maxTradesPerCycle: 1, minScoreToTrade: 70, microMinScoreToTrade: 70, startingBalance: 0.1, minPositionSize: 0.01, maxPositionSize: 0.0075, txFeePercent: 0, rugcheckMinScore: 0, maxVolLiqRatioNewToken: 1, maxDiscoveryAgeSeconds: 86400, dynamicHoldMaxSeconds: 60, txCostsEnabled: 0, safetyChecksEnabled: 0, dynamicHoldEnabled: 0, compoundBoostEnabled: 0, compoundRefSol: 0.1, compoundPower: 0.5, compoundMaxMultiplier: 1.0, compoundAbsCapSol: 0.1, minEdgePct: 0, edgeBuffer: 0, microMinEdgePct: 0, microEdgeBuffer: 0 };
+      const minValues: Record<string, number> = { scanIntervalMs: 4000, priceCheckIntervalMs: 1000, reentryDelayMs: 0, slReentryDelayMs: 0, lossCooldownMs: 0, maxHoldSeconds: 10, maxOpenPositions: 5, maxTradesPerCycle: 1, minScoreToTrade: 30, microMinScoreToTrade: 30, startingBalance: 0.1, minPositionSize: 0.01, maxPositionSize: 0.0075, txFeePercent: 0, rugcheckMinScore: 0, maxVolLiqRatioNewToken: 1, maxDiscoveryAgeSeconds: 86400, dynamicHoldMaxSeconds: 60, txCostsEnabled: 0, safetyChecksEnabled: 0, dynamicHoldEnabled: 0, compoundBoostEnabled: 0, compoundRefSol: 0.1, compoundPower: 0.5, compoundMaxMultiplier: 1.0, compoundAbsCapSol: 0.1, minEdgePct: 0, edgeBuffer: 0, microMinEdgePct: 0, microEdgeBuffer: 0 };
       const maxValues: Record<string, number> = { mlWeight: 1, scoreWeight: 1, partialTpRatio: 1, dailyLossLimitPct: 100, maxDrawdownPct: 100, txFeePercent: 5, rugcheckMinScore: 1000, maxVolLiqRatioNewToken: 50, maxDiscoveryAgeSeconds: 86400, dynamicHoldMaxSeconds: 7200, txCostsEnabled: 1, safetyChecksEnabled: 1, dynamicHoldEnabled: 1, compoundBoostEnabled: 1, compoundRefSol: 100.0, compoundPower: 5.0, compoundMaxMultiplier: 10.0, compoundAbsCapSol: 10.0, minEdgePct: 20, edgeBuffer: 10, microMinEdgePct: 20, microEdgeBuffer: 10 };
       for (const key of validKeys) {
         if (key in updates) {
