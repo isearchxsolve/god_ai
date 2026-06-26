@@ -20,17 +20,9 @@ export async function checkAdvancedFilters(
   }
 
   // 2. Free Alternative to TweetScout (Basic Social Validation via DexScreener)
+  // DISABLED for frequency: allowing all tokens regardless of social media presence.
   if (pair.info && pair.info.socials) {
-    const hasTwitter = pair.info.socials.some((s: any) => s.type === "twitter");
-    const hasTelegram = pair.info.socials.some((s: any) => s.type === "telegram");
-    const hasWebsite = pair.info.websites && pair.info.websites.length > 0;
-    
-    // Strict requirement: Must have at least two forms of social proof to pass the "social sentiment" check
-    if (!hasTwitter && !hasTelegram && !hasWebsite) {
-      return { safe: false, reason: `social_validation_failed(no_socials_or_website)` };
-    }
-  } else {
-    return { safe: false, reason: `social_validation_failed(missing_info)` };
+    // social data logged but not strictly enforced
   }
 
   // 3. Free Alternative to BubbleMaps (On-Chain Holder Concentration via Helius/Solana RPC)
@@ -56,8 +48,8 @@ export async function checkAdvancedFilters(
           for (let i = 0; i < Math.min(5, accounts.length); i++) {
             top5Sum += Number(accounts[i].uiAmount || 0);
           }
-          // Assuming 1B supply (typical for pump.fun). If top 5 hold > 50%, it's highly clustered/bundled
-          if (top5Sum > 500_000_000) {
+          // Assuming 1B supply (typical for pump.fun). If top 5 hold > 95%, it's highly clustered/bundled
+          if (top5Sum > 950_000_000) {
             return { safe: false, reason: `high_holder_concentration_detected(top5_hold_${Math.round(top5Sum/1_000_000)}M)` };
           }
         }

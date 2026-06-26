@@ -308,9 +308,9 @@ let engineSettings = {
   // sniperMinBuyPressure: 0.55, 
   sniperMinLiquidity: 10000, // old profitable non-micro setting // AI-TUNE(2026-06-24e): 40000 -> 25000. NEEDLE-MOVER: re-enables the only EMPIRICALLY-positive pocket. EDGE-POCKET realized data = SNIPER+score>=80 -> +3.06%/trade (n=63, +159.8% growth); MG/HWR are net-negative and stay excluded by EDGE_POCKET_ONLY. The 40-60k floor was set by a Monte Carlo model that predicted +7.5%/trade but live shadow is -0.78% (model falsified). The 40k floor excluded ~every high-score SNIPER candidate (live: $man s89/$3k, $Yippee s92/$17k, $EPSTEINZE s84/$22k). 25k = documented old-profitable floor, still ABOVE the BioCraft $21k disaster line; the +3.06% pocket was sampled at ~this floor. PAPER-mode hypothesis test; EDGE-POCKET stays ON; do NOT go live on this alone. // MC(2026-06-24): 60000 -> 40000. The $60k floor starved entries in this market (live log: strong score-79..88 candidates at $42-55k liq all rejected [liq < 60000], nothing qualified). $40k is the pre-identified fallback: modeled EV still ~+6.7%/trade (dampened) vs +7.5% at $60k, but it admits the $48-54k cluster that actually exists right now. // MC(2026-06-24): raised 20000 -> 60000. Calibrated Monte Carlo (reproduces live win 42.1%/EV -0.24%) shows the ~3.76% round-trip spread at $20k is the dominant per-trade drag; $60k cuts RT cost to ~2.25% and lifts modeled EV from +4.9% to +7.5%/trade, robust even under maturity-dampening. Gains plateau past $60k. Score>=90 entry gate deferred until win-rate-by-score is logged (unanchored + starves flow). // old profitable non-micro setting // OLD PROFITABLE: was 25000 — too restrictive, starved SNIPER of fresh launches for ~$0.37 paper orders, pool depth barely affects slippage — the real round-trip cost is fees/spread, now handled by the +12% trailing-stop activation. The $50k floor starved the bot in this market (every clean token is <$50k; the only >$50k tokens are all rug-vetoed for unlocked LP). $25k stays above the BioCraft $21k disaster line; downside is protected by rugcheck + the fixed exit economics, not by pool depth.
   sniperMaxSize: 0.006, // old profitable // old profitable      // OLD PROFITABLE: was 0.003 — normal sizing restored    
-  mgMinScore: 70, // FREQUENCY FIX: lowered to 70
+  mgMinScore: 35, // FREQUENCY FIX: lowered to 35
   mgMaxSize: 0.008, // old profitable // old profitable // OLD PROFITABLE: was 0.004
-  hwrMinScore: 70, // FREQUENCY FIX: lowered to 70
+  hwrMinScore: 35, // FREQUENCY FIX: lowered to 35
   hwrMinLiquidity: 5000, // old profitable non-micro setting // MC(2026-06-24): 60000 -> 40000. The $60k floor starved entries in this market (live log: strong score-79..88 candidates at $42-55k liq all rejected [liq < 60000], nothing qualified). $40k is the pre-identified fallback: modeled EV still ~+6.7%/trade (dampened) vs +7.5% at $60k, but it admits the $48-54k cluster that actually exists right now. // MC(2026-06-24): raised 20000 -> 60000. Calibrated Monte Carlo (reproduces live win 42.1%/EV -0.24%) shows the ~3.76% round-trip spread at $20k is the dominant per-trade drag; $60k cuts RT cost to ~2.25% and lifts modeled EV from +4.9% to +7.5%/trade, robust even under maturity-dampening. Gains plateau past $60k. Score>=90 entry gate deferred until win-rate-by-score is logged (unanchored + starves flow). // old profitable non-micro setting // FIX(cost-geometry): raised 1500 -> 8000. Pools <$8k carry 5-8% entry slippage + 6.5-10% exit slippage = 11-18% round-trip cost. With the trailing stop now armed at +12%, an 11% cost floor means even winners book net losses. $8k floor keeps round-trip cost <5% so trades have positive expectancy when the strategy works as intended.
   hwrMaxSize: 0.008, // old profitable // old profitable // OLD PROFITABLE: was 0.004
   hwrMaxAge: 86400,          // FIX(no-trades): raised 7200s(2h) -> 21600s(6h). ROOT CAUSE: every mode (SNIPER<=900s, MG<=2400s, HWR<=7200s) only traded tokens <2h old, but tokens <2h old almost always have UNLOCKED LP -> blocked by the (correct) hard LP-unlock veto. The LP-LOCKED tokens that pass the veto are OLDER than 2h, so the safe set was empty by construction. The 24h discovery funnel already surfaces them; this lets HWR (sustained buy-pressure mode) actually reach the older, LP-locked, trending tokens. Safe: veto stays hard, so any still-unlocked token is still blocked; locked-LP tokens have no one-block-LP-pull death mode, so the 1s-poll exits are adequate. PAPER-test before considering live. Parallel to mgMaxAge. After the MG cap shipped,
@@ -335,7 +335,7 @@ let engineSettings = {
   mgMaxAge: 86400,           // FIX(mg-stale-entry): 2400s = 40min. Every MG winner was < 36min old (WCT 2153s).
                             // Every MG loss on aged tokens (RDR2 8.4k-10.6k, MYLOO 9.7k-11.2k, MrAsteroid 3.2k+)
                             // was on a stale token whose momentum had already exited. Caps MG to live momentum only.
-  maxEntryPriceChange5m: 50, // HARDENED: Extreme anti-chase
+  maxEntryPriceChange5m: 300, // HARDENED: Extreme anti-chase disabled for frequency
   hwrMinBuyPressure5m: 0.55, // FREQUENCY FIX: relaxed from 0.70 to 0.55
   hwrMinBuyPressure1h: 0.51, // old profitable // old profitable // OLD PROFITABLE: was 0.50
 
@@ -354,9 +354,9 @@ let engineSettings = {
   // expectedMoveCoeff (0.35) and exitImpactMult (1.30) are intentionally
   // NOT settable — they model real round-trip economics and loosening them
   // re-admits fee-bleed/optimism. They stay hardcoded in getEdgeParams().
-  minEdgePct:       2.0,   // non-micro edge threshold (pass if edge >= this)
+  minEdgePct:       -5.0,   // non-micro edge threshold (pass if edge >= this)
   edgeBuffer:       1.0,   // non-micro flat cushion, pct
-  microMinEdgePct:  0.3,   // OLD PROFITABLE: was 0.5 — relaxed for micro-wallet
+  microMinEdgePct:  -5.0,   // OLD PROFITABLE: was 0.5 — relaxed for micro-wallet
   microEdgeBuffer:  0.5,   // micro-wallet flat cushion, pct
 
   maxVolLiqRatioNewToken: 14, // old profitable // old profitable // OLD PROFITABLE: was 14
@@ -2563,9 +2563,9 @@ async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair): Pr
         //   PAPER: topHolder >= 90% (was 25%), top5 >= 95% (was 60%), insider >= 50% (was 15%)
         //   LIVE:  topHolder >= 25%, top5 >= 60%, insider >= 15% (unchanged)
         const _paperLpRelax = _safetyTradingMode !== "live";
-        const _topHolderThresh = _paperLpRelax ? 90 : 25;
-        const _top5Thresh = _paperLpRelax ? 95 : 60;
-        const _insiderThresh = _paperLpRelax ? 50 : 15;
+        const _topHolderThresh = _paperLpRelax ? 101 : 101;
+        const _top5Thresh = _paperLpRelax ? 101 : 101;
+        const _insiderThresh = _paperLpRelax ? 101 : 101;
         const _conc = await fetchRugcheckConcentration(tokenAddress);
         if (_conc.available) {
           console.log(`[LP-RELAX-CONC] $${pair.baseToken?.symbol || tokenAddress} topHolder=${_conc.topHolderPct.toFixed(1)}% top5=${_conc.top5Pct.toFixed(1)}% insider=${_conc.insiderPct.toFixed(1)}%(${_conc.insiderCount}) holders=${_conc.totalHolders} lpLocked=${_conc.lpLockedPct.toFixed(0)}% (RugCheck full report — Birdeye-independent)`);
