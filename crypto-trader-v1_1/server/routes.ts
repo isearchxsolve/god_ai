@@ -4434,7 +4434,7 @@ async function checkOpenPositions() {
           // MOONSHOT: Disabled PRICE_RUG so we don't accidentally sell a massive runner during a normal 25% pullback.
           // else if (holdTime > 20 && dropFromPeakPct >= 25) { shouldClose = true; reason = `PRICE_RUG (-${dropFromPeakPct.toFixed(1)}% from peak)`; }
           else if (pair && (_liqCollapsed || _liqDroppedThreshold)) { shouldClose = true; reason = `LIQ_COLLAPSE (entry $${_effectiveEntryLiq.toFixed(0)} -> now $${_currentLiq.toFixed(0)}, ${_liqCollapsed ? "below $1000 floor" : ">20% drain"})`; }
-          else if (pnlPct <= -45) { shouldClose = true; reason = `HARD_LOSS_KILL (pnl ${pnlPct.toFixed(2)}% <= -45% hard floor)`; }
+          else if (pnlPct <= -8) { shouldClose = true; reason = `HARD_LOSS_KILL (pnl ${pnlPct.toFixed(2)}% <= -8% hard floor)`; }
           // ---- TIER 2: profit capture ----
           else if (pnlPct >= engineSettings.hardTakeProfit) { shouldClose = true; reason = `HARD_TAKE_PROFIT (+${pnlPct.toFixed(2)}% >= ${engineSettings.hardTakeProfit}% ceiling)`; }
           else if (peakPnl >= activation && drawdownFromPeak >= engineSettings.trailingStopDistance) { shouldClose = true; reason = `TRAIL_STOP (peak +${peakPnl.toFixed(1)}%, fell ${drawdownFromPeak.toFixed(1)}%, floor +${trailingFloor.toFixed(1)}%)`; }
@@ -4457,10 +4457,11 @@ async function checkOpenPositions() {
           else if (holdTime > 45 && pnlPct > 5 && bp5m < 0.43 && pc5m < -4) { shouldClose = true; reason = `PROFIT_PROTECT_FADE (BP=${bp5m.toFixed(2)}, d5m=${pc5m.toFixed(1)}%, PNL=+${pnlPct.toFixed(1)}%)`; }
           else if (pnlPct > 5 && volLiqRatio > 7) { shouldClose = true; reason = `LIQUIDITY_EXHAUSTION (${volLiqRatio.toFixed(2)}x)`; }
           else if (holdTime > 180 && pnlPct > 1 && expVol5m > 100 && vol5m < expVol5m * 0.15) { shouldClose = true; reason = `VOL_COLLAPSE (5m vol ${vol5m.toFixed(0)} < 15% of expected ${expVol5m.toFixed(0)})`; }
-          // MOONSHOT: Conditional 10-Minute Kill Switch
-          // If a token is alive for 10 minutes and hasn't pumped at least +20%, purge it to free the slot.
-          // If it IS pumping heavily (>+20%), let it ride until trailing stop or absolute max hold kills it.
-          else if (holdTime > 600 && pnlPct < 20) { shouldClose = true; reason = `MUNDANE_10M_KILL (Held 10m but PNL is only ${pnlPct.toFixed(1)}% < 20%)`; }
+          // MOONSHOT: Dip Recovery Architecture
+          // 1. Stagnant Green Kill: If a token is slightly green (0 to 20%) for 10 minutes without mooning, purge it.
+          // 2. Dip Recovery: If it is in a mild loss (0 to -8%), give it up to 30 minutes to bounce back before purging.
+          else if (holdTime > 600 && pnlPct >= 0 && pnlPct < 20) { shouldClose = true; reason = `STAGNANT_GREEN_KILL (Held 10m but PNL is only ${pnlPct.toFixed(1)}%)`; }
+          else if (holdTime > 1800 && pnlPct < 0 && pnlPct > -8) { shouldClose = true; reason = `DIP_RECOVERY_FAILED (Held 30m, failed to bounce from ${pnlPct.toFixed(1)}% loss)`; }
           else if (holdTime > engineSettings.dynamicHoldMaxSeconds) { shouldClose = true; reason = `ABSOLUTE_MAX_HOLD(${Math.round(holdTime)}s > ${engineSettings.dynamicHoldMaxSeconds}s cap, pnl ${pnlPct.toFixed(2)}%)`; }
         }
 
