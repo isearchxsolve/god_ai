@@ -4407,8 +4407,8 @@ async function checkOpenPositions() {
         const _currentLiq = pair?.liquidity?.usd ?? 0;
         const _entryLiqUsd = parseFloat(trade.liquidity ?? "0") || 0;
         const _effectiveEntryLiq = _entryLiqUsd > 0 ? _entryLiqUsd : (engineSettings.sniperMinLiquidity ?? 3000);
-        const _liqCollapsed = _liqReported && _currentLiq < 300;
-        const _liqDropped50 = _effectiveEntryLiq > 1000 && _liqReported && _currentLiq < _effectiveEntryLiq * 0.50;
+        const _liqCollapsed = _liqReported && _currentLiq < 1000;
+        const _liqDroppedThreshold = _effectiveEntryLiq > 1000 && _liqReported && _currentLiq < _effectiveEntryLiq * 0.80;
         // real-profit stagnation.
         const _stable = pnlStableMap.get(trade.id);
         const _stagnantMs = peakPnl < 3.0 ? 35_000 : 60_000;
@@ -4433,7 +4433,7 @@ async function checkOpenPositions() {
           if (pnlPct <= -50) { shouldClose = true; reason = `DEEP_RUG_KILL (pnl ${pnlPct.toFixed(2)}% <= -50% emergency floor)`; }
           // MOONSHOT: Disabled PRICE_RUG so we don't accidentally sell a massive runner during a normal 25% pullback.
           // else if (holdTime > 20 && dropFromPeakPct >= 25) { shouldClose = true; reason = `PRICE_RUG (-${dropFromPeakPct.toFixed(1)}% from peak)`; }
-          else if (pair && (_liqCollapsed || _liqDropped50)) { shouldClose = true; reason = `LIQ_COLLAPSE (entry $${_effectiveEntryLiq.toFixed(0)} -> now $${_currentLiq.toFixed(0)}, ${_liqCollapsed ? "below $300 floor" : ">50% drain"})`; }
+          else if (pair && (_liqCollapsed || _liqDroppedThreshold)) { shouldClose = true; reason = `LIQ_COLLAPSE (entry $${_effectiveEntryLiq.toFixed(0)} -> now $${_currentLiq.toFixed(0)}, ${_liqCollapsed ? "below $1000 floor" : ">20% drain"})`; }
           else if (pnlPct <= -45) { shouldClose = true; reason = `HARD_LOSS_KILL (pnl ${pnlPct.toFixed(2)}% <= -45% hard floor)`; }
           // ---- TIER 2: profit capture ----
           else if (pnlPct >= engineSettings.hardTakeProfit) { shouldClose = true; reason = `HARD_TAKE_PROFIT (+${pnlPct.toFixed(2)}% >= ${engineSettings.hardTakeProfit}% ceiling)`; }
