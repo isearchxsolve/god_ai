@@ -3,6 +3,7 @@ import type { Express } from "express";
 import type { Server } from "http";
 import { storage, initStorageWrapper } from "./storage";
 import { api } from "@shared/routes";
+import { checkAdvancedFilters } from "./advanced_filters";
 import { JupiterService, createJupiterService, SOL_MINT, MIN_FEE_BUFFER_SOL,getLatencyLog  } from "./jupiter";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { join as pathJoin } from "path";
@@ -264,18 +265,12 @@ let engineSettings = {
   stopLoss: -40, // RISK-MINIMIZED: Raised from -90%. If it drops 40%, the moonshot thesis is wrong. Save the remaining 60% of the wallet.
 
   // -- Conviction Gates --
-  minScoreToTrade: 20, // FREQUENCY FIX: Lowered from 95 to 70 to allow solid setups to trade.
-                                // (2400s) handles the stale-token problem the score gate was indirectly
-                                // filtering, so the gate can be more permissive without quality loss.
-  microMinScoreToTrade: 20, // FREQUENCY FIX: Lowered to 70.
-                                // minScoreToTrade. Previously getEffectiveMinScore() hardcoded a magic 55,
-                                // which made minScoreToTrade a silent no-op for the live 0.05 SOL wallet.
-                                // Now explicit + tunable: raise toward 65 to tighten micro entry quality,
-                                // lower for more candidates. (Mode gates age/bp5m/liq still apply on top.)
+  minScoreToTrade: 20, 
+  microMinScoreToTrade: 20, 
   
   // -- SNIPER Mode Calibration --
-  sniperMinScore: 20, // HARDENED: High conviction
-  sniperMinBuyPressure: 0.05, // HARDENED: Overwhelming buy pressure required
+  sniperMinScore: 20, 
+  sniperMinBuyPressure: 0.05,
   // -- Core Exit & Speed Strategy --
   // trailingStopActivation: 5, 
   // trailingStopDistance: 2.5, 
@@ -290,8 +285,8 @@ let engineSettings = {
   // -- Conviction Gates (Lowered for current market) --
   // minScoreToTrade: 70,          // was 85 → matches actual B+ setups
   mlServiceUrl: "http://localhost:5001",
-  mlWeight: 0.10,  // FIX(ml-normalized): paired with scoreWeight 0.90 so the sum is EXACTLY 1.0. Original literal was 0.10 + 0.99 = 1.09, which inflated every combined score by ~9% whenever ML was online (a rule-score of 90 + ML 50 became 95). The boot path never normalized; the normalization at line ~4328 only runs in the PATCH /settings handler. Safe to deploy even while ML service at localhost:5001 is offline: the combined-score block (line 1282) is gated on `if (mlPrediction)` so when getMLPrediction returns null the formula is skipped entirely and combinedScore = raw rule score. When ML comes back online, this gives a clean 90/10 blend with no inflation.
-  scoreWeight: 0.90, // FIX(ml-normalized): was 0.99 — paired with mlWeight 0.10 above so sum = 1.0.
+  mlWeight: 0.50,  
+  scoreWeight: 0.50, 
   dailyLossLimitPct: 20, // OLD PROFITABLE: wider loss rail
   microDailyLossLimitPct: 30, // FIX(daily-loss-deadlock): raised from 10 to 30. The 10% cap was deadlocking exactly as the prior comment warned: a single cost-inflated paper loss (~10% round-trip) on a sub-0.10 SOL wallet immediately tripped DAILY_LOSS_LIMIT, then circuitBreakerActive stayed true and the bot couldn't trade to recover — observed in production with dailyLossPct=14.0% against the 10% cap, infinite [FLIGHT TO SAFETY] loop. 30% on a 0.05 SOL micro wallet = 0.015 SOL of loss room = ~3 losing trades worth, which gives the strategy room to find winners while still preventing a true blowout. Per-trade cost gate + liquidity floor + loss cooldown remain the primary protections. 
   maxDrawdownPct: 45, // OLD PROFITABLE: wider drawdown tolerance
@@ -1429,8 +1424,8 @@ function _ensureBirdeyeKeysLoaded(): void {
   for (const [, keyVal] of keyEntries) {
     _birdeyeKeys.push({ key: keyVal, disabledUntil: 0, requestCount: 0 });
   }
-  // Fallback: legacy single BIRDEYE_API_KEY (no _N suffix)
-  if (_birdeyeKeys.length === 0 && process.env.BIRDEYE_API_KEY) {
+  // Always include the root BIRDEYE_API_KEY if present
+  if (process.env.BIRDEYE_API_KEY) {
     _birdeyeKeys.push({ key: process.env.BIRDEYE_API_KEY as string, disabledUntil: 0, requestCount: 0 });
   }
   if (_birdeyeKeys.length > 0) {
@@ -1461,20 +1456,18 @@ function getNextBirdeyeKey(): string | null {
 }
 
 /**
- * Mark Birdeye as exhausted. Because all configured keys share ONE account-level quota
- * (60 rpm + CU pool), a CU-exhaustion on any key means the whole account is out — so we
- * disable EVERY key for the full cooldown (24h default). For a transient 429 rate-limit,
- * pass a short cooldownMs (account-wide) instead.
+ * Mark Birdeye as exhausted.
  *
  * @param apiKey   the key that triggered the error (used only for logging)
- * @param cooldownMs  backoff applied to ALL keys (default 24h = CU reset window)
+ * @param cooldownMs  backoff applied to this key
  */
 function disableBirdeyeKey(apiKey: string, cooldownMs: number = 24 * 60 * 60_000) {
   const until = Date.now() + cooldownMs;
-  // Same-account keys share one quota → disable the entire pool, not just this key.
-  for (const ks of _birdeyeKeys) ks.disabledUntil = until;
+  for (const ks of _birdeyeKeys) {
+    if (ks.key === apiKey) ks.disabledUntil = until;
+  }
   const resetIn = Math.round(cooldownMs / 60_000);
-  console.warn(`[BIRDKEY] Account quota exhausted (triggered by key ${apiKey.slice(0, 8)}...). All ${_birdeyeKeys.length} same-account key(s) disabled for ${resetIn}min. Birdeye features OFF until reset.`);
+  console.warn(`[BIRDKEY] Account quota exhausted (triggered by key ${apiKey.slice(0, 8)}...). Key disabled for ${resetIn}min.`);
 }
 
 /** Short, account-wide backoff for a transient 429 rate-limit (60 rpm shared cap). */
@@ -1655,11 +1648,11 @@ function scoreToken(
   const metrics = { liq, ageSeconds, bp5m, bp1h, volMomentum, priceChange5m, priceChange1h, txVelocity5m, vol5m, vol1h, fdv, h1buys: h1b, h1sells: h1s, m5buys: m5b, m5sells: m5s, buyPressure5m: bp5m, buyPressure1h: bp1h };
 
   // Micro‑wallet mode: lower score thresholds slightly to allow recovery trades
-  const effSniperScore = engineSettings.sniperMinScore >= 999 ? 999 : (isMicroWallet ? 58 : engineSettings.sniperMinScore);   // SAFE-BUILD: honor 999 kill-value even in micro-wallet mode
-  const effMgScore     = isMicroWallet ? 58 : engineSettings.mgMinScore;
-  const effHwrScore    = isMicroWallet ? 60 : engineSettings.hwrMinScore;
-  const effSniperLiq   = engineSettings.sniperMinLiquidity /* FIX(liq-floor): removed micro-wallet $1k discount that let the bot buy un-tradeable thin tokens (BioCraft $21k -> ~35% real round-trip loss). Restored $50k floor. */;
-  const effHwrLiq      = engineSettings.hwrMinLiquidity /* FIX(liq-floor): removed micro-wallet $2k discount. Restored $50k floor. */;
+  const effSniperScore = engineSettings.sniperMinScore;
+  const effMgScore     = engineSettings.mgMinScore;
+  const effHwrScore    = engineSettings.hwrMinScore;
+  const effSniperLiq   = engineSettings.sniperMinLiquidity;
+  const effHwrLiq      = engineSettings.hwrMinLiquidity;
 
   const sizeForMode = (maxSizeFraction: number, minScore: number) => {
     const ratio = Math.max(0, (combinedScore - minScore) / Math.max(1, 100 - minScore));
@@ -2374,7 +2367,7 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
         return `#${i + 1} $${r.tokenSymbol} score=${r.score} mode=${r.qualifiedMode || "none"}`
           + ` bp5m=${(m.bp5m ?? 0).toFixed(2)} px5m=${(m.priceChange5m ?? 0).toFixed(2)}`
           + ` volMom=${(m.volMomentum ?? 0).toFixed(2)} liq=${Math.round(m.liq ?? 0)}`
-          + ` age=${m.ageSeconds ?? 0}s rej=[${r.rejectionReason || ""}]`;
+          + ` age=${m.ageSeconds ?? 0}s mlScore=${r.mlScore ?? "N/A"} rej=[${r.rejectionReason || ""}]`;
       });
       console.log(`[DIAG-SCOREWALL] top${diagTop.length} (pre-safety): ` + diagTop.join("  ||  "));
       const fs = require('fs');
@@ -2626,6 +2619,14 @@ async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair): Pr
       const _norm = typeof data?.score_normalised === "number" ? data.score_normalised : null;
       if (_norm !== null && _norm > engineSettings.rugcheckMaxRiskNormalised) {
         safe = false; reason = `rugcheck_risk_high(norm=${_norm})`;
+      }
+    }
+    if (safe) {
+      const heliusKey = process.env.HELIUS_KEYS?.split(",")[0] || "";
+      const advResult = await checkAdvancedFilters(tokenAddress, pair, heliusKey);
+      if (!advResult.safe) {
+        safe = false;
+        reason = advResult.reason;
       }
     }
     const result = { safe, reason };

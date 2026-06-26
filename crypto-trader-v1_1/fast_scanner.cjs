@@ -92,8 +92,6 @@ let busy = false;
 
 async function evaluate(mint) {
     log(`Evaluating ${mint}`);
-    const b = await dexscreenerPass(mint);
-    if (!b.pass) { log(`  ✗ DexScreener: ${b.reason}`); return; }
     const a = await rugcheckPass(mint);
     if (!a.pass) { log(`  ✗ RugCheck: ${a.reason}`); return; }
     const c = await holderPass(mint);
@@ -141,19 +139,43 @@ function connect(program) {
             params: [{ mentions: [program] }, { commitment: 'confirmed' }]
         }));
     });
-    ws.on('message', raw => {
+    ws.on('message', async raw => {
         try {
             const m = JSON.parse(raw);
+            const signature = m?.params?.result?.value?.signature;
             const logs = m?.params?.result?.value?.logs;
-            if (!logs) return;
-            const isInit = logs.some(l =>
-                l.includes('initialize2') || l.includes('InitializePool') || l.includes('CreatePool'));
+            if (!signature || !logs) return;
+            const isInit = logs.some(l => l.includes('initialize2') || l.includes('InitializePool') || l.includes('CreatePool') || l.includes('InitializeMint2'));
             if (!isInit) return;
-            const mints = extractMints(logs).filter(x =>
-                x !== SOL_MINT && x !== program && x.length >= 32);
-            mints.forEach(x => q.push(x));
+            
+            log(`Detected init signature: ${signature}`);
+            const res = await fetch(HELIUS_RPC, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    jsonrpc: '2.0', id: 1, method: 'getTransaction',
+                    params: [signature, { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0 }]
+                })
+            });
+            const data = await res.json();
+            if (data?.error) log(`RPC Error: ${JSON.stringify(data.error)}`);
+            const pBalances = data?.result?.meta?.postTokenBalances || [];
+            log(`Found ${pBalances.length} token balances in tx ${signature}`);
+            
+            const mints = new Set();
+            for (const b of pBalances) {
+                if (b.mint && b.mint !== SOL_MINT && b.mint.length >= 32) mints.add(b.mint);
+            }
+            
+            if (mints.size === 0) log(`No valid new token mints found in tx ${signature}`);
+            
+            [...mints].forEach(x => {
+                log(`Queued newly initialized mint: ${x}`);
+                q.push(x);
+            });
             drain();
-        } catch (_) {}
+        } catch (e) {
+            log(`WSS message error: ${e.message}`);
+        }
     });
     ws.on('close', () => { log(`WSS closed ${program.slice(0, 8)}, reconnecting…`); setTimeout(() => connect(program), 3000); });
     ws.on('error', e => log(`WSS error: ${e.message}`));
