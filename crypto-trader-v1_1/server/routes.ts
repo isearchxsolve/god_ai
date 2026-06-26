@@ -259,9 +259,9 @@ let engineSettings = {
 
   // -- Core Exit & Speed Strategy --
   // PATCH #3: lowered from 15/8 to 5/3. Memecoin pumps rarely reach +15% in a single
-  trailingStopActivation: 100000000, // MOONSHOT: 1,000,000x ROI before activating trail
-  trailingStopDistance: 99, // MOONSHOT: 99% breathing room
-  hardTakeProfit: 100000000, // MOONSHOT: 100,000,000% = 1,000,000x ROI
+  trailingStopActivation: 50, // MOONSHOT: Activate trailing stop when we hit +50% ROI
+  trailingStopDistance: 25, // MOONSHOT: Secure profits 25% behind the peak
+  hardTakeProfit: 100000000, // MOONSHOT: 100,000,000% = 1,000,000x ROI (Never hard cap upside)
   stopLoss: -40, // RISK-MINIMIZED: Raised from -90%. If it drops 40%, the moonshot thesis is wrong. Save the remaining 60% of the wallet.
 
   // -- Conviction Gates --
