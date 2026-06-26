@@ -19,41 +19,51 @@ export async function checkAdvancedFilters(
     }
   }
 
-  // 2. TweetScout (Twitter Influencer Graph)
+  // 2. Free Alternative to TweetScout (Basic Social Validation via DexScreener)
   if (pair.info && pair.info.socials) {
-    const twitter = pair.info.socials.find((s: any) => s.type === "twitter");
-    if (twitter && process.env.TWEETSCOUT_API_KEY) {
-      try {
-        const username = twitter.url.split("/").pop();
-        const tsRes = await fetch(`https://api.tweetscout.io/v2/score-by-username/${username}`, {
-          headers: { "ApiKey": process.env.TWEETSCOUT_API_KEY }
-        });
-        if (tsRes.ok) {
-          const tsData = await tsRes.json();
-          if (tsData.score < 100) {
-            return { safe: false, reason: `tweetscout_score_too_low(${tsData.score})` };
-          }
-        }
-      } catch (err) {
-        console.log(`[ADV-FILTER] TweetScout API error:`, err);
-      }
+    const hasTwitter = pair.info.socials.some((s: any) => s.type === "twitter");
+    const hasTelegram = pair.info.socials.some((s: any) => s.type === "telegram");
+    const hasWebsite = pair.info.websites && pair.info.websites.length > 0;
+    
+    // Strict requirement: Must have at least two forms of social proof to pass the "social sentiment" check
+    if (!hasTwitter && !hasTelegram && !hasWebsite) {
+      return { safe: false, reason: `social_validation_failed(no_socials_or_website)` };
     }
+  } else {
+    return { safe: false, reason: `social_validation_failed(missing_info)` };
   }
 
-  // 3. BubbleMaps (Supply Clustering / Bundles)
-  if (process.env.BUBBLEMAPS_API_KEY) {
+  // 3. Free Alternative to BubbleMaps (On-Chain Holder Concentration via Helius/Solana RPC)
+  if (heliusKey) {
     try {
-      const bmRes = await fetch(`https://api.bubblemaps.io/v1/solana/token/${tokenAddress}`, {
-        headers: { "X-API-KEY": process.env.BUBBLEMAPS_API_KEY }
+      const rpcUrl = `https://mainnet.helius-rpc.com/?api-key=${heliusKey}`;
+      const holderRes = await fetch(rpcUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "getTokenLargestAccounts",
+          params: [tokenAddress]
+        })
       });
-      if (bmRes.ok) {
-        const bmData = await bmRes.json();
-        if (bmData.clusterScore > 70) {
-           return { safe: false, reason: `bubblemaps_dev_bundle_detected(${bmData.clusterScore})` };
+      if (holderRes.ok) {
+        const holderData = await holderRes.json();
+        if (holderData.result && holderData.result.value) {
+          const accounts = holderData.result.value;
+          // Sum up the top 5 holders (excluding the bonding curve / AMM pool ideally, but simple sum is a safe heuristic)
+          let top5Sum = 0;
+          for (let i = 0; i < Math.min(5, accounts.length); i++) {
+            top5Sum += Number(accounts[i].uiAmount || 0);
+          }
+          // Assuming 1B supply (typical for pump.fun). If top 5 hold > 50%, it's highly clustered/bundled
+          if (top5Sum > 500_000_000) {
+            return { safe: false, reason: `high_holder_concentration_detected(top5_hold_${Math.round(top5Sum/1_000_000)}M)` };
+          }
         }
       }
     } catch (err) {
-      console.log(`[ADV-FILTER] BubbleMaps API error:`, err);
+      console.log(`[ADV-FILTER] Helius Cluster Check error:`, err);
     }
   }
 
