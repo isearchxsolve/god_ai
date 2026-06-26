@@ -276,7 +276,7 @@ let engineSettings = {
   // trailingStopDistance: 2.5, 
   // hardTakeProfit: 80, 
   // stopLoss: -6,
-  maxHoldSeconds: 2700, // MOONSHOT: 45 minute hard ceiling to purge non-runners 
+  maxHoldSeconds: 600, // MOONSHOT: 10 minute hard ceiling to purge non-runners instantly 
     maxOpenPositions: 3, // old profitable: one position at a time // FREQ(2026-06-24): 1 -> 3. Parallelism is the #1 frequency lever and costs ZERO entry quality. Total exposure is still bounded by maxTotalExposure (~maxPositionSize*2, see ~L2670), so 3 slots just split the SAME capital into smaller, more numerous trades — more frequency, same aggregate risk. Self-caps in live by balance/exposure.
     startingBalance: 0.05,        // Paper-mode starting balance: 0.05 SOL
   scanIntervalMs: 4000, // old profitable: slower scan / less churn // FREQ(2026-06-24): 30000 -> 10000. Hunt for entries every 10s instead of 30s (3x cadence). Same entry gates, so no quality change — just less idle waiting between scans. Birdeye rate-limit is fine (top_traders cached 120s; 300 req/min tier).
@@ -363,7 +363,7 @@ let engineSettings = {
   maxDiscoveryAgeSeconds: 86400, // old profitable // old profitable // OLD PROFITABLE: was 86400
   
   dynamicHoldEnabled: 1, // old profitable // old profitable 
-  dynamicHoldMaxSeconds: 2700, // MOONSHOT: 45 minute absolute maximum holding period
+  dynamicHoldMaxSeconds: 600, // MOONSHOT: 10 minute absolute maximum holding period
   
   // -- Compound Boost --
   // When enabled, position sizes scale super-linearly as the portfolio grows past
