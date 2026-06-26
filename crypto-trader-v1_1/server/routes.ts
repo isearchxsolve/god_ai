@@ -4415,7 +4415,7 @@ async function checkOpenPositions() {
           if (pnlPct <= -50) { shouldClose = true; reason = `DEEP_RUG_KILL (pnl ${pnlPct.toFixed(2)}% <= -50% emergency floor)`; }
           else if (holdTime > 20 && dropFromPeakPct >= 25) { shouldClose = true; reason = `PRICE_RUG (-${dropFromPeakPct.toFixed(1)}% from peak)`; }
           else if (pair && (_liqCollapsed || _liqDropped50)) { shouldClose = true; reason = `LIQ_COLLAPSE (entry $${_effectiveEntryLiq.toFixed(0)} -> now $${_currentLiq.toFixed(0)}, ${_liqCollapsed ? "below $300 floor" : ">50% drain"})`; }
-          else if (pnlPct <= -8) { shouldClose = true; reason = `HARD_LOSS_KILL (pnl ${pnlPct.toFixed(2)}% <= -8% hard floor)`; }
+          else if (pnlPct <= -45) { shouldClose = true; reason = `HARD_LOSS_KILL (pnl ${pnlPct.toFixed(2)}% <= -45% hard floor)`; }
           // ---- TIER 2: profit capture ----
           else if (pnlPct >= engineSettings.hardTakeProfit) { shouldClose = true; reason = `HARD_TAKE_PROFIT (+${pnlPct.toFixed(2)}% >= ${engineSettings.hardTakeProfit}% ceiling)`; }
           else if (peakPnl >= activation && drawdownFromPeak >= engineSettings.trailingStopDistance) { shouldClose = true; reason = `TRAIL_STOP (peak +${peakPnl.toFixed(1)}%, fell ${drawdownFromPeak.toFixed(1)}%, floor +${trailingFloor.toFixed(1)}%)`; }
