@@ -1481,16 +1481,13 @@ function throttleBirdeye429(apiKey: string, cooldownMs: number = 30_000) {
 
 /** Check if any Birdeye key is currently available. */
 function birdeyeHasAvailableKey(): boolean {
-  _ensureBirdeyeKeysLoaded();
-  const now = Date.now();
-  return _birdeyeKeys.some(ks => now >= ks.disabledUntil);
+  return false;
 }
 
 // Lazy: must be a function because key loading is now deferred past module-load (see
 // _ensureBirdeyeKeysLoaded). Evaluating as a const here would always be false.
 function smartMoneyEnabled(): boolean {
-  _ensureBirdeyeKeysLoaded();
-  return _birdeyeKeys.length > 0;
+  return false;
 }
 
 // AI-FIX(2026-06-24d): shared Birdeye 429 cooldown. The free/Lite tier is CU-metered; once a
