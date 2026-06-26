@@ -2512,7 +2512,10 @@ async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair): Pr
     // whether these high-score/high-liq SNIPER setups are actually rugs or the only tradable market supply.
     // Disable with PAPER_PROBE_GRADED_LP_VETO=false. No env var can relax this in live here.
     const _paperProbeGradedLp = _safetyTradingMode !== "live" && String(process.env.PAPER_PROBE_GRADED_LP_VETO ?? "true").toLowerCase() !== "false";
-    const _gradedLpAdmit = !!(_gradedLpRisk && !_absoluteVetoRisk && _paperProbeGradedLp);
+    // MICRO-WALLET COMPROMISE: If a token has unlocked LP but has survived for >1 hour, the dev likely isn't pulling a sudden rug. Allow it for safe 15% scavenger wins.
+    const tokenAgeSecs = pair.pairCreatedAt ? (Date.now() - pair.pairCreatedAt) / 1000 : 0;
+    const isOldEnoughToBypassVeto = tokenAgeSecs > 3600; 
+    const _gradedLpAdmit = !!(_gradedLpRisk && !_absoluteVetoRisk && (_paperProbeGradedLp || isOldEnoughToBypassVeto || String(process.env.RELAX_GRADED_LP_VETO_LIVE).toLowerCase() === "true"));
     const _vetoRisk = _absoluteVetoRisk || ((_gradedLpRisk && !_gradedLpAdmit) ? _gradedLpRisk : undefined);
     if (_gradedLpRisk && !_absoluteVetoRisk && !_vetoRisk) {
       console.log(`[LP-VETO-PAPER-PROBE:${_safetyTradingMode.toUpperCase()}] $${pair.baseToken?.symbol || tokenAddress} ADMITTED graded "${_gradedLpRisk.name}" for PAPER/SHADOW measurement only; LIVE remains hard-vetoed. rugScoreNorm=${data?.score_normalised}`);
