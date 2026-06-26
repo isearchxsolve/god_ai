@@ -1481,13 +1481,15 @@ function throttleBirdeye429(apiKey: string, cooldownMs: number = 30_000) {
 
 /** Check if any Birdeye key is currently available. */
 function birdeyeHasAvailableKey(): boolean {
-  return false;
+  _ensureBirdeyeKeysLoaded();
+  return _birdeyeKeys.length > 0;
 }
 
 // Lazy: must be a function because key loading is now deferred past module-load (see
 // _ensureBirdeyeKeysLoaded). Evaluating as a const here would always be false.
 function smartMoneyEnabled(): boolean {
-  return false;
+  _ensureBirdeyeKeysLoaded();
+  return _birdeyeKeys.length > 0;
 }
 
 // AI-FIX(2026-06-24d): shared Birdeye 429 cooldown. The free/Lite tier is CU-metered; once a
@@ -2009,13 +2011,29 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
         )).slice(0, 150); // AI-TUNE(2026-06-24): bumped 100->150 to actually let the extra profiles feed through hydration.
         
         try {
+            // WARMING QUEUE: Do not throw away 0-second tokens just because they lack $10k vol yet.
+            // Hold them in memory for 10 minutes and track their volume continuously until they break out.
+            if (!(global as any).scannerWarmingQueue) (global as any).scannerWarmingQueue = new Map<string, number>();
+            const wq = (global as any).scannerWarmingQueue as Map<string, number>;
+            const nowMs = Date.now();
+            
             if (require('fs').existsSync('candidates.csv')) {
-                const lines = require('fs').readFileSync('candidates.csv', 'utf8').trim().split('\n').slice(-50);
+                const lines = require('fs').readFileSync('candidates.csv', 'utf8').trim().split('\n').slice(-150);
                 const csvMints = lines.map((l: string) => l.split(',')[1]).filter((m: string) => m && m.length > 32);
-                boostAddrs = Array.from(new Set([...boostAddrs, ...csvMints]));
-                console.log(`[SCANNER] Injected ${csvMints.length} ultra-fast WebSocket candidates from scanner.txt`);
+                for (const mint of csvMints) {
+                    if (!wq.has(mint)) wq.set(mint, nowMs);
+                }
             }
-        } catch (e) { console.error("Error loading candidates.csv", e); }
+            
+            // Clean up old tokens (>10 minutes)
+            for (const [mint, addedAt] of wq.entries()) {
+                if (nowMs - addedAt > 10 * 60 * 1000) wq.delete(mint);
+            }
+            
+            const warmingMints = Array.from(wq.keys());
+            boostAddrs = Array.from(new Set([...boostAddrs, ...warmingMints]));
+            console.log(`[SCANNER-QUEUE] Tracking ${warmingMints.length} fast scanner tokens via free API (Waiting for $10k breakout)`);
+        } catch (e) { console.error("Error with warming queue / candidates.csv", e); }
 
         for (let i = 0; i < boostAddrs.length; i += 30) {
             const chunk = boostAddrs.slice(i, i + 30).join(",");
