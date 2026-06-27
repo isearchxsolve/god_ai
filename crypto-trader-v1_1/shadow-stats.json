@@ -1,13 +1,13 @@
 {
-  "totalTrades": 68,
-  "wins": 36,
-  "losses": 32,
-  "sumShadowPnl": 154.66971167645698,
-  "sumPaperPnl": 100.30871237248178,
-  "sumInflation": -54.36099930397519,
-  "compoundedMult": 1.1687647280002376,
+  "totalTrades": 75,
+  "wins": 41,
+  "losses": 34,
+  "sumShadowPnl": 212.77941406048876,
+  "sumPaperPnl": 156.31960041343063,
+  "sumInflation": -56.45981364705813,
+  "compoundedMult": 1.7564291498458346,
   "bestPct": 102.91799666724296,
   "worstPct": -49.40331005028484,
   "firstAt": 1782451484170,
-  "lastAt": 1782582699784
+  "lastAt": 1782587531225
 }

@@ -2602,9 +2602,13 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
     const __prelim = dedupedPairs.map((sp, idx) => ({ sp, idx, pre: scoreToken(sp, mlPredictions[idx], isMicroWallet) }));
     const __finalists = __prelim.filter(p => p.pre.qualifiedMode || p.pre.combinedScore >= 50).slice(0, 20);
     const __smMap = new Map<string, SmartMoneySignal>();
-    await Promise.all(__finalists.map(async (f) => {
-      __smMap.set(f.sp.baseToken.address, await fetchSmartMoneyConvergence(f.sp.baseToken.address));
-    }));
+    const __SM_CONC = Math.max(1, parseInt(process.env.SM_CONVERGENCE_CONCURRENCY || "4", 10));
+    for (let __i = 0; __i < __finalists.length; __i += __SM_CONC) {
+      const __batch = __finalists.slice(__i, __i + __SM_CONC);
+      await Promise.all(__batch.map(async (f) => {
+        __smMap.set(f.sp.baseToken.address, await fetchSmartMoneyConvergence(f.sp.baseToken.address));
+      }));
+    }
     const results = __prelim.map(({ sp, idx, pre }) => {
       const __sm = __smMap.get(sp.baseToken.address) || null;
       const scoring = __sm ? scoreToken(sp, mlPredictions[idx], isMicroWallet, __sm) : pre;
@@ -2796,8 +2800,8 @@ async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair): Pr
       // Kept OFF until distinct Birdeye keys are added: today the 4 key-slots are 1 shared key
       // (deee0dd7, 60rpm) and a per-candidate bypass call would deepen the 429 starvation. Once
       // real keys land, set GRADED_LP_ENTRY_WHALE_PRECHECK=true and these wash tokens get vetoed
-      // before paying the round-trip. Flag OFF => identical cached behavior as before (no-op).
-      const _gradedLpEntryPrecheck = String(process.env.GRADED_LP_ENTRY_WHALE_PRECHECK || "false").toLowerCase() === "true";
+      // before paying the round-trip. DEFAULT ON (Birdeye retired): the bypass routes to Helius (7 keys), not Birdeye, so no 429 starvation. Set GRADED_LP_ENTRY_WHALE_PRECHECK=false to revert to cached entry behavior.
+      const _gradedLpEntryPrecheck = String(process.env.GRADED_LP_ENTRY_WHALE_PRECHECK || "true").toLowerCase() === "true";
       try { _wsig = await fetchSmartMoneyConvergence(tokenAddress, _gradedLpEntryPrecheck); } catch { _wsig = null; }
       const _wc = _wsig?.whaleCount ?? 0;            // # top-volume wallets sampled
       const _wSell = _wsig?.whaleNetSellers ?? 0;    // big wallets net-distributing
