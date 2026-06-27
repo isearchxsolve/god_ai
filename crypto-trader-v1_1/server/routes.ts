@@ -2514,7 +2514,7 @@ async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair): Pr
     const _paperProbeGradedLp = _safetyTradingMode !== "live" && String(process.env.PAPER_PROBE_GRADED_LP_VETO ?? "true").toLowerCase() !== "false";
     // MICRO-WALLET COMPROMISE: If a token has unlocked LP but has survived for >1 hour, the dev likely isn't pulling a sudden rug. Allow it for safe 15% scavenger wins.
     const tokenAgeSecs = pair.pairCreatedAt ? (Date.now() - pair.pairCreatedAt) / 1000 : 0;
-    const isOldEnoughToBypassVeto = tokenAgeSecs > 3600; 
+    const isOldEnoughToBypassVeto = false; // VETO STRICTLY ON, AGE BYPASS OFF
     const _gradedLpAdmit = !!(_gradedLpRisk && !_absoluteVetoRisk && (_paperProbeGradedLp || isOldEnoughToBypassVeto || String(process.env.RELAX_GRADED_LP_VETO_LIVE).toLowerCase() === "true"));
     const _vetoRisk = _absoluteVetoRisk || ((_gradedLpRisk && !_gradedLpAdmit) ? _gradedLpRisk : undefined);
     if (_gradedLpRisk && !_absoluteVetoRisk && !_vetoRisk) {
