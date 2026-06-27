@@ -1390,7 +1390,7 @@ async function fetchTokenPriceForExit(tokenAddress: string): Promise<{ price: nu
 // already accumulating. Reuses the existing BIRDEYE_API_KEY.
 // Endpoint: GET /defi/v2/tokens/top_traders (documented; x-chain: solana)
 // ────────────────────────────────────────────────────────────────
-interface SmartMoneySignal { count: number; netBuyers: number; topRealizedPnl: number; whaleCount: number; whaleNetBuyers: number; whaleNetSellers: number; washSuspects: number; source?: "birdeye" | "free"; }
+interface SmartMoneySignal { count: number; netBuyers: number; topRealizedPnl: number; whaleCount: number; whaleNetBuyers: number; whaleNetSellers: number; washSuspects: number; source?: "birdeye" | "free" | "helius"; }
 // ── BIRDEYE MULTI-KEY ROTATION SYSTEM (AI-FIX 2026-06-24) ─────────────────────────
 // Birdeye free-tier keys have a daily CU limit (~1000 CU). A single key runs out mid-session
 // and the bot goes blind (no discovery, no whale tape). Multi-key rotation distributes load
@@ -1703,10 +1703,120 @@ async function fetchWhaleAccumulationFree(tokenAddress: string): Promise<SmartMo
 
 // Wrapper: Birdeye first (sees PnL -> powers smart-money bonus AND exit/veto), free layer as the
 // Birdeye-independent fallback for scoring.
+// ════════════════════════════════════════════════════════════════
+// LAYER-2: HELIUS WALLET-LEVEL WASH/BUNDLE TAPE (Birdeye-independent)
+// Precise replacement for the Birdeye top_traders tape. Reads recent SWAPs for the
+// mint via the Helius Enhanced Transactions API (already-owned infra; HELIUS_API_KEYS
+// rotation), attributes each swap to its feePayer (the human trader, so the AMM
+// pool/vault is NEVER miscounted as a wallet) and aggregates per-wallet behaviour:
+//   washSuspects    = wallets that round-trip (buy AND sell) in balanced churn  -> fake volume
+//   whaleNetSellers = wallets net-distributing                                  -> distribution exit
+//   whaleNetBuyers  = wallets net-accumulating
+//   bundle proxy    = many DISTINCT wallets buying in the SAME slot             -> coordinated launch
+// netBuyers stays 0 (Helius cannot see realized PnL) so it never inflates the smart-money
+// entry bonus; the tape is trusted ONLY for the wash/distribution VETO + mid-hold EXIT,
+// exactly like the Birdeye tape. Default-on; HELIUS_WHALE_TAPE=false disables.
+// Tunables: HELIUS_TAPE_LIMIT(100) HELIUS_TAPE_WHALE_N(10) HELIUS_TAPE_BUNDLE_SLOTS(3)
+//           HELIUS_TAPE_TTL_MS(60000) HELIUS_TAPE_TIMEOUT_MS(8000)
+// ════════════════════════════════════════════════════════════════
+const HELIUS_TAPE_BASE = process.env.HELIUS_TAPE_BASE || "https://api.helius.xyz/v0/addresses";
+const HELIUS_TAPE_TTL_MS = Number(process.env.HELIUS_TAPE_TTL_MS) || 60_000;
+const HELIUS_TAPE_TIMEOUT_MS = Number(process.env.HELIUS_TAPE_TIMEOUT_MS) || 8_000;
+const HELIUS_TAPE_LIMIT = Number(process.env.HELIUS_TAPE_LIMIT) || 100;
+const heliusTapeCache = new Map<string, { data: SmartMoneySignal; ts: number }>();
+let _heliusTapeKeys: string[] | null = null;
+let _heliusTapeIdx = 0;
+function _loadHeliusTapeKeys(): string[] {
+  if (!_heliusTapeKeys) _heliusTapeKeys = (process.env.HELIUS_API_KEYS ?? process.env.HELIUS_KEYS ?? "").split(",").map(k => k.trim()).filter(k => k.length > 0);
+  return _heliusTapeKeys;
+}
+function heliusTapeEnabled(): boolean {
+  return _loadHeliusTapeKeys().length > 0 && String(process.env.HELIUS_WHALE_TAPE || "true").toLowerCase() !== "false";
+}
+function _getHeliusTapeKey(): string | null {
+  const keys = _loadHeliusTapeKeys();
+  if (keys.length === 0) return null;
+  return keys[(_heliusTapeIdx++) % keys.length];
+}
+
+async function fetchWhaleTapeHelius(tokenAddress: string, bypassCache: boolean = false): Promise<SmartMoneySignal> {
+  const empty: SmartMoneySignal = { count: 0, netBuyers: 0, topRealizedPnl: 0, whaleCount: 0, whaleNetBuyers: 0, whaleNetSellers: 0, washSuspects: 0, source: "helius" };
+  if (!heliusTapeEnabled() || !tokenAddress) return empty;
+  const cached = heliusTapeCache.get(tokenAddress);
+  if (!bypassCache && cached && Date.now() - cached.ts < HELIUS_TAPE_TTL_MS) return cached.data;
+  const key = _getHeliusTapeKey();
+  if (!key) return empty;
+  let txs: any[] = [];
+  try {
+    const url = `${HELIUS_TAPE_BASE}/${tokenAddress}/transactions?api-key=${key}&type=SWAP&limit=${HELIUS_TAPE_LIMIT}`;
+    const resp = await fetch(url, { headers: { "Accept": "application/json" }, signal: AbortSignal.timeout(HELIUS_TAPE_TIMEOUT_MS) });
+    if (!resp.ok) return empty;
+    txs = await resp.json();
+    if (!Array.isArray(txs) || txs.length === 0) return empty;
+  } catch (e: any) {
+    console.warn(`[HELIUS-TAPE] swap fetch failed for ${tokenAddress}: ${e?.message || e}`);
+    return empty;
+  }
+  // Per-wallet (feePayer = human trader) buy/sell aggregation from this mint's tokenTransfers.
+  // Keying on feePayer instead of the transfer counterparty excludes the AMM pool/vault automatically.
+  type WT = { buys: number; sells: number; buyAmt: number; sellAmt: number };
+  const byWallet = new Map<string, WT>();
+  const slotBuyers = new Map<number, Set<string>>(); // slot -> distinct buyer wallets (bundle proxy)
+  for (const tx of txs) {
+    const trader = String(tx?.feePayer || "");
+    if (!trader) continue;
+    const slot = Number(tx?.slot) || 0;
+    const transfers: any[] = Array.isArray(tx?.tokenTransfers) ? tx.tokenTransfers : [];
+    let bought = 0, sold = 0;
+    for (const tr of transfers) {
+      if (String(tr?.mint) !== tokenAddress) continue;
+      const amt = Number(tr?.tokenAmount) || 0;
+      if (amt <= 0) continue;
+      if (String(tr?.toUserAccount) === trader) bought += amt;
+      else if (String(tr?.fromUserAccount) === trader) sold += amt;
+    }
+    if (bought <= 0 && sold <= 0) continue;
+    const w = byWallet.get(trader) || { buys: 0, sells: 0, buyAmt: 0, sellAmt: 0 };
+    if (bought > 0) { w.buys++; w.buyAmt += bought; if (slot) { const s = slotBuyers.get(slot) || new Set<string>(); s.add(trader); slotBuyers.set(slot, s); } }
+    if (sold > 0) { w.sells++; w.sellAmt += sold; }
+    byWallet.set(trader, w);
+  }
+  if (byWallet.size === 0) return empty;
+  // Rank wallets by total token volume traded; the top-N are the whales / largest actors.
+  const wallets = [...byWallet.entries()].map(([owner, w]) => ({ owner, ...w, vol: w.buyAmt + w.sellAmt }));
+  wallets.sort((a, b) => b.vol - a.vol);
+  const WHALE_N = Number(process.env.HELIUS_TAPE_WHALE_N) || 10;
+  const whales = wallets.slice(0, WHALE_N);
+  let whaleCount = 0, whaleNetBuyers = 0, whaleNetSellers = 0, washSuspects = 0;
+  for (const w of whales) {
+    whaleCount++;
+    const tot = w.buys + w.sells;
+    // Same wash discriminator as the Birdeye tape: near-balanced high-frequency round-tripper = fake volume.
+    const balanced = tot >= 4 && Math.min(w.buys, w.sells) / Math.max(1, Math.max(w.buys, w.sells)) >= WHALE_WASH_RATIO;
+    if (balanced) washSuspects++;
+    else if (w.buys > w.sells) whaleNetBuyers++;
+    else if (w.sells > w.buys) whaleNetSellers++;
+  }
+  // Bundle proxy: slots where >=2 distinct wallets bought in the SAME block => coordinated launch/bundle.
+  let bundleSlots = 0;
+  for (const s of slotBuyers.values()) if (s.size >= 2) bundleSlots++;
+  const _bundleTrip = bundleSlots >= (Number(process.env.HELIUS_TAPE_BUNDLE_SLOTS) || 3);
+  if (_bundleTrip) washSuspects = Math.max(washSuspects, Math.ceil(whaleCount / 2));
+  const sig: SmartMoneySignal = { count: 0, netBuyers: 0, topRealizedPnl: 0, whaleCount, whaleNetBuyers, whaleNetSellers, washSuspects, source: "helius" };
+  console.log(`[HELIUS-TAPE] ${tokenAddress.slice(0, 6)} whales=${whaleCount} netBuy=${whaleNetBuyers} netSell=${whaleNetSellers} wash=${washSuspects} bundleSlots=${bundleSlots}${_bundleTrip ? " BUNDLE" : ""} (txs=${txs.length})`);
+  heliusTapeCache.set(tokenAddress, { data: sig, ts: Date.now() });
+  return sig;
+}
+
+// Wrapper: Birdeye first (sees PnL -> smart-money bonus + exit/veto). When Birdeye is blind
+// (CU-exhausted / 429 -> empty), fall to the Helius wallet-level tape (precise, wash/bundle-aware,
+// also trusted for veto + exit). The free getTokenLargestAccounts snapshot is the last advisory resort.
 async function fetchSmartMoneyConvergence(tokenAddress: string, bypassCache: boolean = false): Promise<SmartMoneySignal> {
   if (!tokenAddress) return { count: 0, netBuyers: 0, topRealizedPnl: 0, whaleCount: 0, whaleNetBuyers: 0, whaleNetSellers: 0, washSuspects: 0 };
   const bird = await fetchSmartMoneyBirdeye(tokenAddress, bypassCache);
   if (bird.count > 0 || bird.whaleCount > 0) return bird;
+  const helius = await fetchWhaleTapeHelius(tokenAddress, bypassCache);
+  if (helius.whaleCount > 0) return helius;
   return await fetchWhaleAccumulationFree(tokenAddress);
 }
 
@@ -2680,7 +2790,15 @@ async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair): Pr
     if (_gradedLpRisk && !_absoluteVetoRisk && !_vetoRisk && !_freezeActive) {
       const _lpRelaxWhaleGateOn = String(process.env.LP_RELAX_WHALE_GATE || "true").toLowerCase() !== "false";
       let _wsig: SmartMoneySignal | null = null;
-      try { _wsig = await fetchSmartMoneyConvergence(tokenAddress); } catch { _wsig = null; }
+      // GRADED-LP ENTRY WHALE PRECHECK (AI-FIX 2026-06-27) — DORMANT by default.
+      // When ON, force a FRESH (cache-bypass) whale read for this graded-LP candidate so the
+      // existing wash/distribution veto below fires AT ENTRY instead of admit-then-bail mid-hold.
+      // Kept OFF until distinct Birdeye keys are added: today the 4 key-slots are 1 shared key
+      // (deee0dd7, 60rpm) and a per-candidate bypass call would deepen the 429 starvation. Once
+      // real keys land, set GRADED_LP_ENTRY_WHALE_PRECHECK=true and these wash tokens get vetoed
+      // before paying the round-trip. Flag OFF => identical cached behavior as before (no-op).
+      const _gradedLpEntryPrecheck = String(process.env.GRADED_LP_ENTRY_WHALE_PRECHECK || "false").toLowerCase() === "true";
+      try { _wsig = await fetchSmartMoneyConvergence(tokenAddress, _gradedLpEntryPrecheck); } catch { _wsig = null; }
       const _wc = _wsig?.whaleCount ?? 0;            // # top-volume wallets sampled
       const _wSell = _wsig?.whaleNetSellers ?? 0;    // big wallets net-distributing
       const _wBuy = _wsig?.whaleNetBuyers ?? 0;      // big wallets net-accumulating
@@ -2692,7 +2810,7 @@ async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair): Pr
       const _highOwnFlag = _hasRisk("high ownership");
       const _fewLpProviders = _hasRisk("low amount of lp providers");
       console.log(`[LP-RELAX-PROFILE] $${pair.baseToken?.symbol || tokenAddress} whales=${_wc} accumQ=${_accumQ} netBuy=${_wBuy} netSell=${_wSell} wash=${_wash} | top10=${_top10Flag} highOwn=${_highOwnFlag} fewLP=${_fewLpProviders} | smEnabled=${smartMoneyEnabled()} dataPresent=${_wc > 0} norm=${data?.score_normalised}`);
-      if (_lpRelaxWhaleGateOn && _wc > 0 && _wsig?.source === "birdeye") {
+      if (_lpRelaxWhaleGateOn && _wc > 0 && (_wsig?.source === "birdeye" || _wsig?.source === "helius")) {
         // Only act when whale data is actually present. Two high-precision literature signals:
         //  (1) coordinated distribution: >= WHALE_DISTRIBUTION_SELLERS big wallets net-selling.
         //  (2) wash-dominated tape with ZERO genuine accumulation: organized fake volume / bundle.
@@ -2747,6 +2865,34 @@ async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair): Pr
         // flags alone are too coarse for paper-mode admission decisions).
         if (!_lpRelaxGateReason && !_paperLpRelax && (_top10Flag || _highOwnFlag || _fewLpProviders)) {
           _lpRelaxGateReason = `lp_unlocked_concentration_no_whaledata(top10=${_top10Flag},highOwn=${_highOwnFlag},fewLP=${_fewLpProviders})`;
+        }
+        // LAYER-1 WASH PROXY (AI-FIX 2026-06-27) — Birdeye-independent wash detector for the blind case.
+        // Manufactured-volume fingerprint from already-fetched DexScreener flow: high vol vs liquidity +
+        // ~50/50 balanced churn + flat price (no real discovery) + high tx velocity. Separates wash/bundle
+        // ($SQQQ/$SOL: flat & balanced) from a genuine runner (price up + buy-skewed), so real breakouts are
+        // NOT faded. RugCheck top5/few-LP logged as corroboration. WASH_PROXY_GATE=false => log-only.
+        if (!_lpRelaxGateReason) {
+          const _wpGate = String(process.env.WASH_PROXY_GATE ?? "true").toLowerCase() !== "false";
+          const _wpVolLiqMult = Number(process.env.WASH_PROXY_VOL_LIQ_MULT ?? 8);
+          const _wpMinTx = Number(process.env.WASH_PROXY_MIN_TX ?? 20);
+          const _wpBalanceBand = Number(process.env.WASH_PROXY_BALANCE_BAND ?? 0.12);
+          const _wpFlatPct = Number(process.env.WASH_PROXY_FLAT_PRICE_PCT ?? 3);
+          const _wpLiq = pair?.liquidity?.usd || 0;
+          const _wpVol5m = pair?.volume?.m5 || 0;
+          const _wpM5b = pair?.txns?.m5?.buys || 0, _wpM5s = pair?.txns?.m5?.sells || 0;
+          const _wpTx = _wpM5b + _wpM5s;
+          const _wpBp = _wpTx > 0 ? _wpM5b / _wpTx : 0.5;
+          const _wpPx = Math.abs(pair?.priceChange?.m5 || 0);
+          const _wpManufVol = _wpLiq > 0 && _wpVol5m >= _wpLiq * _wpVolLiqMult;
+          const _wpBalanced = Math.abs(_wpBp - 0.5) <= _wpBalanceBand;
+          const _wpFlat = _wpPx <= _wpFlatPct;
+          const _wpHighTx = _wpTx >= _wpMinTx;
+          const _wpConcCorrob = (_conc?.available && _conc.top5Pct >= Number(process.env.WASH_PROXY_TOP5_PCT ?? 60)) || _fewLpProviders;
+          const _wpTrip = _wpManufVol && _wpBalanced && _wpFlat && _wpHighTx;
+          console.log(`[WASH-PROXY] $${pair.baseToken?.symbol || tokenAddress} trip=${_wpTrip} gate=${_wpGate} | manufVol=${_wpManufVol}(vol5m=${_wpVol5m.toFixed(0)} vs liq=${_wpLiq.toFixed(0)} x${_wpVolLiqMult}) balanced=${_wpBalanced}(bp=${_wpBp.toFixed(2)}) flatPx=${_wpFlat}(|px5m|=${_wpPx.toFixed(1)}%) highTx=${_wpHighTx}(${_wpTx}) concCorrob=${_wpConcCorrob}`);
+          if (_wpTrip && _wpGate) {
+            _lpRelaxGateReason = `lp_unlocked_wash_proxy(volLiq=${(_wpVol5m / Math.max(1, _wpLiq)).toFixed(1)}x,bp=${_wpBp.toFixed(2)},px=${_wpPx.toFixed(1)}%,tx=${_wpTx})`;
+          }
         }
         if (_lpRelaxGateReason) {
           console.log(`[LP-RELAX-GATE] $${pair.baseToken?.symbol || tokenAddress} VETO — ${_lpRelaxGateReason} (fail-closed: whale tape blind, concentration signal on unlocked LP)`);
@@ -4031,10 +4177,10 @@ async function checkOpenPositions() {
           try {
             const _wsig = await fetchSmartMoneyConvergence(trade.tokenAddress, true);
             // EXIT trusts Birdeye flow only -- the free snapshot layer is advisory and must never force-exit a winner.
-            const _distributing = _wsig.source === "birdeye" && _wsig.whaleNetSellers >= WHALE_DISTRIBUTION_SELLERS && _wsig.whaleNetSellers > _wsig.whaleNetBuyers;
-            if (_distributing && !(trade as any).__patchForceExit) {
-              console.warn(`[WHALE-DISTRIBUTION] #${trade.id} ${trade.tokenSymbol} — top wallets flipped to net-selling (sellers=${_wsig.whaleNetSellers} buyers=${_wsig.whaleNetBuyers} wash=${_wsig.washSuspects}); exiting ahead of dump.`);
-              (trade as any).__patchForceExit = `WHALE_DISTRIBUTION (sellers=${_wsig.whaleNetSellers}, buyers=${_wsig.whaleNetBuyers})`;
+            const _distributing = (_wsig.source === "birdeye" || _wsig.source === "helius") && _wsig.whaleNetSellers >= WHALE_DISTRIBUTION_SELLERS && _wsig.whaleNetSellers > _wsig.whaleNetBuyers; const _washExitMidHold = (_wsig.source === "birdeye" || _wsig.source === "helius") && (_wsig.whaleCount ?? 0) > 0 && (_wsig.netBuyers ?? 0) === 0 && (_wsig.washSuspects ?? 0) >= Math.ceil((_wsig.whaleCount ?? 0) / 2); /* AI-FIX(2026-06-27): same lp_unlocked_wash_no_accumulation discriminator used at entry, now applied mid-hold. AAIF entered Birdeye-blind (wash=0) then flipped wash=9/10 while the probe suppressed LP mid-hold exits and rode it to -99%. Organized wash/bundle != overt net-selling, so the seller-count exit missed it. */
+            if ((_distributing || _washExitMidHold) && !(trade as any).__patchForceExit) {
+              console.warn(`[WHALE-DISTRIBUTION] #${trade.id} ${trade.tokenSymbol} — ${_washExitMidHold ? "organized wash/bundle with zero accumulation" : "top wallets flipped to net-selling"} (sellers=${_wsig.whaleNetSellers} buyers=${_wsig.whaleNetBuyers} wash=${_wsig.washSuspects}/${_wsig.whaleCount} accumQ=${_wsig.netBuyers}); exiting ahead of dump.`);
+              (trade as any).__patchForceExit = _washExitMidHold ? `WASH_NO_ACCUMULATION (wash=${_wsig.washSuspects}/${_wsig.whaleCount}, accumQ=${_wsig.netBuyers})` : `WHALE_DISTRIBUTION (sellers=${_wsig.whaleNetSellers}, buyers=${_wsig.whaleNetBuyers})`;
             }
           } catch { /* transient whale-flow fetch failure — ignore, retry next cycle */ }
         }
@@ -4896,7 +5042,7 @@ async function checkOpenPositions() {
             const returnSol = Math.min(returnSolRaw, sizeSol * MAX_RETURN_MULTIPLIER);
             if (returnSolRaw !== returnSol) {
               console.warn(
-                `[BALANCE_GUARD] returnSol clamped ${returnSolRaw.toFixed(4)} → ${returnSol.toFixed(4)} SOL ` +
+                `[BALANCE_GUARD] returnSol clamped ${returnSolRaw.toFixed(4)} ��� ${returnSol.toFixed(4)} SOL ` +
                 `for $${trade.tokenSymbol} | exitPnlPct was ${exitPnlPct.toFixed(2)}%`
               );
             }
