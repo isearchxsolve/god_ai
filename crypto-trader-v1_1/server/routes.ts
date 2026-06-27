@@ -2391,6 +2391,8 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
         price: sp.priceUsd,
         liquidity: sp.liquidity?.usd || 0,
         volume5m: sp.volume?.m5 || 0,
+        priceChange5m: sp.priceChange?.m5 || 0, // FEED-FIX(2026-06-27): expose 5m % at top level so the dashboard "5M" column renders real momentum (was nested only in metrics → column showed 0.0% for every row).
+        priceChange1h: sp.priceChange?.h1 || 0, // companion 1h % for the feed.
         ageSeconds: Math.floor((now - (sp.pairCreatedAt || now)) / 1000),
         buys5m: sp.txns?.m5?.buys || 0,
         sells5m: sp.txns?.m5?.sells || 0,
