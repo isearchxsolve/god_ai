@@ -1,0 +1,1 @@
+EDUCATIONAL PURPOSES ONLY. NOT FINANCIAL ADVICE. Trading involves substantial risk of loss. The authors assume no liability for any losses incurred. See DISCLAIMER.md for full terms.
