@@ -91,11 +91,19 @@ const q = [];
 let busy = false;
 
 async function evaluate(mint) {
+    // SAFETY GATES: previously these three checks were defined but never called, so every
+    // freshly-initialized mint was injected raw with all-zero metrics. Now we actually run them.
+    const rc = await rugcheckPass(mint);
+    if (!rc.pass) { log(`✗ SKIP ${mint}: ${rc.reason}`); return; }
+    const dx = await dexscreenerPass(mint);
+    if (!dx.pass) { log(`✗ SKIP ${mint}: ${dx.reason}`); return; }
+    const hp = await holderPass(mint);
+    if (!hp.pass) { log(`✗ SKIP ${mint}: ${hp.reason}`); return; }
     const row = [
-        new Date().toISOString(), mint, '0', '0', '0', '0', '0', '0', 'none'
+        new Date().toISOString(), mint, (rc.score ?? 0), dx.liq.toFixed(0), dx.ageH.toFixed(2), hp.top1.toFixed(2), hp.top10.toFixed(2), dx.ratio.toFixed(2), (dx.url || 'none')
     ].join(',') + '\n';
     fs.appendFileSync(CANDIDATES_FILE, row);
-    log(`★ FAST INJECT: ${mint} | Queued to engine in milliseconds!`);
+    log(`★ FAST INJECT (vetted): ${mint} | rug:${rc.score ?? 0} liq:$${dx.liq.toFixed(0)} age:${dx.ageH.toFixed(1)}h top10:${hp.top10.toFixed(1)}% | queued`);
 }
 
 async function drain() {

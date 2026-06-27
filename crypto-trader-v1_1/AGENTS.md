@@ -1,1 +1,0 @@
-run on autopilot mode and do continuous testing and patches until system achieves 80 percent winrate 2 trades/30 secs and high ev

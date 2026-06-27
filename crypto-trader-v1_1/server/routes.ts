@@ -3847,7 +3847,11 @@ async function checkOpenPositions() {
         else console.warn(`[SYNC] Pre-fetch failed for #${liveTradesToSync[i].id} $${liveTradesToSync[i].tokenSymbol}`);
       }
     }
-    for (const trade of openTrades) {
+    // CONCURRENCY-SAFETY: process the most at-risk positions first (most negative last-known PnL%)
+    // so a slow sell on one position cannot starve a simultaneously-rugging position of its exit.
+    // Iterates a sorted copy; all per-trade state is keyed by trade.id, so order does not matter.
+    const _orderedOpenTrades = [...openTrades].sort((a: any, b: any) => (prevPnlMap.get(a.id) ?? 0) - (prevPnlMap.get(b.id) ?? 0));
+    for (const trade of _orderedOpenTrades) {
       try {
         if (sellingInProgress.has(trade.id)) continue;
         // Bug #2 fix: use fetchTokenPriceForExit (no wash-trade filter) so that
