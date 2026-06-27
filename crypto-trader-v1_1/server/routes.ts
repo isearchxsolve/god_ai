@@ -1725,7 +1725,7 @@ const HELIUS_TAPE_TIMEOUT_MS = Number(process.env.HELIUS_TAPE_TIMEOUT_MS) || 8_0
 const HELIUS_TAPE_LIMIT = Number(process.env.HELIUS_TAPE_LIMIT) || 100;
 const heliusTapeCache = new Map<string, { data: SmartMoneySignal; ts: number }>();
 let _heliusTapeKeys: string[] | null = null;
-let _heliusTapeIdx = 0;
+let _heliusTapeIdx = 0; let _heliusDiagTs = 0; function _heliusDiag(m: string){ const n = Date.now(); if (n - _heliusDiagTs > 15000) { _heliusDiagTs = n; console.warn("[HELIUS-TAPE-DIAG] " + m); } } const _heliusKeyCooldown = new Map<string, number>(); function _markHeliusKey429(k: string){ const ms = Number(process.env.HELIUS_KEY_COOLDOWN_MS) || 60000; _heliusKeyCooldown.set(k, Date.now() + ms); _heliusDiag("key cooled " + (ms/1000) + "s after 429 (key ..." + k.slice(-4) + ")"); } const _heliusNeg = new Map<string, number>(); const _HELIUS_NEG_TTL = Number(process.env.HELIUS_TAPE_NEG_TTL_MS) || 30000; function _heliusNegHit(t: string){ const ts = _heliusNeg.get(t); return ts !== undefined && Date.now() < ts + _HELIUS_NEG_TTL; } function _heliusNegSet(t: string){ _heliusNeg.set(t, Date.now()); }
 function _loadHeliusTapeKeys(): string[] {
   if (!_heliusTapeKeys) _heliusTapeKeys = (process.env.HELIUS_API_KEYS ?? process.env.HELIUS_KEYS ?? "").split(",").map(k => k.trim()).filter(k => k.length > 0);
   return _heliusTapeKeys;
@@ -1736,23 +1736,24 @@ function heliusTapeEnabled(): boolean {
 function _getHeliusTapeKey(): string | null {
   const keys = _loadHeliusTapeKeys();
   if (keys.length === 0) return null;
-  return keys[(_heliusTapeIdx++) % keys.length];
+  const _now = Date.now(); for (let _i = 0; _i < keys.length; _i++) { const _k = keys[(_heliusTapeIdx++) % keys.length]; if ((_heliusKeyCooldown.get(_k) || 0) <= _now) return _k; } return null;
 }
 
 async function fetchWhaleTapeHelius(tokenAddress: string, bypassCache: boolean = false): Promise<SmartMoneySignal> {
   const empty: SmartMoneySignal = { count: 0, netBuyers: 0, topRealizedPnl: 0, whaleCount: 0, whaleNetBuyers: 0, whaleNetSellers: 0, washSuspects: 0, source: "helius" };
-  if (!heliusTapeEnabled() || !tokenAddress) return empty;
+  if (!heliusTapeEnabled() || !tokenAddress) { _heliusDiag("disabled (keys=" + _loadHeliusTapeKeys().length + " flag=" + (process.env.HELIUS_WHALE_TAPE ?? "unset") + ")"); return empty; }
   const cached = heliusTapeCache.get(tokenAddress);
   if (!bypassCache && cached && Date.now() - cached.ts < HELIUS_TAPE_TTL_MS) return cached.data;
+  if (!bypassCache && _heliusNegHit(tokenAddress)) return empty;
   const key = _getHeliusTapeKey();
-  if (!key) return empty;
+  if (!key) { _heliusDiag("no api key available"); return empty; }
   let txs: any[] = [];
   try {
     const url = `${HELIUS_TAPE_BASE}/${tokenAddress}/transactions?api-key=${key}&type=SWAP&limit=${HELIUS_TAPE_LIMIT}`;
     const resp = await fetch(url, { headers: { "Accept": "application/json" }, signal: AbortSignal.timeout(HELIUS_TAPE_TIMEOUT_MS) });
-    if (!resp.ok) return empty;
+    if (!resp.ok) { _heliusDiag("HTTP " + resp.status + " for " + tokenAddress.slice(0,6)); if (resp.status === 429 && key) _markHeliusKey429(key); _heliusNegSet(tokenAddress); return empty; }
     txs = await resp.json();
-    if (!Array.isArray(txs) || txs.length === 0) return empty;
+    if (!Array.isArray(txs) || txs.length === 0) { _heliusDiag("empty SWAP payload for " + tokenAddress.slice(0,6) + " (array=" + Array.isArray(txs) + ")"); _heliusNegSet(tokenAddress); return empty; }
   } catch (e: any) {
     console.warn(`[HELIUS-TAPE] swap fetch failed for ${tokenAddress}: ${e?.message || e}`);
     return empty;
@@ -1781,7 +1782,7 @@ async function fetchWhaleTapeHelius(tokenAddress: string, bypassCache: boolean =
     if (sold > 0) { w.sells++; w.sellAmt += sold; }
     byWallet.set(trader, w);
   }
-  if (byWallet.size === 0) return empty;
+  if (byWallet.size === 0) { _heliusDiag("no per-wallet activity parsed for " + tokenAddress.slice(0,6) + " (txs=" + txs.length + ")"); _heliusNegSet(tokenAddress); return empty; }
   // Rank wallets by total token volume traded; the top-N are the whales / largest actors.
   const wallets = [...byWallet.entries()].map(([owner, w]) => ({ owner, ...w, vol: w.buyAmt + w.sellAmt }));
   wallets.sort((a, b) => b.vol - a.vol);
@@ -1811,11 +1812,11 @@ async function fetchWhaleTapeHelius(tokenAddress: string, bypassCache: boolean =
 // Wrapper: Birdeye first (sees PnL -> smart-money bonus + exit/veto). When Birdeye is blind
 // (CU-exhausted / 429 -> empty), fall to the Helius wallet-level tape (precise, wash/bundle-aware,
 // also trusted for veto + exit). The free getTokenLargestAccounts snapshot is the last advisory resort.
-async function fetchSmartMoneyConvergence(tokenAddress: string, bypassCache: boolean = false): Promise<SmartMoneySignal> {
+async function fetchSmartMoneyConvergence(tokenAddress: string, bypassCache: boolean = false, heliusAllowed: boolean = true, birdeyeAllowed: boolean = true): Promise<SmartMoneySignal> {
   if (!tokenAddress) return { count: 0, netBuyers: 0, topRealizedPnl: 0, whaleCount: 0, whaleNetBuyers: 0, whaleNetSellers: 0, washSuspects: 0 };
-  const bird = await fetchSmartMoneyBirdeye(tokenAddress, bypassCache);
+  const bird = birdeyeAllowed ? await fetchSmartMoneyBirdeye(tokenAddress, bypassCache) : ({ count: 0, netBuyers: 0, topRealizedPnl: 0, whaleCount: 0, whaleNetBuyers: 0, whaleNetSellers: 0, washSuspects: 0, source: "birdeye" } as SmartMoneySignal);
   if (bird.count > 0 || bird.whaleCount > 0) return bird;
-  const helius = await fetchWhaleTapeHelius(tokenAddress, bypassCache);
+  const helius = heliusAllowed ? await fetchWhaleTapeHelius(tokenAddress, bypassCache) : ({ count: 0, netBuyers: 0, topRealizedPnl: 0, whaleCount: 0, whaleNetBuyers: 0, whaleNetSellers: 0, washSuspects: 0, source: "helius" } as SmartMoneySignal);
   if (helius.whaleCount > 0) return helius;
   return await fetchWhaleAccumulationFree(tokenAddress);
 }
@@ -2002,12 +2003,25 @@ async function fetchRugcheckConcentration(tokenAddress: string): Promise<RugConc
   const _empty: RugConcentration = { available: false, topHolderPct: 0, top5Pct: 0, insiderPct: 0, insiderCount: 0, totalHolders: 0, lpLockedPct: 0 };
   const _cached = rugConcentrationCache.get(tokenAddress);
   if (_cached && Date.now() - _cached.ts < 120_000) return _cached.data;
+  // STALE-FALLBACK (AI-FIX 2026-06-28): on an intermittent RugCheck outage, reuse the last-known
+  // concentration (up to RUGCHECK_CONC_STALE_MS) instead of returning available:false. This closes
+  // the blind fail-open that admitted $VENEZUELA (~66-71% top holder) for a -62% LIQ_COLLAPSE rug
+  // when the live fetch failed mid-session. A token recently measured as concentrated stays vetoed;
+  // a token never measured high (e.g. a genuine runner) is unaffected and can still be admitted.
+  const _staleMs = Number(process.env.RUGCHECK_CONC_STALE_MS ?? 1_800_000);
+  const _staleOk = (): RugConcentration => {
+    if (_cached && Date.now() - _cached.ts < _staleMs) {
+      console.warn(`[RUGCHECK-CONC] $${tokenAddress.slice(0,6)} fetch unavailable — using STALE cached concentration (age ${((Date.now()-_cached.ts)/1000).toFixed(0)}s, topHolder=${_cached.data.topHolderPct.toFixed(1)}%, top5=${_cached.data.top5Pct.toFixed(1)}%) to prevent blind fail-open admit`);
+      return _cached.data;
+    }
+    return _empty;
+  };
   try {
     const resp = await fetch(`https://api.rugcheck.xyz/v1/tokens/${tokenAddress}/report`, { signal: AbortSignal.timeout(5000) });
-    if (!resp.ok) { console.warn(`[RUGCHECK-CONC] $${tokenAddress.slice(0,6)} non-OK HTTP ${resp.status} on /report (full report unavailable; falling back to presence flags)`); return _empty; }
+    if (!resp.ok) { console.warn(`[RUGCHECK-CONC] $${tokenAddress.slice(0,6)} non-OK HTTP ${resp.status} on /report (full report unavailable; falling back to presence flags)`); return _staleOk(); }
     const r: any = await resp.json();
     const holders: any[] = Array.isArray(r?.topHolders) ? r.topHolders : [];
-    if (holders.length === 0) return _empty;
+    if (holders.length === 0) return _staleOk();
     const pctOf = (h: any) => Number(h?.pct ?? h?.percentage ?? 0) || 0;
     // Exclude LP/AMM vault accounts so we measure REAL holder concentration, not pool depth.
     const nonLp = holders.filter((h: any) => !(h?.isLp === true || h?.lp === true || String(h?.insiderType || "").toLowerCase() === "lp"));
@@ -2022,7 +2036,7 @@ async function fetchRugcheckConcentration(tokenAddress: string): Promise<RugConc
     const data: RugConcentration = { available: true, topHolderPct, top5Pct, insiderPct, insiderCount: insiders.length, totalHolders, lpLockedPct };
     rugConcentrationCache.set(tokenAddress, { data, ts: Date.now() });
     return data;
-  } catch { return _empty; }
+  } catch { return _staleOk(); }
 }
 
 /** Heuristics-only token safety check used when rugcheck circuit-breaker is open.
@@ -2606,7 +2620,7 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
     for (let __i = 0; __i < __finalists.length; __i += __SM_CONC) {
       const __batch = __finalists.slice(__i, __i + __SM_CONC);
       await Promise.all(__batch.map(async (f) => {
-        __smMap.set(f.sp.baseToken.address, await fetchSmartMoneyConvergence(f.sp.baseToken.address));
+        __smMap.set(f.sp.baseToken.address, await fetchSmartMoneyConvergence(f.sp.baseToken.address, false, false, false));
       }));
     }
     const results = __prelim.map(({ sp, idx, pre }) => {
@@ -2897,6 +2911,14 @@ async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair): Pr
           if (_wpTrip && _wpGate) {
             _lpRelaxGateReason = `lp_unlocked_wash_proxy(volLiq=${(_wpVol5m / Math.max(1, _wpLiq)).toFixed(1)}x,bp=${_wpBp.toFixed(2)},px=${_wpPx.toFixed(1)}%,tx=${_wpTx})`;
           }
+        }
+        // FAIL-CLOSED ON ZERO SAFETY DATA (AI-FIX 2026-06-28): unlocked-LP token where the whale tape is blind
+        // (_wc===0) AND RugCheck concentration is unavailable (no fresh AND no stale measurement => first-sighting)
+        // AND wash-proxy did not trip. This is the $VENEZUELA/$DREAM gap: admitted with zero independent signal in
+        // the ~98%-rug pond. Refuse the blind first-sighting entry. Stale-fallback keeps previously-measured winners
+        // (e.g. $VSK) admissible, so this does NOT re-create starvation. Toggle: LP_UNLOCKED_FAILCLOSED_NODATA=false.
+        if (!_lpRelaxGateReason && _wc === 0 && !_conc.available && String(process.env.LP_UNLOCKED_FAILCLOSED_NODATA ?? "true").toLowerCase() !== "false") {
+          _lpRelaxGateReason = `lp_unlocked_no_safety_data(whaleBlind,concUnavailable,firstSighting)`;
         }
         if (_lpRelaxGateReason) {
           console.log(`[LP-RELAX-GATE] $${pair.baseToken?.symbol || tokenAddress} VETO — ${_lpRelaxGateReason} (fail-closed: whale tape blind, concentration signal on unlocked LP)`);
@@ -4176,7 +4198,7 @@ async function checkOpenPositions() {
         // signal is detecting DISTRIBUTION, not accumulation. Every 60s we re-poll the top-volume
         // wallets (cache-bypassed) and exit if they have flipped to net-selling. Throttled +
         // maxOpenPositions=1 => <=1 Birdeye call/min (rate-limit safe).
-        if (whaleTrackingEnabled() && _patchHoldAgeMs > 30_000 && Date.now() - (midHoldWhaleMs.get(trade.id) ?? 0) > 60_000) {
+        if (whaleTrackingEnabled() && _patchHoldAgeMs > 30_000 && Date.now() - (midHoldWhaleMs.get(trade.id) ?? 0) > (Number(process.env.MID_HOLD_WHALE_THROTTLE_MS) || 120_000)) {
           midHoldWhaleMs.set(trade.id, Date.now());
           try {
             const _wsig = await fetchSmartMoneyConvergence(trade.tokenAddress, true);
