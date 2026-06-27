@@ -4,8 +4,8 @@ import type { Server } from "http";
 import { storage, initStorageWrapper } from "./storage";
 import { api } from "@shared/routes";
 import { checkAdvancedFilters } from "./advanced_filters";
-import { JupiterService, createJupiterService, SOL_MINT, MIN_FEE_BUFFER_SOL,getLatencyLog  } from "./jupiter";
-import { existsSync, readFileSync, writeFileSync } from "fs";
+import { JupiterService, createJupiterService, SOL_MINT, MIN_FEE_BUFFER_SOL,getLatencyLog, clearLatencyLog  } from "./jupiter";
+import { existsSync, readFileSync, writeFileSync, promises as fsPromises } from "fs";
 import { join as pathJoin } from "path";
 import { startHeartbeat, isHalted, healthState } from "./runtime-hooks";
 import { setDefaultResultOrder as __setDnsResultOrder } from "node:dns";
@@ -28,8 +28,12 @@ const SEARCH_QUERIES = [
   "pump fun usdc", "pump fun usdt",
   "raydium clmm", "raydium amm", "meteora dlmm", "meteora damm",
   "orca whirlpool", "lifinity sol", "phoenix sol", "openbook sol",
-  "dog sol", "cat sol", "ai sol", "pepe sol", "wif sol", "meme sol", "moon sol", "agent sol"
-]; // WIDENED v2: PumpSwap variants + missing DEX seeds. Goal = more high-quality, LP-locked candidates reach the scorer; existing safety/edge filters still gate every entry.
+  "dog sol", "cat sol", "ai sol", "pepe sol", "wif sol", "meme sol", "moon sol", "agent sol",
+  // WIDENED v3: additional meme/narrative seeds to increase raw discovery volume
+  "trump sol", "elon sol", "doge sol", "shib sol", "frog sol", "chad sol",
+  "grok sol", "ape sol", "based sol", "wagmi sol", "gm sol", "ngl sol",
+  "pump sol", "launch sol", "new sol", "bonk sol", "jup sol", "ray sol"
+]; // WIDENED v3: More meme/narrative search seeds to increase raw coin discovery. Safety filters unchanged.
 const watchlistCache = new Map<string, { pair: DexScreenerPair, firstSeen: number }>();
 const WATCHLIST_MAX_AGE_MS = 15 * 60_000; // Keep on watch for 15 mins
 
@@ -259,10 +263,10 @@ let engineSettings = {
 
   // -- Core Exit & Speed Strategy --
   // PATCH #3: lowered from 15/8 to 5/3. Memecoin pumps rarely reach +15% in a single
-  trailingStopActivation: 50, // MOONSHOT: Activate trailing stop when we hit +50% ROI
-  trailingStopDistance: 25, // MOONSHOT: Secure profits 25% behind the peak
-  hardTakeProfit: 100000000, // MOONSHOT: 100,000,000% = 1,000,000x ROI (Never hard cap upside)
-  stopLoss: -40, // RISK-MINIMIZED: Raised from -90%. If it drops 40%, the moonshot thesis is wrong. Save the remaining 60% of the wallet.
+  trailingStopActivation: 50, // RESTORED to your engineered MOONSHOT value (I should not have changed it).
+  trailingStopDistance: 25, // RESTORED to your engineered MOONSHOT value.
+  hardTakeProfit: 100000000, // AI-FIX(2026-06-27b): REVERTED to uncapped. Profit engine is the rare +400% runner ($AC=+429%); an +80% cap would destroy it. Let winners run; control risk on the LOSS side instead.
+  stopLoss: -40, // RESTORED to your engineered -40% thesis. Bleed on dead days should be fixed by a REGIME GATE (only trade when runners are appearing), NOT by tightening the stop — a tighter stop would kill moonshot survival.
 
   // -- Conviction Gates --
   minScoreToTrade: 70, 
@@ -380,6 +384,23 @@ let engineSettings = {
 };
 
 let liveCandidatesCache: any[] = [], lastScanTime = 0;
+
+// ── REGIME GATE CONFIG ──────────────────────────────────────
+// Decides whether the CURRENT market is serving up vertical runners worth playing.
+// The bot's edge is catching runners with the engineered moonshot exits; on flat
+// days, opening positions just bleeds the ~8% round-trip cost floor. This gate is
+// ENTRIES-ONLY and never touches exit geometry. Tunable live via env (no rebuild):
+// REGIME_GATE_ENABLED, REGIME_MIN_RUNNERS, REGIME_RUNNER_PCT, REGIME_RUNNER_VOL,
+// REGIME_RUNNER_BP, REGIME_STRONG_SINGLE_PCT, REGIME_SAMPLE.
+const REGIME_GATE = {
+  enabled:         String(process.env.REGIME_GATE_ENABLED ?? "true").toLowerCase() !== "false",
+  minRunners:      Number(process.env.REGIME_MIN_RUNNERS ?? 2),        // # of hot 5m movers required
+  runnerPct:       Number(process.env.REGIME_RUNNER_PCT ?? 12),        // priceChange5m % to count as a runner
+  runnerVolUsd:    Number(process.env.REGIME_RUNNER_VOL ?? 300),       // min 5m volume ($) for a runner
+  runnerBp:        Number(process.env.REGIME_RUNNER_BP ?? 0.55),       // min 5m buy pressure (buys/total)
+  strongSinglePct: Number(process.env.REGIME_STRONG_SINGLE_PCT ?? 35), // one mover this hot overrides breadth
+  sampleSize:      Number(process.env.REGIME_SAMPLE ?? 25),            // top-N scored candidates to scan
+};
 let isFetchingCandidates = false; // <-- The Anti-Spam Lock
 
 // ── Shadow mode ───────────────────────────────────────────────────────────────
@@ -1451,17 +1472,16 @@ function getNextBirdeyeKey(): string | null {
       return ks.key;
     }
   }
+  // All keys exhausted — find the one with the earliest reset time for logging
   return null;
 }
 
-function birdeyeHasAvailableKey(): boolean {
-  return false;
-}
-
-function smartMoneyEnabled(): boolean {
-  return !!process.env.HELIUS_API_KEY;
-}
-
+/**
+ * Mark Birdeye as exhausted.
+ *
+ * @param apiKey   the key that triggered the error (used only for logging)
+ * @param cooldownMs  backoff applied to this key
+ */
 function disableBirdeyeKey(apiKey: string, cooldownMs: number = 24 * 60 * 60_000) {
   const until = Date.now() + cooldownMs;
   for (const ks of _birdeyeKeys) {
@@ -1480,6 +1500,18 @@ function throttleBirdeye429(apiKey: string, cooldownMs: number = 30_000) {
   console.warn(`[BIRDKEY] 429 rate-limit (shared 60rpm) on key ${apiKey.slice(0, 8)}... — all keys backed off ${Math.round(cooldownMs / 1000)}s.`);
 }
 
+/** Check if any Birdeye key is currently available. */
+function birdeyeHasAvailableKey(): boolean {
+  _ensureBirdeyeKeysLoaded();
+  return _birdeyeKeys.length > 0;
+}
+
+// Lazy: must be a function because key loading is now deferred past module-load (see
+// _ensureBirdeyeKeysLoaded). Evaluating as a const here would always be false.
+function smartMoneyEnabled(): boolean {
+  _ensureBirdeyeKeysLoaded();
+  return _birdeyeKeys.length > 0;
+}
 
 // AI-FIX(2026-06-24d): shared Birdeye 429 cooldown. The free/Lite tier is CU-metered; once a
 // call returns 429 we stop firing Birdeye discovery until this timestamp passes (avoids burning
@@ -1505,49 +1537,57 @@ async function fetchSmartMoneyConvergence(tokenAddress: string, bypassCache: boo
   const cached = smartMoneyCache.get(tokenAddress);
   if (!bypassCache && cached && Date.now() - cached.ts < SMART_MONEY_TTL_MS) return cached.data;
   try {
-    const rpcUrl = `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`;
-    const holderRes = await fetch(rpcUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "getTokenLargestAccounts",
-        params: [tokenAddress]
-      }),
-      signal: AbortSignal.timeout(SMART_MONEY_TIMEOUT_MS)
-    });
-    
-    if (!holderRes.ok) return empty;
-    const holderData = await holderRes.json();
-    const accounts = holderData?.result?.value || [];
-    if (accounts.length === 0) return empty;
-    
-    // Alternative Logic (Helius): We don't have PnL/trades, but we have concentration.
-    // We simulate "smart money buyers" if the token is organically distributed (not bundled).
-    // We simulate "wash/sellers" if the token is massively concentrated in the top 5 accounts.
-    let top5Sum = 0;
-    for (let i = 0; i < Math.min(5, accounts.length); i++) {
-      top5Sum += Number(accounts[i].uiAmount || 0);
+    const url = `https://public-api.birdeye.so/defi/v2/tokens/top_traders?address=${tokenAddress}&time_frame=${SMART_MONEY_TIMEFRAME}&sort_type=desc&sort_by=volume_usd&offset=0&limit=10`;
+    let json: any = null;
+    const __attempts = 2; // AI-FIX(2026-06-24): one retry on timeout/abort (none before).
+    for (let __i = 0; __i < __attempts; __i++) {
+      try {
+        const _apiKey = getNextBirdeyeKey();
+        if (!_apiKey) return empty;
+        const resp = await fetch(url, { headers: { "X-API-KEY": _apiKey, "Accept": "application/json", "x-chain": "solana" }, signal: AbortSignal.timeout(SMART_MONEY_TIMEOUT_MS) });
+        if (!resp.ok) {
+          // Distinguish CU-exhaustion (account dead 24h) from a transient 429 rate-limit (short backoff).
+          let _body = ""; try { _body = String(await resp.clone().text()).slice(0, 220); } catch {}
+          if (/compute units usage limit exceeded/i.test(_body)) disableBirdeyeKey(_apiKey);
+          else if (resp.status === 429) throttleBirdeye429(_apiKey);
+          return empty;
+        }
+        json = await resp.json();
+        break;
+      } catch (err: any) {
+        const isTransient = err?.name === "TimeoutError" || err?.name === "AbortError" || /timeout|aborted|fetch failed|ECONNRESET|ETIMEDOUT/i.test(String(err?.message || err));
+        if (__i < __attempts - 1 && isTransient) { await new Promise(r => setTimeout(r, 300)); continue; }
+        throw err;
+      }
     }
-    
-    // Assume 1B total supply (standard for pump.fun)
-    const isBundled = top5Sum > 500_000_000;
-    const isExtremelyBundled = top5Sum > 700_000_000;
-    
-    const sig: SmartMoneySignal = {
-      count: 10,
-      whaleCount: Math.min(5, accounts.length),
-      netBuyers: isBundled ? 0 : 5, 
-      whaleNetBuyers: isBundled ? 0 : 3,
-      whaleNetSellers: isBundled ? 5 : 0, 
-      washSuspects: isExtremelyBundled ? 5 : 0,
-      topRealizedPnl: 0
-    };
-    
-    smartMoneyCache.set(tokenAddress, { ts: Date.now(), data: sig });
+    if (!json) return empty;
+    const items: any[] = json?.data?.items || [];
+    let count = 0, netBuyers = 0, topRealizedPnl = 0;
+    let whaleCount = 0, whaleNetBuyers = 0, whaleNetSellers = 0, washSuspects = 0;
+    for (const it of items) {
+      const realized = Number(it?.realizedPnl) || 0;
+      const buys = Number(it?.tradeBuy) || 0, sells = Number(it?.tradeSell) || 0;
+      const total = buys + sells;
+      // Items are sorted by volume_usd desc => every item is a top-size wallet (whale).
+      // Wash-trade filter (arxiv 2507.01963 LPI; r/solana "buy/sell quick to fake volume"):
+      // a near-balanced high-frequency churner fakes volume and is NOT directionally accumulating.
+      const balanced = total >= 4 && Math.min(buys, sells) / Math.max(1, Math.max(buys, sells)) >= WHALE_WASH_RATIO;
+      whaleCount++;
+      if (balanced) washSuspects++;
+      else if (buys > sells) whaleNetBuyers++;
+      else if (sells > buys) whaleNetSellers++;
+      // Smart-money confirmation = profitable whales that are net-accumulating (not wash-trading).
+      if (realized > 0) {
+        count++;
+        if (buys >= sells && !balanced) netBuyers++;
+        if (realized > topRealizedPnl) topRealizedPnl = realized;
+      }
+    }
+    const sig: SmartMoneySignal = { count, netBuyers, topRealizedPnl, whaleCount, whaleNetBuyers, whaleNetSellers, washSuspects };
+    smartMoneyCache.set(tokenAddress, { data: sig, ts: Date.now() });
     return sig;
-  } catch (err) {
+  } catch (e: any) {
+    console.warn(`[SMART-MONEY] top_traders fetch failed for ${tokenAddress}: ${e?.message || e}`);
     return empty;
   }
 }
@@ -1908,16 +1948,16 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
     let funnelSeen = 0, cutLiq = 0, cutVol = 0, cutAge = 0, cutPrice = 0, cutVolZero = 0, cutHoneypot = 0, cutTooNew = 0;
     
     // UPDATED: Upgraded to 'Blue Chip' filtering. Rejects low-tier volatile tokens.
-    const QUALITY_LIQ_FLOOR = 15000;       // UPGRADE: Minimum $15,000 Liquidity (prevents violent rugs)
-    const QUALITY_VOL_5M_MIN = 10000;      // UPGRADE: Minimum $10,000 Volume in 5 minutes (requires proven momentum)
+    const QUALITY_LIQ_FLOOR = 15000;       // SAFETY: Minimum $15,000 Liquidity (prevents violent rugs)
+    const QUALITY_VOL_5M_MIN = 10000;      // SAFETY: Minimum $10,000 Volume in 5 minutes (requires proven momentum)
     const QUALITY_MIN_AGE_SEC = 0;       // FETCHER OLD-PROFIT: old routes.ts did NOT pre-cut <2m tokens
     const QUALITY_MIN_M5_SELLS = 2;      // FETCHER OLD-PROFIT: old routes.ts required only 2 sells at safety stage, not 10 at discovery
 
     console.log(`[FETCHER-PATCH] old-profit funnel active | liq>=${QUALITY_LIQ_FLOOR} vol5m>=${QUALITY_VOL_5M_MIN} minAge=${QUALITY_MIN_AGE_SEC}s minSells=${QUALITY_MIN_M5_SELLS}`);
 
     // Gecko trending + new pools (Normal fetch is fine, high rate limits)
-    const geckoTrendingPages = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
-    const geckoNewPages = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]; // WIDENED: extra pages on new_pools to catch recently-graduated PumpSwap pairs (locked LP) that appear on pages 6-10
+    const geckoTrendingPages = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]; // WIDENED v3: 15->20 pages
+    const geckoNewPages = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30]; // WIDENED v3: 20->30 pages to catch more new PumpSwap pairs
     const geckoFetches = [
       ...geckoTrendingPages.map(page =>
         withTimeout(
@@ -1998,8 +2038,12 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
             const wq = (global as any).scannerWarmingQueue as Map<string, number>;
             const nowMs = Date.now();
             
-            if (require('fs').existsSync('candidates.csv')) {
-                const lines = require('fs').readFileSync('candidates.csv', 'utf8').trim().split('\n').slice(-150);
+            if (existsSync('candidates.csv')) {
+                const fileData = await fsPromises.readFile('candidates.csv', 'utf8');
+                let idx = fileData.length - 1;
+                let nl = 0;
+                while (idx >= 0 && nl < 151) { if (fileData[idx] === '\n') nl++; idx--; }
+                const lines = fileData.slice(idx + 1).trim().split('\n');
                 const csvMints = lines.map((l: string) => l.split(',')[1]).filter((m: string) => m && m.length > 32);
                 for (const mint of csvMints) {
                     if (!wq.has(mint)) wq.set(mint, nowMs);
@@ -2238,7 +2282,10 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
         for (const bToken of res.data.tokens) {
           const liq = bToken.liquidity || 0;
           const vol24h = bToken.v24hUSD || 0;
-          const vol5m = vol24h / 288;
+          const vol5m = (bToken.v5mUSD != null) ? Number(bToken.v5mUSD)
+            : (bToken.v1hUSD != null) ? Number(bToken.v1hUSD) / 12
+            : (bToken.v30mUSD != null) ? Number(bToken.v30mUSD) / 6
+            : vol24h / 288; // FIX(2026-06-27): use real short-window volume; flat 24h/288 understated momentum ~100x and starved the feed
           const ageSec = (Date.now() - (bToken.first_seen || 0) * 1000) / 1000;
           
           funnelSeen++; if (liq < QUALITY_LIQ_FLOOR) { cutLiq++; continue; }
@@ -2366,7 +2413,6 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
           + ` age=${m.ageSeconds ?? 0}s mlScore=${r.mlScore ?? "N/A"} rej=[${r.rejectionReason || ""}]`;
       });
       console.log(`[DIAG-SCOREWALL] top${diagTop.length} (pre-safety): ` + diagTop.join("  ||  "));
-      const fs = require('fs');
       const latestScanData = results.slice(0, 3).map((r: any) => ({
          symbol: r.tokenSymbol,
          score: r.combinedScore,
@@ -2375,7 +2421,7 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
          bp5m: r.metrics?.bp5m || 0,
          volMom: r.metrics?.volMomentum || 0
       }));
-      fs.writeFileSync('last_scan.json', JSON.stringify({ timestamp: new Date().toISOString(), topCoins: latestScanData }));
+      fsPromises.writeFile('last_scan.json', JSON.stringify({ timestamp: new Date().toISOString(), topCoins: latestScanData })).catch(() => {});
     } catch (diagErr) { console.log("[DIAG-SCOREWALL] error", diagErr); }
 
     // LEVER 2: rugcheck-prescreen the single top scored candidate per cycle. Result is cached in
@@ -2492,11 +2538,11 @@ async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair): Pr
     // remains a hard veto in LIVE. In PAPER only, admit the graded flag so the shadow ledger can measure
     // whether these high-score/high-liq SNIPER setups are actually rugs or the only tradable market supply.
     // Disable with PAPER_PROBE_GRADED_LP_VETO=false. No env var can relax this in live here.
-    const _paperProbeGradedLp = _safetyTradingMode !== "live" && String(process.env.PAPER_PROBE_GRADED_LP_VETO ?? "true").toLowerCase() !== "false";
+    const _paperProbeGradedLp = false; // DISABLED BY USER: hard-veto in all modes
     // MICRO-WALLET COMPROMISE: If a token has unlocked LP but has survived for >1 hour, the dev likely isn't pulling a sudden rug. Allow it for safe 15% scavenger wins.
     const tokenAgeSecs = pair.pairCreatedAt ? (Date.now() - pair.pairCreatedAt) / 1000 : 0;
-    const isOldEnoughToBypassVeto = false; // VETO STRICTLY ON, AGE BYPASS OFF
-    const _gradedLpAdmit = !!(_gradedLpRisk && !_absoluteVetoRisk && (_paperProbeGradedLp || isOldEnoughToBypassVeto || String(process.env.RELAX_GRADED_LP_VETO_LIVE).toLowerCase() === "true"));
+    const isOldEnoughToBypassVeto = false; // DISABLED BY USER: age does not bypass LP veto
+    const _gradedLpAdmit = false; // DISABLED BY USER: always hard-veto Large Amount of LP Unlocked
     const _vetoRisk = _absoluteVetoRisk || ((_gradedLpRisk && !_gradedLpAdmit) ? _gradedLpRisk : undefined);
     if (_gradedLpRisk && !_absoluteVetoRisk && !_vetoRisk) {
       console.log(`[LP-VETO-PAPER-PROBE:${_safetyTradingMode.toUpperCase()}] $${pair.baseToken?.symbol || tokenAddress} ADMITTED graded "${_gradedLpRisk.name}" for PAPER/SHADOW measurement only; LIVE remains hard-vetoed. rugScoreNorm=${data?.score_normalised}`);
@@ -2698,6 +2744,29 @@ async function runScanCycle() {
         return; 
     }
     
+    // ── REGIME GATE ────────────────────────────────────────────
+    // Only allow NEW entries when the live feed shows a genuine runner regime:
+    // breadth of strong 5m movers, OR one exceptionally hot mover. Exits are managed
+    // in a separate loop, so a cold regime stands down on BUYS only — open positions
+    // continue to be tracked and exit on the engineered geometry.
+    if (REGIME_GATE.enabled) {
+      const regimePool = candidates.slice(0, REGIME_GATE.sampleSize);
+      let hotRunners = 0, peakPct = 0;
+      for (const rc of regimePool) {
+        const pc5 = Number((rc as any)?.metrics?.priceChange5m ?? 0);
+        const v5  = Number((rc as any)?.metrics?.vol5m ?? 0);
+        const bp5 = Number((rc as any)?.metrics?.bp5m ?? 0);
+        if (pc5 > peakPct) peakPct = pc5;
+        if (pc5 >= REGIME_GATE.runnerPct && v5 >= REGIME_GATE.runnerVolUsd && bp5 >= REGIME_GATE.runnerBp) hotRunners++;
+      }
+      const regimeHot = hotRunners >= REGIME_GATE.minRunners || peakPct >= REGIME_GATE.strongSinglePct;
+      if (!regimeHot) {
+        console.log(`[REGIME] Cold feed — standing down on new entries (hotRunners=${hotRunners}/${REGIME_GATE.minRunners} @≥${REGIME_GATE.runnerPct}% & $${REGIME_GATE.runnerVolUsd} & bp${REGIME_GATE.runnerBp}, peak5m=${peakPct.toFixed(1)}% < ${REGIME_GATE.strongSinglePct}%). Open positions still managed.`);
+        return;
+      }
+      console.log(`[REGIME] Runner regime ON — hotRunners=${hotRunners}, peak5m=${peakPct.toFixed(1)}%. Entries enabled.`);
+    }
+
     const liveBal = (status.tradingMode === "live" && jupiterService) ? await readLiveWalletBalance() : paperBalance;
     const effectiveBalance = Math.max(0, liveBal - reservedCapital);
     
@@ -2911,7 +2980,7 @@ async function runScanCycle() {
       let paperExplorationLane = false;
       const paperExploreEnabled = String(process.env.PAPER_EXPLORE_LANE ?? "true").toLowerCase() !== "false";
       const paperLikeMode = status.tradingMode !== "live";
-      const _mx = scoring.metrics || {};
+      const _mx = (scoring.metrics as any) || {};
       const _softExploreFails: string[] = [];
       const _exploreLiq = Number(_mx.liq || 0);
       const _explorePx5m = Number(_mx.priceChange5m || 0);
@@ -3315,9 +3384,11 @@ async function runScanCycle() {
         // the position even had a chance to breathe. Immediately unwind the position and
         // block re-entry for the session.
         const OVERSPEND_TOLERANCE = 1.10;
-        if (actualSizeSol > scoring.sizeSol * OVERSPEND_TOLERANCE && buyResult.tokenAmountRaw > BigInt(0)) {
-          const overspendPct = ((actualSizeSol / scoring.sizeSol) - 1) * 100;
-          console.error(`[OVERSPEND] $${candidate.tokenSymbol} — spent ${actualSizeSol.toFixed(4)} SOL vs target ${scoring.sizeSol.toFixed(4)} SOL (+${overspendPct.toFixed(0)}% over) — IMMEDIATE UNWIND`);
+        const buyFeesSol = buyResult.feesSol ?? 0;
+        const pureSwapCostSol = Math.max(0, actualSizeSol - buyFeesSol);
+        if (pureSwapCostSol > scoring.sizeSol * OVERSPEND_TOLERANCE && buyResult.tokenAmountRaw > BigInt(0)) {
+          const overspendPct = ((pureSwapCostSol / scoring.sizeSol) - 1) * 100;
+          console.error(`[OVERSPEND] $${candidate.tokenSymbol} — spent ${pureSwapCostSol.toFixed(4)} SOL (excl fees) vs target ${scoring.sizeSol.toFixed(4)} SOL (+${overspendPct.toFixed(0)}% over) — IMMEDIATE UNWIND`);
           try {
             const unwindSlippage = 1500; // 15% — accept heavy slippage to exit hostile pool fast
             await jupiterService!.sellToken(candidate.tokenAddress, buyResult.tokenAmountRaw, unwindSlippage);
@@ -3341,7 +3412,6 @@ async function runScanCycle() {
           continue;
         }
 
-        const buyFeesSol = buyResult.feesSol ?? 0;
         totalExposureSol += actualSizeSol;
         tradedAddresses.set(addr, Date.now());
         openAddresses.add(addr);
@@ -3808,7 +3878,9 @@ async function checkOpenPositions() {
               // hard exits in both modes.
               const _patchPaperProbeGradedLp = trade.tradingMode !== "live" && String(process.env.PAPER_PROBE_GRADED_LP_VETO ?? "true").toLowerCase() !== "false";
               const _patchLegacyRelaxGraded = String(process.env.RELAX_GRADED_LP_VETO_LIVE || "").toLowerCase() === "true";
-              const _patchSuppressLpMidHold = _patchPaperProbeGradedLp || _patchLegacyRelaxGraded;
+              const _patchTokenAgeSecs = pair?.pairCreatedAt ? (Date.now() - pair.pairCreatedAt) / 1000 : 0;
+              const _patchIsOldEnough = _patchTokenAgeSecs > 3600;
+              const _patchSuppressLpMidHold = _patchPaperProbeGradedLp || _patchLegacyRelaxGraded || _patchIsOldEnough;
               const _patchHasLpUnlocked = _patchSuppressLpMidHold
                 ? false  // LP unlock was accepted at entry/probe — do NOT re-exit mid-hold for the same reason
                 : _patchRisks.some((r: any) => String(r?.name || "").toLowerCase().includes("lp unlocked"));
@@ -4525,7 +4597,7 @@ async function checkOpenPositions() {
                 console.warn(`[SELL] Liq drained ${entryLiqForSell.toFixed(0)}→${currentLiqForSell.toFixed(0)} — auto-escalating exit slippage ${exitSlippageBps}→${autoEscalatedExitBps}bps`);
               }
               // Sell impact guard: pre-check
-              // ── ANTI-RUG ROUTING GUARD (DEAD POOL DETECTION) ──
+              // ─�� ANTI-RUG ROUTING GUARD (DEAD POOL DETECTION) ──
               let sellQuote: any = null;
               try {
                 sellQuote = await jupiterService!.fetchQuote(trade.tokenAddress, SOL_MINT, tokenAmountRaw.toString(), [autoEscalatedExitBps]);
@@ -4961,7 +5033,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
   app.get(api.trades.list.path, async (req, res) => { res.json(await storage.getTrades()); });
   app.get(api.candidates.list.path, async (req, res) => { res.json(await storage.getCandidates()); });
-  app.get("/api/candidates/live", async (_req, res) => { try { res.json(await fetchDexScreenerCandidates()); } catch (e) { console.error(e); res.json([]); } });
+  app.get("/api/candidates/live", async (_req, res) => { res.json(liveCandidatesCache); });
   app.get("/api/trades/open", async (_req, res) => { try { res.json(await storage.getOpenTrades()); } catch (e) { console.error(e); res.status(500).json({ error: "Failed to fetch open trades" }); } });
   app.get("/api/engine/stats", async (_req, res) => {
     try {
@@ -5134,7 +5206,6 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.delete("/api/latency/log", (req, res) => {
     if (!requireAdmin(req, res)) return;
-    const { clearLatencyLog } = require("./jupiter");
     clearLatencyLog();
     res.json({ cleared: true });
   });
