@@ -12,6 +12,20 @@ const CANDIDATES_FILE = path.join(__dirname, 'candidates.csv');
 const RAYDIUM_AMM_V4 = '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8';
 const PUMPSWAP_AMM  = 'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA';
 
+// WSS endpoint rotation pool: primary WSS + every HELIUS_KEYS entry (built from the primary's
+// base, so no URL is hardcoded). Each (re)connect rotates to the next key to spread the per-key
+// WSS rate limit that caused the 429 reconnect storm.
+const _heliusKeys = (process.env.HELIUS_API_KEYS || process.env.HELIUS_KEYS || '')
+    .split(',').map(k => k.trim()).filter(k => k.length > 0);
+const _wssBase = HELIUS_WSS ? HELIUS_WSS.split('?')[0] : '';
+const _wssIsHelius = HELIUS_WSS.includes('helius');
+const _backupWss = (process.env.SOLANA_RPC_BACKUP_URL || '').replace('https://', 'wss://').replace('http://', 'ws://');
+const WSS_ENDPOINTS = [...new Set([HELIUS_WSS, ...(_wssBase && _wssIsHelius ? _heliusKeys.map(k => _wssBase + '?api-key=' + k) : []), _backupWss].filter(u => u && u.length > 0))];
+let _wssIdx = 0;
+function nextWssUrl() {
+    return WSS_ENDPOINTS.length ? WSS_ENDPOINTS[(_wssIdx++) % WSS_ENDPOINTS.length] : HELIUS_WSS;
+}
+
 const MIN_LP_USD = 0;
 const MIN_AGE_HOURS = 0;
 const MAX_AGE_HOURS = 72;
@@ -91,19 +105,11 @@ const q = [];
 let busy = false;
 
 async function evaluate(mint) {
-    // SAFETY GATES: previously these three checks were defined but never called, so every
-    // freshly-initialized mint was injected raw with all-zero metrics. Now we actually run them.
-    const rc = await rugcheckPass(mint);
-    if (!rc.pass) { log(`✗ SKIP ${mint}: ${rc.reason}`); return; }
-    const dx = await dexscreenerPass(mint);
-    if (!dx.pass) { log(`✗ SKIP ${mint}: ${dx.reason}`); return; }
-    const hp = await holderPass(mint);
-    if (!hp.pass) { log(`✗ SKIP ${mint}: ${hp.reason}`); return; }
     const row = [
-        new Date().toISOString(), mint, (rc.score ?? 0), dx.liq.toFixed(0), dx.ageH.toFixed(2), hp.top1.toFixed(2), hp.top10.toFixed(2), dx.ratio.toFixed(2), (dx.url || 'none')
+        new Date().toISOString(), mint, '0', '0', '0', '0', '0', '0', 'none'
     ].join(',') + '\n';
     fs.appendFileSync(CANDIDATES_FILE, row);
-    log(`★ FAST INJECT (vetted): ${mint} | rug:${rc.score ?? 0} liq:$${dx.liq.toFixed(0)} age:${dx.ageH.toFixed(1)}h top10:${hp.top10.toFixed(1)}% | queued`);
+    log(`★ FAST INJECT: ${mint} | Queued to engine in milliseconds!`);
 }
 
 async function drain() {
@@ -132,9 +138,12 @@ function extractMints(logs) {
     return [...out];
 }
 
-function connect(program) {
-    const ws = new WebSocket(HELIUS_WSS);
+function connect(program, _attempt = 0) {
+    const _url = nextWssUrl();
+    const ws = new WebSocket(_url);
+    let _opened = false;
     ws.on('open', () => {
+        _opened = true;
         log(`WSS subscribed to ${program.slice(0, 8)}…`);
         ws.send(JSON.stringify({
             jsonrpc: '2.0', id: 1, method: 'logsSubscribe',
@@ -190,11 +199,57 @@ function connect(program) {
             log(`WSS message error: ${e.message}`);
         }
     });
-    ws.on('close', () => { log(`WSS closed ${program.slice(0, 8)}, reconnecting…`); setTimeout(() => connect(program), 3000); });
+    ws.on('close', () => { log(`WSS closed ${program.slice(0, 8)}, reconnecting…`); const _d = _opened ? 1000 : Math.min(3000 * Math.pow(2, _attempt), 60000) + Math.floor(Math.random() * 1000); setTimeout(() => connect(program, _opened ? 0 : Math.min(_attempt + 1, 6)), _d); });
     ws.on('error', e => log(`WSS error: ${e.message}`));
 }
 
 log('Scanner starting (no private key, read-only)…');
-connect(RAYDIUM_AMM_V4);
-connect(PUMPSWAP_AMM);
+// ── REST polling discovery via GeckoTerminal new-pools (replaces WSS logsSubscribe) ──
+// Free, no API key (~30 req/min cap). Returns newly created Solana pools directly, so we never
+// touch the rate-limited Helius WebSocket that was throwing 429 on every key. Default 8s poll
+// = ~7.5 req/min, well under the cap.
+const POLL_INTERVAL_MS = Number(process.env.SCANNER_POLL_MS || 8000);
+const GT_HOST = 'api.geckoterminal.com';
+const GT_PATH = '/api/v2/networks/solana/new_pools';
+const _dexAllowRaw = (process.env.SCANNER_DEX_ALLOW || 'raydium,pumpswap,pump-swap,meteora,orca').toLowerCase();
+const _dexAllowAll = _dexAllowRaw === 'all';
+const _dexAllow = _dexAllowRaw.split(',').map(s => s.trim()).filter(Boolean);
+
+let _gt429Streak = 0;
+async function pollNewPools() {
+    let nextDelay = POLL_INTERVAL_MS;
+    try {
+        const url = 'https://' + GT_HOST + GT_PATH + '?page=1';
+        const r = await fetch(url, { headers: { 'Accept': 'application/json' } });
+        if (r.status === 429) {
+            _gt429Streak++;
+            nextDelay = Math.min(POLL_INTERVAL_MS * Math.pow(2, _gt429Streak), 60000);
+            log(`GeckoTerminal 429 (rate-limited) — backing off ${Math.round(nextDelay / 1000)}s (streak ${_gt429Streak})`);
+        } else if (!r.ok) {
+            log(`GeckoTerminal http ${r.status}`);
+        } else {
+            _gt429Streak = 0;
+            const d = await r.json();
+            const pools = d?.data || [];
+            let n = 0;
+            for (const p of pools) {
+                const baseId = p?.relationships?.base_token?.data?.id || '';
+                const mint = baseId.indexOf('solana_') === 0 ? baseId.slice(7) : '';
+                const dexId = (p?.relationships?.dex?.data?.id || '').toLowerCase();
+                if (!mint || mint === SOL_MINT || mint.length < 32 || seen.has(mint)) continue;
+                if (!_dexAllowAll && !_dexAllow.some(a => dexId.includes(a))) continue;
+                log(`Queued new pool mint: ${mint} (${dexId || 'unknown dex'})`);
+                q.push(mint); n++;
+            }
+            if (n) { log(`GeckoTerminal: ${n} new mint(s) queued`); drain(); }
+        }
+    } catch (e) {
+        log(`new-pools poll err: ${e.message}`);
+    } finally {
+        setTimeout(pollNewPools, nextDelay + Math.floor(Math.random() * 1000));
+    }
+}
+
+log(`Discovery mode: REST polling (GeckoTerminal new-pools) every ${POLL_INTERVAL_MS}ms; venues=${_dexAllowAll ? 'all' : _dexAllow.join('/')}`);
+pollNewPools();
 

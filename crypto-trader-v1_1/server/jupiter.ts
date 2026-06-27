@@ -103,7 +103,7 @@ export class RpcRotator {
       const url = node?.url || "https://api.mainnet-beta.solana.com";
       let conn = this.connectionCache.get(url);
       if (!conn) {
-        conn = new Connection(url, "confirmed");
+        conn = new Connection(url, { commitment: "confirmed", disableRetryOnRateLimit: true });
         this.connectionCache.set(url, conn);
       }
       try {
@@ -142,7 +142,7 @@ export class RpcRotator {
     const url = node?.url || "https://api.mainnet-beta.solana.com";
     let conn = this.connectionCache.get(url);
     if (!conn) {
-      conn = new Connection(url, "confirmed");
+      conn = new Connection(url, { commitment: "confirmed", disableRetryOnRateLimit: true });
       this.connectionCache.set(url, conn);
     }
     return conn;
@@ -153,7 +153,7 @@ export class RpcRotator {
       // Skip endpoints still in their blacklist window
       if (!ep.healthy && ep.restoredAt && Date.now() < ep.restoredAt) continue;
       try {
-        const conn = new Connection(ep.url, "confirmed");
+        const conn = new Connection(ep.url, { commitment: "confirmed", disableRetryOnRateLimit: true });
         await Promise.race([conn.getVersion(), new Promise((_, r) => setTimeout(() => r(new Error()), 3000))]);
         ep.healthy = true;
         ep.restoredAt = undefined;
@@ -316,7 +316,7 @@ export class JupiterService {
     ];
     for (const endpoint of publicEndpoints) {
       try {
-        const conn = new Connection(endpoint, "confirmed");
+        const conn = new Connection(endpoint, { commitment: "confirmed", disableRetryOnRateLimit: true });
         const lamports = await Promise.race([
           conn.getBalance(publicKey, "confirmed"),
           new Promise<never>((_, r) => setTimeout(() => r(new Error("TIMEOUT")), 8_000))

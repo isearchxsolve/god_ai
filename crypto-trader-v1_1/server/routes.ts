@@ -270,7 +270,7 @@ let engineSettings = {
 
   // -- Conviction Gates --
   minScoreToTrade: 70, 
-  microMinScoreToTrade: 70, 
+  microMinScoreToTrade: 65, // AI-TUNE(2026-06-27): 70 -> 65. Shadow ledger +3.65%/trade over n=45 (win 64.4%, growth +76.79%); dense momentum band at 65-69 (rej=[], strong mlScore) was being skipped by 1-9 pts. Whale-distribution exit (proved on KNICKS +7%), post-loss cooldown, and price-drift gate now protect entries, so admitting the 65-69 band is +EV. FLOOR at 65 — do not go lower; keep collecting shadow data.
   
   // -- SNIPER Mode Calibration --
   sniperMinScore: 20, 
@@ -1493,11 +1493,18 @@ function disableBirdeyeKey(apiKey: string, cooldownMs: number = 24 * 60 * 60_000
 
 /** Short, account-wide backoff for a transient 429 rate-limit (60 rpm shared cap). */
 function throttleBirdeye429(apiKey: string, cooldownMs: number = 30_000) {
-  const until = Date.now() + cooldownMs;
+  const now = Date.now();
+  // AI-FIX(2026-06-27): suppress thundering-herd log spam. A scan fires up to 20 smart-money
+  // calls via Promise.all; when the single shared key is rate-limited they ALL 429 in the same
+  // tick. Only log on the transition INTO backoff, not once per concurrent call.
+  const alreadyBackedOff = _birdeyeKeys.length > 0 && _birdeyeKeys.every(ks => now < ks.disabledUntil);
+  const until = now + cooldownMs;
   for (const ks of _birdeyeKeys) {
     if (until > ks.disabledUntil) ks.disabledUntil = until;
   }
-  console.warn(`[BIRDKEY] 429 rate-limit (shared 60rpm) on key ${apiKey.slice(0, 8)}... — all keys backed off ${Math.round(cooldownMs / 1000)}s.`);
+  if (!alreadyBackedOff) {
+    console.warn(`[BIRDKEY] 429 rate-limit (shared 60rpm) on key ${apiKey.slice(0, 8)}... — all keys backed off ${Math.round(cooldownMs / 1000)}s.`);
+  }
 }
 
 /** Check if any Birdeye key is currently available. */
@@ -1608,19 +1615,47 @@ async function fetchSmartMoneyBirdeye(tokenAddress: string, bypassCache: boolean
 const whaleSnapshotCache = new Map<string, { bal: Record<string, number>; ts: number }>();
 const FREE_WHALE_TIMEOUT_MS = Number(process.env.FREE_WHALE_TIMEOUT_MS) || 8_000;
 
+// Birdeye-independent RPC pool for the free whale layer. Rotates across SOLANA_RPC_URL, the
+// HELIUS_KEYS rotation pool, and the QuickNode/tertiary backups so whale snapshots never pound a
+// single key and add to RPC 429 pressure. Round-robin start + fail-over on 429/!ok/error.
+function _buildWhaleRpcPool(): string[] {
+  const pool: string[] = [];
+  const primary = process.env.SOLANA_RPC_URL?.trim();
+  if (primary) pool.push(primary);
+  const heliusKeys = (process.env.HELIUS_API_KEYS ?? process.env.HELIUS_KEYS ?? "")
+    .split(",").map(k => k.trim()).filter(k => k.length > 0);
+  const _hbase = primary && primary.includes("helius") ? primary.split("?")[0] : "";
+  if (_hbase) for (const k of heliusKeys) pool.push(_hbase + "?api-key=" + k); //`https://mainnet.helius-rpc.com/?api-key=${k}`);
+  const backup = process.env.SOLANA_RPC_BACKUP_URL?.trim();
+  if (backup) pool.push(backup);
+  const tertiary = process.env.SOLANA_RPC_TERTIARY_URL?.trim();
+  if (tertiary) pool.push(tertiary);
+  return [...new Set(pool)]; // de-dupe, preserve order
+}
+let _whaleRpcPool: string[] | null = null;
+let _whaleRpcIdx = 0;
+
 async function fetchTokenLargestAccountsRaw(tokenAddress: string): Promise<Array<{ owner: string; amount: number }>> {
-  const rpc = process.env.SOLANA_RPC_URL;
-  if (!rpc) return [];
-  const resp = await fetch(rpc, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getTokenLargestAccounts", params: [tokenAddress, { commitment: "confirmed" }] }),
-    signal: AbortSignal.timeout(FREE_WHALE_TIMEOUT_MS),
-  });
-  if (!resp.ok) return [];
-  const j: any = await resp.json();
-  const vals: any[] = j?.result?.value || [];
-  return vals.map((v: any) => ({ owner: String(v.address), amount: Number(v.uiAmount) || 0 })).filter((h: any) => h.amount > 0);
+  if (!_whaleRpcPool) _whaleRpcPool = _buildWhaleRpcPool();
+  const pool = _whaleRpcPool;
+  if (pool.length === 0) return [];
+  const maxTries = Math.min(pool.length, 3); // rotate through up to 3 keys before giving up
+  for (let t = 0; t < maxTries; t++) {
+    const rpc = pool[(_whaleRpcIdx++) % pool.length];
+    try {
+      const resp = await fetch(rpc, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getTokenLargestAccounts", params: [tokenAddress, { commitment: "confirmed" }] }),
+        signal: AbortSignal.timeout(FREE_WHALE_TIMEOUT_MS),
+      });
+      if (!resp.ok) continue; // 429/5xx -> rotate to next key
+      const j: any = await resp.json();
+      const vals: any[] = j?.result?.value || [];
+      return vals.map((v: any) => ({ owner: String(v.address), amount: Number(v.uiAmount) || 0 })).filter((h: any) => h.amount > 0);
+    } catch { continue; } // timeout/network -> rotate to next key
+  }
+  return [];
 }
 
 async function fetchWhaleAccumulationFree(tokenAddress: string): Promise<SmartMoneySignal> {

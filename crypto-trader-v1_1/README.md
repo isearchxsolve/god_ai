@@ -20,17 +20,4 @@ set PRIORITY_FEE_LAMPORTS=100000
 
 set DATABASE_URL=postgres://postgres:postgres@localhost:5432/crypto_db
 
-python solana_hybrid_sniper_ultra/ml_server.py
-
-npm run build
-
-
-npx cross-env NODE_ENV=development tsx server/index.ts
-
-node fast_scanner.cjs
-
-
-
-or
-
 npm run build && start "ML Server" cmd /k "python solana_hybrid_sniper_ultra/ml_server.py" && start "Fast Scanner" cmd /k "node fast_scanner.cjs" && start "TSX Server" cmd /k "npx cross-env NODE_ENV=development tsx server/index.ts"
