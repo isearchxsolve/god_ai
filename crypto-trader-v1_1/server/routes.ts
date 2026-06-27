@@ -1390,7 +1390,7 @@ async function fetchTokenPriceForExit(tokenAddress: string): Promise<{ price: nu
 // already accumulating. Reuses the existing BIRDEYE_API_KEY.
 // Endpoint: GET /defi/v2/tokens/top_traders (documented; x-chain: solana)
 // ────────────────────────────────────────────────────────────────
-interface SmartMoneySignal { count: number; netBuyers: number; topRealizedPnl: number; whaleCount: number; whaleNetBuyers: number; whaleNetSellers: number; washSuspects: number; }
+interface SmartMoneySignal { count: number; netBuyers: number; topRealizedPnl: number; whaleCount: number; whaleNetBuyers: number; whaleNetSellers: number; washSuspects: number; source?: "birdeye" | "free"; }
 // ── BIRDEYE MULTI-KEY ROTATION SYSTEM (AI-FIX 2026-06-24) ─────────────────────────
 // Birdeye free-tier keys have a daily CU limit (~1000 CU). A single key runs out mid-session
 // and the bot goes blind (no discovery, no whale tape). Multi-key rotation distributes load
@@ -1508,9 +1508,15 @@ function birdeyeHasAvailableKey(): boolean {
 
 // Lazy: must be a function because key loading is now deferred past module-load (see
 // _ensureBirdeyeKeysLoaded). Evaluating as a const here would always be false.
+function freeWhaleEnabled(): boolean {
+  // Free whale layer needs only a Solana RPC (getTokenLargestAccounts). Default-on; FREE_WHALE_LAYER=false disables.
+  return !!process.env.SOLANA_RPC_URL && String(process.env.FREE_WHALE_LAYER || "true").toLowerCase() !== "false";
+}
 function smartMoneyEnabled(): boolean {
   _ensureBirdeyeKeysLoaded();
-  return _birdeyeKeys.length > 0;
+  // Enabled when EITHER Birdeye keys exist OR the free RPC whale layer is available, so whale
+  // scoring survives Birdeye outages (the free layer is advisory: entry scoring only).
+  return _birdeyeKeys.length > 0 || freeWhaleEnabled();
 }
 
 // AI-FIX(2026-06-24d): shared Birdeye 429 cooldown. The free/Lite tier is CU-metered; once a
@@ -1531,7 +1537,7 @@ const WHALE_DISTRIBUTION_SELLERS = Number(process.env.WHALE_DISTRIBUTION_SELLERS
 const WHALE_WASH_RATIO = 0.7; // buy/sell balance above which a high-frequency whale is treated as a wash-trader (fake volume)
 const smartMoneyCache = new Map<string, { data: SmartMoneySignal; ts: number }>();
 
-async function fetchSmartMoneyConvergence(tokenAddress: string, bypassCache: boolean = false): Promise<SmartMoneySignal> {
+async function fetchSmartMoneyBirdeye(tokenAddress: string, bypassCache: boolean = false): Promise<SmartMoneySignal> {
   const empty: SmartMoneySignal = { count: 0, netBuyers: 0, topRealizedPnl: 0, whaleCount: 0, whaleNetBuyers: 0, whaleNetSellers: 0, washSuspects: 0 };
   if (!smartMoneyEnabled() || !tokenAddress) return empty;
   const cached = smartMoneyCache.get(tokenAddress);
@@ -1583,7 +1589,7 @@ async function fetchSmartMoneyConvergence(tokenAddress: string, bypassCache: boo
         if (realized > topRealizedPnl) topRealizedPnl = realized;
       }
     }
-    const sig: SmartMoneySignal = { count, netBuyers, topRealizedPnl, whaleCount, whaleNetBuyers, whaleNetSellers, washSuspects };
+    const sig: SmartMoneySignal = { count, netBuyers, topRealizedPnl, whaleCount, whaleNetBuyers, whaleNetSellers, washSuspects, source: "birdeye" };
     smartMoneyCache.set(tokenAddress, { data: sig, ts: Date.now() });
     return sig;
   } catch (e: any) {
@@ -1593,6 +1599,82 @@ async function fetchSmartMoneyConvergence(tokenAddress: string, bypassCache: boo
 }
 
 // Dominant Layer-3 score term: number of profitable wallets net-buying this token.
+// ===== FREE WHALE LAYER (Birdeye-independent, advisory) =====
+// Approximates whale ACCUMULATION/DISTRIBUTION from getTokenLargestAccounts snapshots compared
+// across scans via the free Solana RPC. It cannot see wallet PnL, so it never sets netBuyers
+// (the profitable smart-money bonus stays Birdeye-only). It is ADVISORY: it feeds entry SCORING
+// only. The exit + LP-relax-veto paths require source==="birdeye", so a noisy snapshot can never
+// force-exit a winner or block an entry. Default-on; disable with FREE_WHALE_LAYER=false.
+const whaleSnapshotCache = new Map<string, { bal: Record<string, number>; ts: number }>();
+const FREE_WHALE_TIMEOUT_MS = Number(process.env.FREE_WHALE_TIMEOUT_MS) || 8_000;
+
+async function fetchTokenLargestAccountsRaw(tokenAddress: string): Promise<Array<{ owner: string; amount: number }>> {
+  const rpc = process.env.SOLANA_RPC_URL;
+  if (!rpc) return [];
+  const resp = await fetch(rpc, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getTokenLargestAccounts", params: [tokenAddress, { commitment: "confirmed" }] }),
+    signal: AbortSignal.timeout(FREE_WHALE_TIMEOUT_MS),
+  });
+  if (!resp.ok) return [];
+  const j: any = await resp.json();
+  const vals: any[] = j?.result?.value || [];
+  return vals.map((v: any) => ({ owner: String(v.address), amount: Number(v.uiAmount) || 0 })).filter((h: any) => h.amount > 0);
+}
+
+async function fetchWhaleAccumulationFree(tokenAddress: string): Promise<SmartMoneySignal> {
+  const empty: SmartMoneySignal = { count: 0, netBuyers: 0, topRealizedPnl: 0, whaleCount: 0, whaleNetBuyers: 0, whaleNetSellers: 0, washSuspects: 0, source: "free" };
+  if (!freeWhaleEnabled() || !tokenAddress) return empty;
+  let holders: Array<{ owner: string; amount: number }> = [];
+  try { holders = await fetchTokenLargestAccountsRaw(tokenAddress); } catch { return empty; }
+  if (holders.length === 0) return empty;
+  // Vault exclusion: the AMM pool / bonding-curve vault is almost always the dominant token account.
+  // Drop any holder controlling > 30% of the top-20 aggregate so liquidity flow (buys drain the pool
+  // vault) is never misread as whale "distribution".
+  const total = holders.reduce((a, h) => a + h.amount, 0) || 1;
+  const genuine = holders.filter(h => h.amount / total <= 0.30);
+  const curBal: Record<string, number> = {};
+  for (const h of genuine) curBal[h.owner] = h.amount;
+  const prior = whaleSnapshotCache.get(tokenAddress);
+  whaleSnapshotCache.set(tokenAddress, { bal: curBal, ts: Date.now() });
+  // Need >=3 genuine whales and a usable prior snapshot (15s..60min old) to read direction.
+  // Otherwise stay neutral -- never fabricate flow on first sight.
+  const priorAge = prior ? Date.now() - prior.ts : Infinity;
+  if (genuine.length < 3 || priorAge < 15_000 || priorAge > 60 * 60_000) {
+    return { ...empty, whaleCount: genuine.length };
+  }
+  let whaleNetBuyers = 0, whaleNetSellers = 0;
+  const MIN_DELTA = 0.05; // require >=5% per-wallet change to count (noise filter)
+  const seen = new Set<string>();
+  for (const owner of Object.keys(curBal)) {
+    seen.add(owner);
+    const prev = prior!.bal[owner];
+    if (prev === undefined) { whaleNetBuyers++; continue; } // new whale entered the top holders
+    if (prev > 0) {
+      const chg = (curBal[owner] - prev) / prev;
+      if (chg >= MIN_DELTA) whaleNetBuyers++;
+      else if (chg <= -MIN_DELTA) whaleNetSellers++;
+    }
+  }
+  for (const owner of Object.keys(prior!.bal)) {
+    if (!seen.has(owner)) whaleNetSellers++; // fell out of the top holders => distributed
+  }
+  // Cap the contribution: an approximate signal may lift, but never max out, the score.
+  whaleNetBuyers = Math.min(whaleNetBuyers, 3);
+  whaleNetSellers = Math.min(whaleNetSellers, 4);
+  return { count: 0, netBuyers: 0, topRealizedPnl: 0, whaleCount: genuine.length, whaleNetBuyers, whaleNetSellers, washSuspects: 0, source: "free" };
+}
+
+// Wrapper: Birdeye first (sees PnL -> powers smart-money bonus AND exit/veto), free layer as the
+// Birdeye-independent fallback for scoring.
+async function fetchSmartMoneyConvergence(tokenAddress: string, bypassCache: boolean = false): Promise<SmartMoneySignal> {
+  if (!tokenAddress) return { count: 0, netBuyers: 0, topRealizedPnl: 0, whaleCount: 0, whaleNetBuyers: 0, whaleNetSellers: 0, washSuspects: 0 };
+  const bird = await fetchSmartMoneyBirdeye(tokenAddress, bypassCache);
+  if (bird.count > 0 || bird.whaleCount > 0) return bird;
+  return await fetchWhaleAccumulationFree(tokenAddress);
+}
+
 function smartMoneyScore(sig: SmartMoneySignal | null): number {
   if (!sig) return 0;
   if (sig.netBuyers >= 5) return 30;
@@ -2544,7 +2626,7 @@ async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair): Pr
     // MICRO-WALLET COMPROMISE: If a token has unlocked LP but has survived for >1 hour, the dev likely isn't pulling a sudden rug. Allow it for safe 15% scavenger wins.
     const tokenAgeSecs = pair.pairCreatedAt ? (Date.now() - pair.pairCreatedAt) / 1000 : 0;
     const isOldEnoughToBypassVeto = false; // DISABLED BY USER: age does not bypass LP veto
-    const _gradedLpAdmit = false; // DISABLED BY USER: always hard-veto Large Amount of LP Unlocked
+    const _gradedLpAdmit = _safetyTradingMode !== "live"; // PAPER: admit graded "Large Amount of LP Unlocked" so the discriminator + shadow ledger can measure the real post-entry rug rate at ZERO real-money risk. LIVE: always hard-veto (unchanged).
     const _vetoRisk = _absoluteVetoRisk || ((_gradedLpRisk && !_gradedLpAdmit) ? _gradedLpRisk : undefined);
     if (_gradedLpRisk && !_absoluteVetoRisk && !_vetoRisk) {
       console.log(`[LP-VETO-PAPER-PROBE:${_safetyTradingMode.toUpperCase()}] $${pair.baseToken?.symbol || tokenAddress} ADMITTED graded "${_gradedLpRisk.name}" for PAPER/SHADOW measurement only; LIVE remains hard-vetoed. rugScoreNorm=${data?.score_normalised}`);
@@ -2575,7 +2657,7 @@ async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair): Pr
       const _highOwnFlag = _hasRisk("high ownership");
       const _fewLpProviders = _hasRisk("low amount of lp providers");
       console.log(`[LP-RELAX-PROFILE] $${pair.baseToken?.symbol || tokenAddress} whales=${_wc} accumQ=${_accumQ} netBuy=${_wBuy} netSell=${_wSell} wash=${_wash} | top10=${_top10Flag} highOwn=${_highOwnFlag} fewLP=${_fewLpProviders} | smEnabled=${smartMoneyEnabled()} dataPresent=${_wc > 0} norm=${data?.score_normalised}`);
-      if (_lpRelaxWhaleGateOn && _wc > 0) {
+      if (_lpRelaxWhaleGateOn && _wc > 0 && _wsig?.source === "birdeye") {
         // Only act when whale data is actually present. Two high-precision literature signals:
         //  (1) coordinated distribution: >= WHALE_DISTRIBUTION_SELLERS big wallets net-selling.
         //  (2) wash-dominated tape with ZERO genuine accumulation: organized fake volume / bundle.
@@ -2587,7 +2669,7 @@ async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair): Pr
         if (_lpRelaxGateReason) {
           console.log(`[LP-RELAX-GATE] $${pair.baseToken?.symbol || tokenAddress} VETO — ${_lpRelaxGateReason} (literature: organized group exit/bundle on unlocked LP)`);
         }
-      } else if (_lpRelaxWhaleGateOn && _wc === 0) {
+      } else if (_lpRelaxWhaleGateOn) {
         // FAIL-CLOSED FALLBACK (AI-FIX 2026-06-24b): the whale tape is the PRIMARY discriminator for
         // the LP-unlocked rug-pond, but it is BLIND here — Birdeye returned no data (observed
         // persistently as bdVol=0). The original posture fail-OPEN (admit) was chosen to avoid
@@ -2613,9 +2695,9 @@ async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair): Pr
         //   PAPER: topHolder >= 90% (was 25%), top5 >= 95% (was 60%), insider >= 50% (was 15%)
         //   LIVE:  topHolder >= 25%, top5 >= 60%, insider >= 15% (unchanged)
         const _paperLpRelax = _safetyTradingMode !== "live";
-        const _topHolderThresh = _paperLpRelax ? 101 : 101;
-        const _top5Thresh = _paperLpRelax ? 101 : 101;
-        const _insiderThresh = _paperLpRelax ? 101 : 101;
+        const _topHolderThresh = 25;  // single non-LP wallet >=25% can dump the whole float
+        const _top5Thresh = 60;       // top-5 non-LP wallets >=60% = coordinated-dump setup
+        const _insiderThresh = 15;    // flagged insiders >=15% of float
         const _conc = await fetchRugcheckConcentration(tokenAddress);
         if (_conc.available) {
           console.log(`[LP-RELAX-CONC] $${pair.baseToken?.symbol || tokenAddress} topHolder=${_conc.topHolderPct.toFixed(1)}% top5=${_conc.top5Pct.toFixed(1)}% insider=${_conc.insiderPct.toFixed(1)}%(${_conc.insiderCount}) holders=${_conc.totalHolders} lpLocked=${_conc.lpLockedPct.toFixed(0)}% (RugCheck full report — Birdeye-independent)`);
@@ -3913,7 +3995,8 @@ async function checkOpenPositions() {
           midHoldWhaleMs.set(trade.id, Date.now());
           try {
             const _wsig = await fetchSmartMoneyConvergence(trade.tokenAddress, true);
-            const _distributing = _wsig.whaleNetSellers >= WHALE_DISTRIBUTION_SELLERS && _wsig.whaleNetSellers > _wsig.whaleNetBuyers;
+            // EXIT trusts Birdeye flow only -- the free snapshot layer is advisory and must never force-exit a winner.
+            const _distributing = _wsig.source === "birdeye" && _wsig.whaleNetSellers >= WHALE_DISTRIBUTION_SELLERS && _wsig.whaleNetSellers > _wsig.whaleNetBuyers;
             if (_distributing && !(trade as any).__patchForceExit) {
               console.warn(`[WHALE-DISTRIBUTION] #${trade.id} ${trade.tokenSymbol} — top wallets flipped to net-selling (sellers=${_wsig.whaleNetSellers} buyers=${_wsig.whaleNetBuyers} wash=${_wsig.washSuspects}); exiting ahead of dump.`);
               (trade as any).__patchForceExit = `WHALE_DISTRIBUTION (sellers=${_wsig.whaleNetSellers}, buyers=${_wsig.whaleNetBuyers})`;
