@@ -5,7 +5,7 @@ import { storage, initStorageWrapper } from "./storage";
 import { api } from "@shared/routes";
 import { checkAdvancedFilters } from "./advanced_filters";
 import { JupiterService, createJupiterService, SOL_MINT, MIN_FEE_BUFFER_SOL,getLatencyLog  } from "./jupiter";
-import { existsSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, readFileSync, writeFileSync, promises as fsPromises } from "fs";
 import { join as pathJoin } from "path";
 import { startHeartbeat, isHalted, healthState } from "./runtime-hooks";
 import { setDefaultResultOrder as __setDnsResultOrder } from "node:dns";
@@ -2017,8 +2017,12 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
             const wq = (global as any).scannerWarmingQueue as Map<string, number>;
             const nowMs = Date.now();
             
-            if (require('fs').existsSync('candidates.csv')) {
-                const lines = require('fs').readFileSync('candidates.csv', 'utf8').trim().split('\n').slice(-150);
+            if (existsSync('candidates.csv')) {
+                const fileData = await fsPromises.readFile('candidates.csv', 'utf8');
+                let idx = fileData.length - 1;
+                let nl = 0;
+                while (idx >= 0 && nl < 151) { if (fileData[idx] === '\n') nl++; idx--; }
+                const lines = fileData.slice(idx + 1).trim().split('\n');
                 const csvMints = lines.map((l: string) => l.split(',')[1]).filter((m: string) => m && m.length > 32);
                 for (const mint of csvMints) {
                     if (!wq.has(mint)) wq.set(mint, nowMs);
@@ -2385,7 +2389,6 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
           + ` age=${m.ageSeconds ?? 0}s mlScore=${r.mlScore ?? "N/A"} rej=[${r.rejectionReason || ""}]`;
       });
       console.log(`[DIAG-SCOREWALL] top${diagTop.length} (pre-safety): ` + diagTop.join("  ||  "));
-      const fs = require('fs');
       const latestScanData = results.slice(0, 3).map((r: any) => ({
          symbol: r.tokenSymbol,
          score: r.combinedScore,
@@ -2394,7 +2397,7 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
          bp5m: r.metrics?.bp5m || 0,
          volMom: r.metrics?.volMomentum || 0
       }));
-      fs.writeFileSync('last_scan.json', JSON.stringify({ timestamp: new Date().toISOString(), topCoins: latestScanData }));
+      fsPromises.writeFile('last_scan.json', JSON.stringify({ timestamp: new Date().toISOString(), topCoins: latestScanData })).catch(() => {});
     } catch (diagErr) { console.log("[DIAG-SCOREWALL] error", diagErr); }
 
     // LEVER 2: rugcheck-prescreen the single top scored candidate per cycle. Result is cached in
@@ -2930,7 +2933,7 @@ async function runScanCycle() {
       let paperExplorationLane = false;
       const paperExploreEnabled = String(process.env.PAPER_EXPLORE_LANE ?? "true").toLowerCase() !== "false";
       const paperLikeMode = status.tradingMode !== "live";
-      const _mx = scoring.metrics || {};
+      const _mx = (scoring.metrics as any) || {};
       const _softExploreFails: string[] = [];
       const _exploreLiq = Number(_mx.liq || 0);
       const _explorePx5m = Number(_mx.priceChange5m || 0);
@@ -3334,9 +3337,11 @@ async function runScanCycle() {
         // the position even had a chance to breathe. Immediately unwind the position and
         // block re-entry for the session.
         const OVERSPEND_TOLERANCE = 1.10;
-        if (actualSizeSol > scoring.sizeSol * OVERSPEND_TOLERANCE && buyResult.tokenAmountRaw > BigInt(0)) {
-          const overspendPct = ((actualSizeSol / scoring.sizeSol) - 1) * 100;
-          console.error(`[OVERSPEND] $${candidate.tokenSymbol} — spent ${actualSizeSol.toFixed(4)} SOL vs target ${scoring.sizeSol.toFixed(4)} SOL (+${overspendPct.toFixed(0)}% over) — IMMEDIATE UNWIND`);
+        const buyFeesSol = buyResult.feesSol ?? 0;
+        const pureSwapCostSol = Math.max(0, actualSizeSol - buyFeesSol);
+        if (pureSwapCostSol > scoring.sizeSol * OVERSPEND_TOLERANCE && buyResult.tokenAmountRaw > BigInt(0)) {
+          const overspendPct = ((pureSwapCostSol / scoring.sizeSol) - 1) * 100;
+          console.error(`[OVERSPEND] $${candidate.tokenSymbol} — spent ${pureSwapCostSol.toFixed(4)} SOL (excl fees) vs target ${scoring.sizeSol.toFixed(4)} SOL (+${overspendPct.toFixed(0)}% over) — IMMEDIATE UNWIND`);
           try {
             const unwindSlippage = 1500; // 15% — accept heavy slippage to exit hostile pool fast
             await jupiterService!.sellToken(candidate.tokenAddress, buyResult.tokenAmountRaw, unwindSlippage);
@@ -3360,7 +3365,6 @@ async function runScanCycle() {
           continue;
         }
 
-        const buyFeesSol = buyResult.feesSol ?? 0;
         totalExposureSol += actualSizeSol;
         tradedAddresses.set(addr, Date.now());
         openAddresses.add(addr);
@@ -3827,7 +3831,9 @@ async function checkOpenPositions() {
               // hard exits in both modes.
               const _patchPaperProbeGradedLp = trade.tradingMode !== "live" && String(process.env.PAPER_PROBE_GRADED_LP_VETO ?? "true").toLowerCase() !== "false";
               const _patchLegacyRelaxGraded = String(process.env.RELAX_GRADED_LP_VETO_LIVE || "").toLowerCase() === "true";
-              const _patchSuppressLpMidHold = _patchPaperProbeGradedLp || _patchLegacyRelaxGraded;
+              const _patchTokenAgeSecs = pair?.pairCreatedAt ? (Date.now() - pair.pairCreatedAt) / 1000 : 0;
+              const _patchIsOldEnough = _patchTokenAgeSecs > 3600;
+              const _patchSuppressLpMidHold = _patchPaperProbeGradedLp || _patchLegacyRelaxGraded || _patchIsOldEnough;
               const _patchHasLpUnlocked = _patchSuppressLpMidHold
                 ? false  // LP unlock was accepted at entry/probe — do NOT re-exit mid-hold for the same reason
                 : _patchRisks.some((r: any) => String(r?.name || "").toLowerCase().includes("lp unlocked"));

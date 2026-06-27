@@ -35,21 +35,10 @@ module.exports = {
       interpreter: 'node',
 
       env: {
+        ...process.env,
         NODE_ENV: 'production',
         PORT: '5000',
         SKIP_VITE: 'true',
-        // Forward all .env vars already loaded above
-        DATABASE_URL:             process.env.DATABASE_URL,
-        WALLET_PRIVATE_KEY:       process.env.WALLET_PRIVATE_KEY,
-        SOLANA_RPC_URL:           process.env.SOLANA_RPC_URL,
-        SOLANA_RPC_BACKUP_URL:    process.env.SOLANA_RPC_BACKUP_URL,
-        SOLANA_RPC_TERTIARY_URL:  process.env.SOLANA_RPC_TERTIARY_URL,
-        PUBLIC_KEY:               process.env.PUBLIC_KEY,
-        BIRDEYE_API_KEY:          process.env.BIRDEYE_API_KEY,
-        ML_SERVICE_URL:           process.env.ML_SERVICE_URL || 'http://localhost:5001',
-        JITO_ENGINE_URL:          process.env.JITO_ENGINE_URL,
-        JITO_TIP_LAMPORTS:        process.env.JITO_TIP_LAMPORTS,
-        PRIORITY_FEE_LAMPORTS:    process.env.PRIORITY_FEE_LAMPORTS,
       },
 
       // Restart policy — live-runner handles internal crashes itself;
@@ -91,6 +80,34 @@ module.exports = {
       // Logging
       out_file: path.join(ROOT, 'logs', 'pm2-ml-out.log'),
       error_file: path.join(ROOT, 'logs', 'pm2-ml-err.log'),
+      merge_logs: true,
+      log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
+
+      instances: 1,
+      exec_mode: 'fork',
+    },
+
+    // "?"? 3. Wallet Reconciliation Watchdog "?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?"?
+    {
+      name: 'crypto-watchdog',
+      script: path.join(ROOT, 'wallet_watchdog.cjs'),
+      cwd: ROOT,
+      interpreter: 'node',
+
+      env: {
+        DATABASE_URL:       process.env.DATABASE_URL,
+        SOLANA_RPC_URL:     process.env.SOLANA_RPC_URL,
+        WALLET_PRIVATE_KEY: process.env.WALLET_PRIVATE_KEY,
+      },
+
+      autorestart: true,
+      watch: false,
+      max_restarts: 10,
+      min_uptime: '15s',
+      restart_delay: 5000,
+
+      out_file: path.join(ROOT, 'logs', 'pm2-watchdog-out.log'),
+      error_file: path.join(ROOT, 'logs', 'pm2-watchdog-err.log'),
       merge_logs: true,
       log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
 
