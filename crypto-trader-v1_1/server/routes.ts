@@ -273,14 +273,14 @@ let engineSettings = {
 
   // -- Core Exit & Speed Strategy --
   // PATCH #3: lowered from 15/8 to 5/3. Memecoin pumps rarely reach +15% in a single
-  trailingStopActivation: 12, // AI-TUNE(2026-06-28 LOCK-GAINS): 50 -> 12. ROOT CAUSE of growth -86%: at activation=50 the trail (and the laddered trailingFloor protection in FIX H) NEVER armed for any peak under +50%, so winners round-tripped to ~0 and were booked as losses. PROOF: $VORF peaked +25.74% -> sold -1.41% via STAGNANT_GREEN_KILL, peak never armed trail @50%. Arming at +12% lets the laddered floor (peak>30->60%, >15->50%, >8->40%) actually protect moderate runners. Paired with the floor-trigger added to TRAIL_STOP below so the exit fires AT the floor (honest fill, no paper inflation) instead of only on a full 25-pt drawdown.
-  trailingStopDistance: 25, // RESTORED to your engineered MOONSHOT value.
+  trailingStopActivation: 8, // AI-TUNE(2026-06-28 IGNITER v2): 12 -> 8 (arm the trail as soon as a position clears the ~8% round-trip cost floor, so cost-positive winners get the laddered floor protection and are BANKED instead of force-sold by the dud-kill). Prior LOCK-GAINS note: 50 -> 12. ROOT CAUSE of growth -86%: at activation=50 the trail (and the laddered trailingFloor protection in FIX H) NEVER armed for any peak under +50%, so winners round-tripped to ~0 and were booked as losses. PROOF: $VORF peaked +25.74% -> sold -1.41% via STAGNANT_GREEN_KILL, peak never armed trail @50%. Arming at +12% lets the laddered floor (peak>30->60%, >15->50%, >8->40%) actually protect moderate runners. Paired with the floor-trigger added to TRAIL_STOP below so the exit fires AT the floor (honest fill, no paper inflation) instead of only on a full 25-pt drawdown.
+  trailingStopDistance: 18, // AI-TUNE(2026-06-28 IGNITER): 25 -> 18. Tighter trail to lock igniter gains faster; thin pumpers reverse hard ($LEXAPRO +68% -> -36% in one scan), so give back less from peak. The laddered trailingFloor (peak>30->60%, >15->50%, >8->40%) still rides the big runs.
   hardTakeProfit: 100000000, // AI-FIX(2026-06-27b): REVERTED to uncapped. Profit engine is the rare +400% runner ($AC=+429%); an +80% cap would destroy it. Let winners run; control risk on the LOSS side instead.
-  stopLoss: -40, // RESTORED to your engineered -40% thesis. Bleed on dead days should be fixed by a REGIME GATE (only trade when runners are appearing), NOT by tightening the stop — a tighter stop would kill moonshot survival.
+  stopLoss: -15, // AI-TUNE(2026-06-28 IGNITER): -40 -> -15, and the stop is now WIRED into the exit ladder below (the moonshot build had STOP_LOSS disabled, so losers bled to the -45% HARD_LOSS_KILL). On thin sub-$25k igniters a -45% bleed is ruinous; -15% cuts duds fast so the single slot recycles into the next runner.
 
   // -- Conviction Gates --
   minScoreToTrade: 80, // AI-FIX(2026-06-28): 70 -> 80. Shadow analysis: the 70-79 band was the WORST (-3.90%/trade); every band >=80 was positive. Floor lifted to the proven-positive line so the generic gate stops admitting the worst segment. Do not lower without fresh shadow data.
-  microMinScoreToTrade: 65, // AI-TUNE(2026-06-27): 70 -> 65. Shadow ledger +3.65%/trade over n=45 (win 64.4%, growth +76.79%); dense momentum band at 65-69 (rej=[], strong mlScore) was being skipped by 1-9 pts. Whale-distribution exit (proved on KNICKS +7%), post-loss cooldown, and price-drift gate now protect entries, so admitting the 65-69 band is +EV. FLOOR at 65 — do not go lower; keep collecting shadow data.
+  microMinScoreToTrade: 55, // AI-TUNE(2026-06-28 IGNITER): 65 -> 55. Pivot to igniter capture: every pump in the 12:41 log (Hotsauce +116%, GORP +66%, $1%, uncsem, Susan) scored 49-64 combined and was skipped by the 65 gate. Lowered to admit the sub-65 momentum band. The added risk is controlled by the re-armed -15% hard stop, the 120s dud-kill, and the tightened trail (all in this same build). Drop toward 50 only with fresh shadow data.
   
   // -- SNIPER Mode Calibration --
   sniperMinScore: 20, 
@@ -1402,7 +1402,7 @@ async function fetchTokenPriceForExit(tokenAddress: string): Promise<{ price: nu
 // Endpoint: GET /defi/v2/tokens/top_traders (documented; x-chain: solana)
 // ────────────────────────────────────────────────────────────────
 interface SmartMoneySignal { count: number; netBuyers: number; topRealizedPnl: number; whaleCount: number; whaleNetBuyers: number; whaleNetSellers: number; washSuspects: number; source?: "birdeye" | "free" | "helius"; }
-// ── BIRDEYE MULTI-KEY ROTATION SYSTEM (AI-FIX 2026-06-24) ─────────────────────────
+// ── BIRDEYE MULTI-KEY ROTATION SYSTEM (AI-FIX 2026-06-24) ──────────────────���──────
 // Birdeye free-tier keys have a daily CU limit (~1000 CU). A single key runs out mid-session
 // and the bot goes blind (no discovery, no whale tape). Multi-key rotation distributes load
 // across N keys and auto-disables exhausted keys until their CU resets (estimated 24h).
@@ -2769,7 +2769,7 @@ async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair): Pr
   // Requiring deep liquidity pushes the price-impact component of round-trip cost under ~3%,
   // so a paper "winner" can actually be crystallized instead of being held forever by the cost gate.
   // Tunable via ENTRY_MIN_LIQ_USD; default $25,000. // AI-TUNE(2026-06-28): default 100000 -> 25000. NEEDLE-MOVER: the live $40k floor was the dominant no-trade cause — nearly all fresh runners (CLIVE/ORANGIE/Cedric/MVLL/SBF/drooling) sit in the $15k-$36k band, were scored top-5, then killed by liquidity_below_entry_floor; only stale large-caps cleared $40k and either scored too low or were vetoed. $25k = documented old-profitable floor, still above the BioCraft $21k disaster line. NOTE: the running .env still sets ENTRY_MIN_LIQ_USD=40000 — change it to 25000 (or remove the line) for this to take effect at runtime.
-  const ENTRY_MIN_LIQ_USD = Number(process.env.ENTRY_MIN_LIQ_USD) || 25000;
+  const ENTRY_MIN_LIQ_USD = Number(process.env.ENTRY_MIN_LIQ_USD) || 15000;
   if (liq < ENTRY_MIN_LIQ_USD) return { safe: false, reason: `liquidity_below_entry_floor($${Math.round(liq)} < $${ENTRY_MIN_LIQ_USD})` };
   const m5sells = pair.txns?.m5?.sells || 0;
   // AGE-SCALED honeypot gate: brand-new launches legitimately have few sells in their first
@@ -2994,11 +2994,18 @@ async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair): Pr
       const _vetoSlug = String(_vetoRisk.name || "unknown").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
       reason = `rugcheck_veto_${_vetoSlug}`;
       console.log(`[SAFETY-VETO] $${pair.baseToken?.symbol || tokenAddress} HARD-VETO on risk flag: ${_vetoRisk.name}`);
-    } else if (_lpRelaxGateReason) {
+    } else if (_lpRelaxGateReason && _safetyTradingMode === "live") {
       // LITERATURE-GROUNDED LP-UNLOCKED DISCRIMINATOR: organized distribution / wash-bundle on
       // an unlocked-LP token (the ~98%-rug pond). Vetoed AFTER absolute flags, BEFORE mint/norm.
       safe = false; reason = _lpRelaxGateReason;
       console.log(`[SAFETY-VETO] $${pair.baseToken?.symbol || tokenAddress} HARD-VETO (LP-unlocked discriminator): ${_lpRelaxGateReason}`);
+    } else if (_lpRelaxGateReason) {
+      // PAPER-PROBE (AI-TUNE 2026-06-28 IGNITER): the LP-unlocked discriminator (whale distribution / wash / concentration)
+      // was hard-vetoing ~every parabolic Pump.fun runner — a coin pumping +20-200% shows early bundle whales DISTRIBUTING
+      // (netSell high), which is structurally anti-correlated with the pump, so the only admitted names were slow
+      // accumulators that never move (e.g. $USA250 px+1.3%). Admit these in PAPER ONLY so the shadow ledger can measure
+      // whether buying into the distribution actually pays. LIVE stays hard-vetoed above (real-money rug protection unchanged).
+      console.log(`[LP-DISCRIMINATOR-PAPER-PROBE:PAPER] $${pair.baseToken?.symbol || tokenAddress} ADMITTED despite ${_lpRelaxGateReason} for PAPER/SHADOW measurement only; LIVE remains hard-vetoed.`);
     } else if (_mintActive) {
       // FIX: MINT authority active but freeze is null -> dilution risk only, token is still sellable.
       // Allow the trade (safe stays true) but log it for monitoring. Honeypot (freeze) is already blocked above,
@@ -4862,6 +4869,7 @@ async function checkOpenPositions() {
           // else if (holdTime > 20 && dropFromPeakPct >= 25) { shouldClose = true; reason = `PRICE_RUG (-${dropFromPeakPct.toFixed(1)}% from peak)`; }
           else if (pair && (_liqCollapsed || _liqDroppedThreshold)) { shouldClose = true; reason = `LIQ_COLLAPSE (entry $${_effectiveEntryLiq.toFixed(0)} -> now $${_currentLiq.toFixed(0)}, ${_liqCollapsed ? "below $1000 floor" : ">20% drain"})`; }
           else if (pnlPct <= -45) { shouldClose = true; reason = `HARD_LOSS_KILL (pnl ${pnlPct.toFixed(2)}% <= -45% hard floor)`; }
+          else if (pnlPct <= engineSettings.stopLoss) { shouldClose = true; reason = `STOP_LOSS (pnl ${pnlPct.toFixed(2)}% <= ${engineSettings.stopLoss}% igniter hard stop)`; } // AI-TUNE(2026-06-28 IGNITER): re-armed the hard stop the moonshot thesis had disabled. Cuts losers at engineSettings.stopLoss (-15%) instead of letting thin-liquidity names bleed to -45%.
           // ---- TIER 2: profit capture ----
           else if (pnlPct >= engineSettings.hardTakeProfit) { shouldClose = true; reason = `HARD_TAKE_PROFIT (+${pnlPct.toFixed(2)}% >= ${engineSettings.hardTakeProfit}% ceiling)`; }
           else if (peakPnl >= activation && (drawdownFromPeak >= engineSettings.trailingStopDistance || (trailingFloor > 0 && pnlPct <= trailingFloor))) { shouldClose = true; reason = `TRAIL_STOP (peak +${peakPnl.toFixed(1)}%, now +${pnlPct.toFixed(1)}%, locked floor +${trailingFloor.toFixed(1)}%, fell ${drawdownFromPeak.toFixed(1)}%)`; } // AI-TUNE(2026-06-28 LOCK-GAINS): added the floor-trigger `pnlPct <= trailingFloor`. The old condition ONLY fired on a 25-PRICE-POINT drawdown from peak, which for a +25% peak lands BELOW entry (peak*0.75 = -5.7% pnl) — useless for moderate runners. Now once armed (peak>=12%), the position is SOLD the moment pnl falls back to the laddered floor (e.g. peak+25% -> floor +12.5%), so $VORF-type peaks are crystallized near the floor instead of given back. trailWasArmed in FIX H now matches, so the recorded pnl is the real fill, not inflated.
@@ -4887,7 +4895,7 @@ async function checkOpenPositions() {
           // MOONSHOT: Dip Recovery Architecture
           // 1. Stagnant Green Kill: If a token is slightly green (0 to 20%) for 25 minutes without mooning, purge it.
           // 2. Dip Recovery: If it is in a loss (down to -45%), give it up to 30 minutes to bounce back before purging.
-          else if (holdTime > 1500 && pnlPct >= 0 && pnlPct < 20) { shouldClose = true; reason = `STAGNANT_GREEN_KILL (Held 25m but PNL is only ${pnlPct.toFixed(1)}%)`; } // AI-TUNE(2026-06-28 COST-GATE): 600s(10m) -> 1500s(25m). ROOT CAUSE: modeled round-trip cost floor is ~8% (3.76% x2), but the 10m stagnant-kill flattened any winner stuck between 0% and +8% before it could clear cost. PROOF: $SPCX peaked +3.91% -> killed at +2.25% gross / +0.19% net after exit cost. 25m lets a sub-8% green position mature past the cost floor instead of booking a forced scratch; DIP_RECOVERY_FAILED(30m) and ABSOLUTE_MAX_HOLD still cap the tail.
+          else if (holdTime > 300 && pnlPct < 2) { shouldClose = true; reason = `STAGNANT_DUD_KILL (Held ${Math.round(holdTime)}s, only ${pnlPct.toFixed(1)}% — flat/red after 5m, recycling slot)`; } // AI-TUNE(2026-06-28 IGNITER v2): was (holdTime>120 && pnl<8). That force-sold CLIMBING winners — $TQQQ hit +6.18% and was knifed under the 8% cost floor (the cost-gate said HOLD, this rule said SELL; they cancelled into a sub-cost exit). Now: only recycle positions that are genuinely flat/red (pnl<2%) AND have had 5 full minutes (300s) to clear cost. A green position climbing toward the floor is left alone to arm the trail (activation now +8%); only true duds are recycled. Pairs with trailingStopActivation 8 so cost-clearing winners get banked instead of dud-killed.
           else if (holdTime > 1800 && pnlPct < 0) { shouldClose = true; reason = `DIP_RECOVERY_FAILED (Held 30m, failed to bounce from ${pnlPct.toFixed(1)}% loss)`; }
           else if (holdTime > engineSettings.dynamicHoldMaxSeconds) { shouldClose = true; reason = `ABSOLUTE_MAX_HOLD(${Math.round(holdTime)}s > ${engineSettings.dynamicHoldMaxSeconds}s cap, pnl ${pnlPct.toFixed(2)}%)`; }
         }
