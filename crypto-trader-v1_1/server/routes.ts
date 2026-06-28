@@ -2289,29 +2289,7 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
       )
     ];
 
-    const birdEyeFetch = birdeyeHasAvailableKey()
-      ? withTimeout(
-          (async () => {
-            const _bk = getNextBirdeyeKey();
-            if (!_bk) return { data: { tokens: [] } };
-            try {
-              const r = await fetch("https://public-api.birdeye.so/public/trending?list_address=solana", {
-                headers: { "X-API-KEY": _bk, "Accept": "application/json" },
-                signal: AbortSignal.timeout(8000)
-              });
-              if (!r.ok) {
-                let _b = ""; try { _b = String(await r.clone().text()).slice(0, 220); } catch {}
-                if (/compute units usage limit exceeded/i.test(_b)) disableBirdeyeKey(_bk);
-                else if (r.status === 429) throttleBirdeye429(_bk);
-                return { data: { tokens: [] } };
-              }
-              return r.json();
-            } catch { return { data: { tokens: [] } }; }
-          })(),
-          10000,
-          "BirdEye"
-        ).catch(() => ({ data: { tokens: [] } }))
-      : Promise.resolve({ data: { tokens: [] } });
+    // AI-FIX(2026-06-28): Birdeye trending discovery removed (full Birdeye discovery retirement). GeckoTerminal top-pools used instead.
 
     // UPDATED: Iterative Throttled Search for DexScreener
     const dexResults = [];
@@ -2394,7 +2372,7 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
     // is pure noise reduction.
     try {
         const extraSourceAddrs = new Set<string>();
-        let jupVerifiedCount = 0, jupTopCount = 0, birdEyeVolCount = 0, birdEyeLiqCount = 0, geckoVolCount = 0; // AI-FIX(2026-06-24h): declare Source 4 counter. V3 LIQ now returns real tokens, so the existing birdEyeLiqCount++ path executes; without this declaration it throws ReferenceError and prevents LIQ addresses from contributing.
+        let jupVerifiedCount = 0, jupTopCount = 0;
 
         // ── Source 1: Rolling hydration of Jupiter's verified token universe.
         try {
@@ -2444,102 +2422,9 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
             }
         } catch (e: any) { console.warn("[SRC:JUP-TOP] failed:", e?.message || e); }
 
-        // ── Source 3: Birdeye top-volume tokens (uses BIRDEYE_API_KEY). 24h USD volume = real demand signal.
-        // AI-FIX(2026-06-24d): migrated /defi/tokenlist (deprecated, 400 Bad Request) -> /defi/v3/token/list
-        // with the correct V3 enum sort_by=volume_24h_usd (old v24hUSD is now invalid). Gated behind the
-        // shared 429 cooldown.
-        // AI-FIX(2026-06-24i): remove min_liquidity from Birdeye V3 list calls. Live runs showed both VOL
-        // and LIQ returning 400 with otherwise-valid V3 sort params; docs confirm min_liquidity exists, but
-        // some Birdeye accounts reject that filter. We sort on Birdeye and let the local scorer/liquidity gates filter.
-        if (birdeyeHasAvailableKey() && Date.now() >= birdeyeRateLimitedUntil) {
-            try {
-                const _bk1 = getNextBirdeyeKey();
-                if (!_bk1) { /* all keys exhausted */ }
-                else {
-                const b: any = await withTimeout(
-                    fetch("https://public-api.birdeye.so/defi/v3/token/list?sort_by=volume_24h_usd&sort_type=desc&offset=0&limit=100", {
-                        headers: { "X-API-KEY": _bk1, "Accept": "application/json", "x-chain": "solana" },
-                        signal: AbortSignal.timeout(8000),
-                    }).then(async (r: any) => { if (!r.ok) { let body = ""; try { body = String(await r.text()).slice(0, 220); } catch {} const isCuExhausted = /compute units usage limit exceeded/i.test(body); const is429 = !isCuExhausted && (r.status === 429 || /rate|too many/i.test(body)); if (isCuExhausted) { disableBirdeyeKey(_bk1); birdeyeRateLimitedUntil = Date.now() + 10 * 60_000; } else if (is429) { throttleBirdeye429(_bk1); } console.warn(`[SRC:BIRDEYE-VOL] non-OK HTTP ${r.status} ${r.statusText || ""} on /defi/v3/token/list (NOT a timeout). CU-exhausted=${isCuExhausted ? "yes(24h account disable)" : "no"} 429=${is429 ? "yes(30s backoff)" : "no"}; 400 can also mean Birdeye CU exhausted.${body ? " body=" + body : ""}`); return null; } return r.json(); }),
-                    10_000,
-                    "Birdeye TopVolume"
-                ).catch(() => null);
-                const tokens = (b?.data?.items) || (b?.data?.tokens) || (b?.data && Array.isArray(b.data) ? b.data : null) || b?.tokens || [];
-                if (Array.isArray(tokens)) {
-                    for (const t of tokens) {
-                        const addr = t?.address || t?.tokenAddress || t?.mint;
-                        if (typeof addr === "string" && addr.length >= 32 && addr.length <= 64) {
-                            extraSourceAddrs.add(addr);
-                            birdEyeVolCount++;
-                        }
-                    }
-                }
-                } // end else (key available)
-            } catch (e: any) { console.warn("[SRC:BIRDEYE-VOL] failed:", e?.message || e); }
-        }
-
-        // ── Source 4: Birdeye top-liquidity tokens (depth signal, different from volume). 24h liq = quality.
-        // AI-FIX(2026-06-24d): migrated to /defi/v3/token/list (sort_by=liquidity). Gated behind the shared
-        // 429 cooldown so we don't fire a second call after the volume call already got rate-limited.
-        // AI-FIX(2026-06-24i): no min_liquidity query filter; keep filtering locally to avoid Birdeye 400s.
-        if (birdeyeHasAvailableKey() && Date.now() >= birdeyeRateLimitedUntil) {
-            try {
-                const _bk2 = getNextBirdeyeKey();
-                if (!_bk2) { /* all keys exhausted */ }
-                else {
-                const b2: any = await withTimeout(
-                    fetch("https://public-api.birdeye.so/defi/v3/token/list?sort_by=liquidity&sort_type=desc&offset=0&limit=100", {
-                        headers: { "X-API-KEY": _bk2, "Accept": "application/json", "x-chain": "solana" },
-                        signal: AbortSignal.timeout(8000),
-                    }).then(async (r: any) => { if (!r.ok) { let body = ""; try { body = String(await r.text()).slice(0, 220); } catch {} const isCuExhausted = /compute units usage limit exceeded/i.test(body); const is429 = !isCuExhausted && (r.status === 429 || /rate|too many/i.test(body)); if (isCuExhausted) { disableBirdeyeKey(_bk2); birdeyeRateLimitedUntil = Date.now() + 10 * 60_000; } else if (is429) { throttleBirdeye429(_bk2); } console.warn(`[SRC:BIRDEYE-LIQ] non-OK HTTP ${r.status} ${r.statusText || ""} on /defi/v3/token/list (NOT a timeout). CU-exhausted=${isCuExhausted ? "yes(24h account disable)" : "no"} 429=${is429 ? "yes(30s backoff)" : "no"}; 400 can also mean Birdeye CU exhausted.${body ? " body=" + body : ""}`); return null; } return r.json(); }),
-                    10_000,
-                    "Birdeye TopLiquidity"
-                ).catch(() => null);
-                const tokens2 = (b2?.data?.items) || (b2?.data?.tokens) || (b2?.data && Array.isArray(b2.data) ? b2.data : null) || b2?.tokens || [];
-                if (Array.isArray(tokens2)) {
-                    for (const t of tokens2) {
-                        const addr = t?.address || t?.tokenAddress || t?.mint;
-                        if (typeof addr === "string" && addr.length >= 32 && addr.length <= 64) {
-                            extraSourceAddrs.add(addr);
-                            birdEyeLiqCount++; // new counter variable
-                        }
-                    }
-                }
-                } // end else (key available)
-            } catch (e: any) { console.warn("[SRC:BIRDEYE-LIQ] failed:", e?.message || e); }
-        }
-
-        
-        // ── Source 5: Birdeye New Listings (meme_platform_enabled=true) 
-        if (birdeyeHasAvailableKey() && Date.now() >= birdeyeRateLimitedUntil) {
-            try {
-                const _bk3 = getNextBirdeyeKey();
-                if (_bk3) {
-                    const b3: any = await withTimeout(
-                        fetch("https://public-api.birdeye.so/defi/v2/tokens/new_listing?limit=20&meme_platform_enabled=true", {
-                            headers: { "X-API-KEY": _bk3, "Accept": "application/json", "x-chain": "solana" },
-                            signal: AbortSignal.timeout(8000),
-                        }).then(async (r: any) => { if (!r.ok) return null; return r.json(); }),
-                        10_000,
-                        "Birdeye NewListing"
-                    ).catch(() => null);
-                    
-                    const tokens3 = (b3?.data?.items) || [];
-                    if (Array.isArray(tokens3)) {
-                        for (const t of tokens3) {
-                            const addr = t?.address || t?.tokenAddress || t?.mint;
-                            if (typeof addr === "string" && addr.length >= 32 && addr.length <= 64) {
-                                extraSourceAddrs.add(addr);
-                            }
-                        }
-                    }
-                }
-            } catch (e: any) { console.warn("[SRC:BIRDEYE-NEW] failed:", e?.message || e); }
-        }
-
-        // AI-TUNE(2026-06-24): GeckoTerminal /pools endpoint does NOT support sort=h24_volume_usd_desc;
-        // live test returned gkVol=0. Dropped here — Birdeye top-volume (Source 3) already covers
-        // "top tokens by 24h volume" and is delivering 50 addresses/cycle reliably.
+        // AI-FIX(2026-06-28): Birdeye discovery (Sources 3/4/5 + trending) removed. Replaced by
+        // GeckoTerminal /networks/solana/pools (geckoTopFetches), default sort = combined 24h
+        // volume + liquidity. Per-token vol/liq enrichment still comes from DexScreener hydration.
 
         // Hydrate the union via DexScreener /latest/dex/tokens/{addrs} (same pipe as boost hydration).
         const extraAddrs = Array.from(extraSourceAddrs).slice(0, 200);
@@ -2550,10 +2435,21 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
                 dexResults.push(hydrated);
             } catch { /* skip chunk */ }
         }
-        console.log(`[SRC-XTRA] quality-only union=${extraAddrs.length} | jupVerified=${jupVerifiedCount} jupTop=${jupTopCount} bdVol=${birdEyeVolCount} bdLiq=${birdEyeLiqCount} gkVol=${geckoVolCount} (verified-set size=${jupiterVerifiedSet.size}, offset=${jupiterVerifiedHydrationOffset})`);
+        console.log(`[SRC-XTRA] quality-only union=${extraAddrs.length} | jupVerified=${jupVerifiedCount} jupTop=${jupTopCount} (verified-set size=${jupiterVerifiedSet.size}, offset=${jupiterVerifiedHydrationOffset})`);
     } catch (e: any) { console.warn("[SRC-XTRA] block failed:", e?.message || e); }
 
-    const geckoAndBirdeyeResults = await Promise.all([...geckoFetches, birdEyeFetch]);
+    // AI-FIX(2026-06-28): GeckoTerminal top-pools (default sort = combined 24h volume + liquidity).
+    // Direct free replacement for the removed Birdeye top-volume (Src3) and top-liquidity (Src4) lists.
+    const geckoTopPages = [1, 2, 3, 4, 5];
+    const geckoTopFetches = geckoTopPages.map(page =>
+      withTimeout(
+        fetch(`https://api.geckoterminal.com/api/v2/networks/solana/pools?page=${page}`, { headers: { "Accept": "application/json;version=20230302" }, signal: AbortSignal.timeout(8000) })
+          .then(r => r.ok ? r.json() : { data: [] }),
+        10000,
+        "Gecko TopPools"
+      ).catch(() => ({ data: [] }))
+    );
+    const geckoAndBirdeyeResults = await Promise.all([...geckoFetches, ...geckoTopFetches]);
     const resultsAll = [...geckoAndBirdeyeResults, ...dexResults];
 
     for (const res of resultsAll) {

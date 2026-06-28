@@ -20,6 +20,18 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 const execAsync = promisify(exec);
 
+// Cross-platform shell quoting for a JSON CLI argument. Unix /bin/sh accepts
+// single quotes verbatim, but Windows cmd.exe does NOT treat single quotes as
+// quoting characters, so a single-quoted JSON arg is passed literally (leading
+// quote char) and gmgn-cli rejects "--groups" as invalid JSON. On Windows we
+// wrap in double quotes and escape inner double quotes for the C-runtime argv
+// parser. This was the root cause of the Gold Hunter returning 0 signals.
+function shellQuoteJsonArg(json: string): string {
+  return process.platform === 'win32'
+    ? '"' + json.replace(/"/g, '\\"') + '"'
+    : "'" + json + "'";
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // TYPES
 // ─────────────────────────────────────────────────────────────────────────────
@@ -213,6 +225,28 @@ async function gmgn<T = unknown>(args: string): Promise<T | null> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// GMGN SHAPE NORMALIZERS
+// AI-FIX(2026-06-28f): gmgn-cli `--raw` returns the BARE payload (a top-level Array
+// for list endpoints, a bare object for token info) — NOT the enveloped
+// { code, msg, data } shape the callers assumed. Confirmed via [GMGN-DEBUG]:
+// `market signal --raw` returned a 16-element Array, so `feed.data` was always
+// undefined and every signal was silently dropped. These helpers accept BOTH shapes.
+async function gmgnList<T = unknown>(args: string): Promise<T[]> {
+  const r = await gmgn<any>(args);
+  if (Array.isArray(r)) return r as T[];
+  if (r && Array.isArray(r.data)) return r.data as T[];
+  if (r && r.data && Array.isArray(r.data.rank)) return r.data.rank as T[];
+  if (r && Array.isArray(r.rank)) return r.rank as T[];
+  return [];
+}
+async function gmgnObj<T = unknown>(args: string): Promise<T | null> {
+  const r = await gmgn<any>(args);
+  if (r == null) return null;
+  if (Array.isArray(r)) return (r[0] ?? null) as T | null;
+  if (r.data !== undefined && r.data !== null) return r.data as T;
+  return r as T;
+}
+
 // LAYER 1–2: BINARY GATES (instant reject)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -427,10 +461,9 @@ function scoreTier(score: number): GoldSignal['tier'] {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function fetchGmgnInfo(mint: string): Promise<GmgnTokenInfo | null> {
-  const data = await gmgn<{ data?: GmgnTokenInfo }>(
+  return await gmgnObj<GmgnTokenInfo>(
     `token info --chain ${CFG.CHAIN} --address ${mint}`
   );
-  return data?.data ?? null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -503,7 +536,7 @@ export async function pollSignalFeed(): Promise<GoldSignal[]> {
   const results: GoldSignal[] = [];
 
   // Smart money buy signals in $100K–$5M MCap range
-  const feed = await gmgn<{ data?: Array<{
+  type SignalEvent = {
     token_address: string;
     signal_type: number;
     trigger_mc?: number;
@@ -511,15 +544,19 @@ export async function pollSignalFeed(): Promise<GoldSignal[]> {
     ath?: number;
     signal_times_by_type?: Record<string, number>;
     cur_data?: { holder_count?: number; liquidity?: number };
-  }>}>(
-    `market signal --chain ${CFG.CHAIN} --groups '[{"signal_type":[12],"mc_min":50000,"mc_max":5000000}]'`
+    data?: { holder_count?: number; liquidity?: number };
+  };
+  const feed = await gmgnList<SignalEvent>(
+    `market signal --chain ${CFG.CHAIN} --groups ${shellQuoteJsonArg('[{"signal_type":[12],"mc_min":50000,"mc_max":5000000}]')}`
   );
 
-  if (!feed?.data?.length) return results;
+  // AI-FIX(2026-06-28f): gmgnList normalizes the bare-array payload gmgn-cli --raw returns.
+  console.log(`[GMGN-DEBUG] signal poll: ${feed.length} type-12 smart-money signal(s) parsed`);
+  if (!feed.length) return results;
 
   const now = Date.now();
 
-  for (const event of feed.data) {
+  for (const event of feed) {
     const mint = event.token_address;
 
     // Deduplicate: skip if seen < 5 min ago
@@ -528,7 +565,7 @@ export async function pollSignalFeed(): Promise<GoldSignal[]> {
     processedSignalMints.set(mint, now);
 
     // Quick pre-filter from signal data
-    const holders = event.cur_data?.holder_count ?? 0;
+    const holders = event.cur_data?.holder_count ?? event.data?.holder_count ?? 0;
     if (holders > 0 && holders < 100) continue; // too micro
 
     const smartBuyCount = event.signal_times_by_type?.[12] ?? 1;
@@ -564,16 +601,16 @@ const clusterMap = new Map<string, ClusterState>();
 export async function pollSmartMoneyFeed(): Promise<GoldSignal[]> {
   const results: GoldSignal[] = [];
 
-  const feed = await gmgn<{ data?: SmartMoneyTrade[] }>(
+  const feed = await gmgnList<SmartMoneyTrade>(
     `track smartmoney --chain ${CFG.CHAIN} --side buy --limit 100`
   );
 
-  if (!feed?.data?.length) return results;
+  if (!feed.length) return results;
 
   const now = Date.now();
   const windowStart = now / 1000 - CFG.CLUSTER_WINDOW_SEC;
 
-  for (const trade of feed.data) {
+  for (const trade of feed) {
     if (!trade.base_address) continue;
     const mint = trade.base_address;
 
@@ -592,7 +629,7 @@ export async function pollSmartMoneyFeed(): Promise<GoldSignal[]> {
     // Prune if window stale
     const oldest = Math.min(...c.timestamps);
     if (oldest < windowStart) {
-      c.makers = new Set(feed.data
+      c.makers = new Set(feed
         .filter(t => t.base_address === mint && t.timestamp > windowStart)
         .map(t => t.maker));
     }
@@ -645,7 +682,7 @@ export async function pollTrending(): Promise<GoldSignal[]> {
   const results: GoldSignal[] = [];
 
   // THE GOLD STANDARD BATCH FILTER — 12 filters server-side
-  const data = await gmgn<{ data?: Array<{ address: string; smart_degen_count?: number }> }>(
+  const data = await gmgnList<{ address: string; smart_degen_count?: number }>(
     `market trending --chain ${CFG.CHAIN} --interval 1h` +
     ` --platform Pump.fun --platform letsbonk --platform pump_mayhem --platform believe --platform boop` +
     ` --filter renounced --filter frozen --filter not_wash_trading --filter has_social --filter creator_hold` +
@@ -659,10 +696,10 @@ export async function pollTrending(): Promise<GoldSignal[]> {
     ` --order-by smart_degen_count --limit 50`
   );
 
-  if (!data?.data?.length) return results;
+  if (!data.length) return results;
 
   // Process in parallel (max 5 at a time)
-  const freshTokens = data.data.filter(t => !trendingProcessed.has(t.address));
+  const freshTokens = data.filter(t => !trendingProcessed.has(t.address));
   for (const token of freshTokens) trendingProcessed.add(token.address);
 
   // Batch process 5 at a time
@@ -694,7 +731,7 @@ export async function pollTrenches(): Promise<GoldSignal[]> {
   const results: GoldSignal[] = [];
 
   // TIER 1: Near-graduation (85-95% bonding curve)
-  const nearComp = await gmgn<{ data?: Array<{
+  const nearComp = await gmgnList<{
     address: string;
     smart_degen_count?: number;
     launchpad_progress?: number;
@@ -702,7 +739,7 @@ export async function pollTrenches(): Promise<GoldSignal[]> {
     volume_1h?: number;
     swaps_1h?: number;
     holder_count?: number;
-  }>}>(
+  }>(
     `market trenches --chain ${CFG.CHAIN} --type near_completion` +
     ` --launchpad-platform Pump.fun --launchpad-platform letsbonk` +
     ` --min-smart-degen-count 2` +
@@ -714,8 +751,8 @@ export async function pollTrenches(): Promise<GoldSignal[]> {
     ` --sort-by smart_degen_count --limit 50`
   );
 
-  if (nearComp?.data?.length) {
-    for (const token of nearComp.data) {
+  if (nearComp.length) {
+    for (const token of nearComp) {
       if (trenchesProcessed.has(token.address)) continue;
       trenchesProcessed.add(token.address);
 
@@ -739,7 +776,7 @@ export async function pollTrenches(): Promise<GoldSignal[]> {
   }
 
   // TIER 2: Just-graduated (completed, still early)
-  const completed = await gmgn<{ data?: Array<{ address: string }> }>(
+  const completed = await gmgnList<{ address: string }>(
     `market trenches --chain ${CFG.CHAIN} --type completed` +
     ` --launchpad-platform Pump.fun --launchpad-platform letsbonk` +
     ` --min-smart-degen-count 2` +
@@ -750,8 +787,8 @@ export async function pollTrenches(): Promise<GoldSignal[]> {
     ` --sort-by smart_degen_count --limit 30`
   );
 
-  if (completed?.data?.length) {
-    const freshGrads = completed.data.filter(t => !trenchesProcessed.has(t.address));
+  if (completed.length) {
+    const freshGrads = completed.filter(t => !trenchesProcessed.has(t.address));
     for (const token of freshGrads) trenchesProcessed.add(token.address);
 
     const batchResults = await Promise.all(
