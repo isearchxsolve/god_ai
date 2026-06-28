@@ -893,9 +893,6 @@ async function readLiveWalletBalance(): Promise<number> {
   return paperBalance;
 }
 let pendingBuys = new Map<string, number>();
-// GOLD HUNTER discovery queue: picks pushed by the background hunter loop and drained
-// by runScanCycle each cycle, then merged into the normal candidate stream.
-let goldInjectQueue: any[] = [];
 let recentlyAttemptedBuys = new Map<string, number>();
 // Tracks consecutive on-chain zero-balance reads per trade id.
 // A single zero read can be RPC lag — require 3 in a row before closing as desync.
@@ -2289,7 +2286,29 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
       )
     ];
 
-    // AI-FIX(2026-06-28): Birdeye trending discovery removed (full Birdeye discovery retirement). GeckoTerminal top-pools used instead.
+    const birdEyeFetch = birdeyeHasAvailableKey()
+      ? withTimeout(
+          (async () => {
+            const _bk = getNextBirdeyeKey();
+            if (!_bk) return { data: { tokens: [] } };
+            try {
+              const r = await fetch("https://public-api.birdeye.so/public/trending?list_address=solana", {
+                headers: { "X-API-KEY": _bk, "Accept": "application/json" },
+                signal: AbortSignal.timeout(8000)
+              });
+              if (!r.ok) {
+                let _b = ""; try { _b = String(await r.clone().text()).slice(0, 220); } catch {}
+                if (/compute units usage limit exceeded/i.test(_b)) disableBirdeyeKey(_bk);
+                else if (r.status === 429) throttleBirdeye429(_bk);
+                return { data: { tokens: [] } };
+              }
+              return r.json();
+            } catch { return { data: { tokens: [] } }; }
+          })(),
+          10000,
+          "BirdEye"
+        ).catch(() => ({ data: { tokens: [] } }))
+      : Promise.resolve({ data: { tokens: [] } });
 
     // UPDATED: Iterative Throttled Search for DexScreener
     const dexResults = [];
@@ -2372,7 +2391,7 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
     // is pure noise reduction.
     try {
         const extraSourceAddrs = new Set<string>();
-        let jupVerifiedCount = 0, jupTopCount = 0;
+        let jupVerifiedCount = 0, jupTopCount = 0, birdEyeVolCount = 0, birdEyeLiqCount = 0, geckoVolCount = 0; // AI-FIX(2026-06-24h): declare Source 4 counter. V3 LIQ now returns real tokens, so the existing birdEyeLiqCount++ path executes; without this declaration it throws ReferenceError and prevents LIQ addresses from contributing.
 
         // ── Source 1: Rolling hydration of Jupiter's verified token universe.
         try {
@@ -2422,9 +2441,102 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
             }
         } catch (e: any) { console.warn("[SRC:JUP-TOP] failed:", e?.message || e); }
 
-        // AI-FIX(2026-06-28): Birdeye discovery (Sources 3/4/5 + trending) removed. Replaced by
-        // GeckoTerminal /networks/solana/pools (geckoTopFetches), default sort = combined 24h
-        // volume + liquidity. Per-token vol/liq enrichment still comes from DexScreener hydration.
+        // ── Source 3: Birdeye top-volume tokens (uses BIRDEYE_API_KEY). 24h USD volume = real demand signal.
+        // AI-FIX(2026-06-24d): migrated /defi/tokenlist (deprecated, 400 Bad Request) -> /defi/v3/token/list
+        // with the correct V3 enum sort_by=volume_24h_usd (old v24hUSD is now invalid). Gated behind the
+        // shared 429 cooldown.
+        // AI-FIX(2026-06-24i): remove min_liquidity from Birdeye V3 list calls. Live runs showed both VOL
+        // and LIQ returning 400 with otherwise-valid V3 sort params; docs confirm min_liquidity exists, but
+        // some Birdeye accounts reject that filter. We sort on Birdeye and let the local scorer/liquidity gates filter.
+        if (birdeyeHasAvailableKey() && Date.now() >= birdeyeRateLimitedUntil) {
+            try {
+                const _bk1 = getNextBirdeyeKey();
+                if (!_bk1) { /* all keys exhausted */ }
+                else {
+                const b: any = await withTimeout(
+                    fetch("https://public-api.birdeye.so/defi/v3/token/list?sort_by=volume_24h_usd&sort_type=desc&offset=0&limit=100", {
+                        headers: { "X-API-KEY": _bk1, "Accept": "application/json", "x-chain": "solana" },
+                        signal: AbortSignal.timeout(8000),
+                    }).then(async (r: any) => { if (!r.ok) { let body = ""; try { body = String(await r.text()).slice(0, 220); } catch {} const isCuExhausted = /compute units usage limit exceeded/i.test(body); const is429 = !isCuExhausted && (r.status === 429 || /rate|too many/i.test(body)); if (isCuExhausted) { disableBirdeyeKey(_bk1); birdeyeRateLimitedUntil = Date.now() + 10 * 60_000; } else if (is429) { throttleBirdeye429(_bk1); } console.warn(`[SRC:BIRDEYE-VOL] non-OK HTTP ${r.status} ${r.statusText || ""} on /defi/v3/token/list (NOT a timeout). CU-exhausted=${isCuExhausted ? "yes(24h account disable)" : "no"} 429=${is429 ? "yes(30s backoff)" : "no"}; 400 can also mean Birdeye CU exhausted.${body ? " body=" + body : ""}`); return null; } return r.json(); }),
+                    10_000,
+                    "Birdeye TopVolume"
+                ).catch(() => null);
+                const tokens = (b?.data?.items) || (b?.data?.tokens) || (b?.data && Array.isArray(b.data) ? b.data : null) || b?.tokens || [];
+                if (Array.isArray(tokens)) {
+                    for (const t of tokens) {
+                        const addr = t?.address || t?.tokenAddress || t?.mint;
+                        if (typeof addr === "string" && addr.length >= 32 && addr.length <= 64) {
+                            extraSourceAddrs.add(addr);
+                            birdEyeVolCount++;
+                        }
+                    }
+                }
+                } // end else (key available)
+            } catch (e: any) { console.warn("[SRC:BIRDEYE-VOL] failed:", e?.message || e); }
+        }
+
+        // ── Source 4: Birdeye top-liquidity tokens (depth signal, different from volume). 24h liq = quality.
+        // AI-FIX(2026-06-24d): migrated to /defi/v3/token/list (sort_by=liquidity). Gated behind the shared
+        // 429 cooldown so we don't fire a second call after the volume call already got rate-limited.
+        // AI-FIX(2026-06-24i): no min_liquidity query filter; keep filtering locally to avoid Birdeye 400s.
+        if (birdeyeHasAvailableKey() && Date.now() >= birdeyeRateLimitedUntil) {
+            try {
+                const _bk2 = getNextBirdeyeKey();
+                if (!_bk2) { /* all keys exhausted */ }
+                else {
+                const b2: any = await withTimeout(
+                    fetch("https://public-api.birdeye.so/defi/v3/token/list?sort_by=liquidity&sort_type=desc&offset=0&limit=100", {
+                        headers: { "X-API-KEY": _bk2, "Accept": "application/json", "x-chain": "solana" },
+                        signal: AbortSignal.timeout(8000),
+                    }).then(async (r: any) => { if (!r.ok) { let body = ""; try { body = String(await r.text()).slice(0, 220); } catch {} const isCuExhausted = /compute units usage limit exceeded/i.test(body); const is429 = !isCuExhausted && (r.status === 429 || /rate|too many/i.test(body)); if (isCuExhausted) { disableBirdeyeKey(_bk2); birdeyeRateLimitedUntil = Date.now() + 10 * 60_000; } else if (is429) { throttleBirdeye429(_bk2); } console.warn(`[SRC:BIRDEYE-LIQ] non-OK HTTP ${r.status} ${r.statusText || ""} on /defi/v3/token/list (NOT a timeout). CU-exhausted=${isCuExhausted ? "yes(24h account disable)" : "no"} 429=${is429 ? "yes(30s backoff)" : "no"}; 400 can also mean Birdeye CU exhausted.${body ? " body=" + body : ""}`); return null; } return r.json(); }),
+                    10_000,
+                    "Birdeye TopLiquidity"
+                ).catch(() => null);
+                const tokens2 = (b2?.data?.items) || (b2?.data?.tokens) || (b2?.data && Array.isArray(b2.data) ? b2.data : null) || b2?.tokens || [];
+                if (Array.isArray(tokens2)) {
+                    for (const t of tokens2) {
+                        const addr = t?.address || t?.tokenAddress || t?.mint;
+                        if (typeof addr === "string" && addr.length >= 32 && addr.length <= 64) {
+                            extraSourceAddrs.add(addr);
+                            birdEyeLiqCount++; // new counter variable
+                        }
+                    }
+                }
+                } // end else (key available)
+            } catch (e: any) { console.warn("[SRC:BIRDEYE-LIQ] failed:", e?.message || e); }
+        }
+
+        
+        // ── Source 5: Birdeye New Listings (meme_platform_enabled=true) 
+        if (birdeyeHasAvailableKey() && Date.now() >= birdeyeRateLimitedUntil) {
+            try {
+                const _bk3 = getNextBirdeyeKey();
+                if (_bk3) {
+                    const b3: any = await withTimeout(
+                        fetch("https://public-api.birdeye.so/defi/v2/tokens/new_listing?limit=20&meme_platform_enabled=true", {
+                            headers: { "X-API-KEY": _bk3, "Accept": "application/json", "x-chain": "solana" },
+                            signal: AbortSignal.timeout(8000),
+                        }).then(async (r: any) => { if (!r.ok) return null; return r.json(); }),
+                        10_000,
+                        "Birdeye NewListing"
+                    ).catch(() => null);
+                    
+                    const tokens3 = (b3?.data?.items) || [];
+                    if (Array.isArray(tokens3)) {
+                        for (const t of tokens3) {
+                            const addr = t?.address || t?.tokenAddress || t?.mint;
+                            if (typeof addr === "string" && addr.length >= 32 && addr.length <= 64) {
+                                extraSourceAddrs.add(addr);
+                            }
+                        }
+                    }
+                }
+            } catch (e: any) { console.warn("[SRC:BIRDEYE-NEW] failed:", e?.message || e); }
+        }
+
+        // AI-TUNE(2026-06-24): GeckoTerminal /pools endpoint does NOT support sort=h24_volume_usd_desc;
+        // live test returned gkVol=0. Dropped here — Birdeye top-volume (Source 3) already covers
+        // "top tokens by 24h volume" and is delivering 50 addresses/cycle reliably.
 
         // Hydrate the union via DexScreener /latest/dex/tokens/{addrs} (same pipe as boost hydration).
         const extraAddrs = Array.from(extraSourceAddrs).slice(0, 200);
@@ -2435,21 +2547,10 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
                 dexResults.push(hydrated);
             } catch { /* skip chunk */ }
         }
-        console.log(`[SRC-XTRA] quality-only union=${extraAddrs.length} | jupVerified=${jupVerifiedCount} jupTop=${jupTopCount} (verified-set size=${jupiterVerifiedSet.size}, offset=${jupiterVerifiedHydrationOffset})`);
+        console.log(`[SRC-XTRA] quality-only union=${extraAddrs.length} | jupVerified=${jupVerifiedCount} jupTop=${jupTopCount} bdVol=${birdEyeVolCount} bdLiq=${birdEyeLiqCount} gkVol=${geckoVolCount} (verified-set size=${jupiterVerifiedSet.size}, offset=${jupiterVerifiedHydrationOffset})`);
     } catch (e: any) { console.warn("[SRC-XTRA] block failed:", e?.message || e); }
 
-    // AI-FIX(2026-06-28): GeckoTerminal top-pools (default sort = combined 24h volume + liquidity).
-    // Direct free replacement for the removed Birdeye top-volume (Src3) and top-liquidity (Src4) lists.
-    const geckoTopPages = [1, 2, 3, 4, 5];
-    const geckoTopFetches = geckoTopPages.map(page =>
-      withTimeout(
-        fetch(`https://api.geckoterminal.com/api/v2/networks/solana/pools?page=${page}`, { headers: { "Accept": "application/json;version=20230302" }, signal: AbortSignal.timeout(8000) })
-          .then(r => r.ok ? r.json() : { data: [] }),
-        10000,
-        "Gecko TopPools"
-      ).catch(() => ({ data: [] }))
-    );
-    const geckoAndBirdeyeResults = await Promise.all([...geckoFetches, ...geckoTopFetches]);
+    const geckoAndBirdeyeResults = await Promise.all([...geckoFetches, birdEyeFetch]);
     const resultsAll = [...geckoAndBirdeyeResults, ...dexResults];
 
     for (const res of resultsAll) {
@@ -2671,7 +2772,7 @@ const safetyCache = new Map<string, { safe: boolean; reason: string; timestamp: 
 const CACHE_TTL_MS = 60_000;
 
 
-async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair): Promise<{ safe: boolean; reason: string }> {
+async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair, goldTier?: string | null): Promise<{ safe: boolean; reason: string }> {
   if (!engineSettings.safetyChecksEnabled) return { safe: true, reason: "checks_disabled" };
   const cached = safetyCache.get(tokenAddress);
   if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) return cached;
@@ -2764,7 +2865,22 @@ async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair): Pr
     const tokenAgeSecs = pair.pairCreatedAt ? (Date.now() - pair.pairCreatedAt) / 1000 : 0;
     const isOldEnoughToBypassVeto = false; // DISABLED BY USER: age does not bypass LP veto
     const _gradedLpAdmit = _safetyTradingMode !== "live"; // PAPER: admit graded "Large Amount of LP Unlocked" so the discriminator + shadow ledger can measure the real post-entry rug rate at ZERO real-money risk. LIVE: always hard-veto (unchanged).
-    const _vetoRisk = _absoluteVetoRisk || ((_gradedLpRisk && !_gradedLpAdmit) ? _gradedLpRisk : undefined);
+    // GOLD SINGLE-HOLDER PAPER PROBE (user decision 2026-06-28): every gmgn LEGENDARY pick so far is
+    // single-holder-concentrated, so the absolute single-holder veto means the Gold Hunter never trades
+    // and the shadow ledger gets zero data. Admit LEGENDARY gold picks in PAPER/SHADOW ONLY, tagged, to
+    // measure whether these smart-money single-holder setups actually pay. LIVE stays hard-vetoed
+    // (single-holder = top concentration-rug predictor). Only relaxes when the ONLY absolute flag is
+    // single-holder; literal "LP Unlocked" still hard-vetoes in ALL modes. Disable: GOLD_SINGLE_HOLDER_PAPER_PROBE=false.
+    let _absoluteVetoEffective: any = _absoluteVetoRisk;
+    const _goldShProbeOn = String(process.env.GOLD_SINGLE_HOLDER_PAPER_PROBE ?? "true").toLowerCase() !== "false";
+    const _shOnlyAbsolute = !!_absoluteVetoRisk
+      && _vetoNameLc(_absoluteVetoRisk).includes("single holder ownership")
+      && !_risks.some((r: any) => { const n = _vetoNameLc(r); return n.includes("lp unlocked") && !n.includes("large amount of lp unlocked"); });
+    if (_shOnlyAbsolute && _goldShProbeOn && _safetyTradingMode !== "live" && goldTier === "LEGENDARY") {
+      console.log(`[GOLD-SH-PROBE:PAPER] $${pair.baseToken?.symbol || tokenAddress} ADMITTED single-holder LEGENDARY gold pick for PAPER/SHADOW measurement only; LIVE remains hard-vetoed.`);
+      _absoluteVetoEffective = undefined;
+    }
+    const _vetoRisk = _absoluteVetoEffective || ((_gradedLpRisk && !_gradedLpAdmit) ? _gradedLpRisk : undefined);
     if (_gradedLpRisk && !_absoluteVetoRisk && !_vetoRisk) {
       console.log(`[LP-VETO-PAPER-PROBE:${_safetyTradingMode.toUpperCase()}] $${pair.baseToken?.symbol || tokenAddress} ADMITTED graded "${_gradedLpRisk.name}" for PAPER/SHADOW measurement only; LIVE remains hard-vetoed. rugScoreNorm=${data?.score_normalised}`);
     }
@@ -2997,7 +3113,7 @@ async function runScanCycle() {
     }
 
     const openTrades = await storage.getOpenTrades();
-    let candidates = await fetchDexScreenerCandidates(isMicroWallet);
+    const candidates = await fetchDexScreenerCandidates(isMicroWallet);
     const top10 = candidates.slice(0, 10);
     if (top10.length === 0) { console.log("[SCAN] No tradeable candidates from DexScreener this cycle — waiting for fresh pairs."); return; }
     
@@ -3075,19 +3191,6 @@ async function runScanCycle() {
     let currentOpenCount = openTrades.length, tradesThisCycle = 0;
     let totalExposureSol = openTrades.reduce((sum, t) => sum + parseFloat(t.amount || "0"), 0);
     
-    // GOLD HUNTER: merge discovery-sourced picks into the candidate stream so they run
-    // through the same per-candidate gates + execution below. Placed AFTER the capital /
-    // open-position / risk early-returns (so gold picks still respect those limits),
-    // ahead of the per-candidate loop, letting them bypass only the market-quiet PAUSE.
-    if (goldInjectQueue.length > 0) {
-      const _goldPicks = goldInjectQueue.splice(0, goldInjectQueue.length);
-      const _seenAddrs = new Set(candidates.map((c: any) => c.tokenAddress));
-      const _newGold = _goldPicks.filter((g: any) => !_seenAddrs.has(g.tokenAddress));
-      if (_newGold.length > 0) {
-        console.log('[GOLD] Injecting ' + _newGold.length + ' hunter pick(s): ' + _newGold.map((g: any) => g.tokenSymbol).join(', '));
-        candidates = [..._newGold, ...candidates];
-      }
-    }
     for (const candidate of candidates) {
       const addr = candidate.tokenAddress;
       if (boughtThisCycle.has(addr)) continue;
@@ -3331,36 +3434,6 @@ async function runScanCycle() {
           continue;
       }
 
-      // -- ENTRY CAPS (env-tunable; wired from PX5M_*/MIN_LIQ_* knobs) ----------
-      // NOTE: PX5M_* knobs are FRACTIONS (0.08 = 8%), but candidate.priceChange5m /
-      // pair.priceChange.m5 are PERCENTS, so convert percent->fraction before compare.
-      // Anti-chase veto + per-mode 5m entry cap + per-mode liquidity floor.
-      // Disable entirely with PX5M_ENTRY_CAPS_ENABLED=false.
-      if (String(process.env.PX5M_ENTRY_CAPS_ENABLED ?? "true").toLowerCase() !== "false") {
-        const _ecMode    = scoring.qualifiedMode || "MG";
-        const _ecPx5mPct = Number(pair?.priceChange?.m5 ?? candidate.priceChange5m ?? 0); // percent
-        const _ecPx5m    = _ecPx5mPct / 100; // fraction, to match env knob units
-        const _ecVolMom  = Number((scoring.metrics as any)?.volMomentum ?? (candidate as any).volMomentum ?? 0);
-        const _ecAgeS    = Number((scoring.metrics as any)?.ageSeconds ?? (candidate as any).ageSeconds ?? 99999);
-        const _ecLiq     = Number(pair?.liquidity?.usd ?? (candidate as any).liquidity ?? (scoring.metrics as any)?.liq ?? 0);
-        const _ecChaseVeto = Number(process.env.PX5M_CHASE_VETO || 2.0);
-        const _ecCap       = _ecMode === "SNIPER" ? Number(process.env.PX5M_ENTRY_CAP_SNIPER || 0.08) : Number(process.env.PX5M_ENTRY_CAP_MG || 0.15);
-        const _ecMinLiq    = _ecMode === "MG" ? Number(process.env.MIN_LIQ_MG || 20000) : Number(process.env.MIN_LIQ_SNIPER || 15000);
-        const _ecViral     = _ecVolMom > 8.0 && _ecAgeS < 300;
-        if (_ecPx5m > _ecChaseVeto && _ecAgeS > 120) {
-          console.log(`[CHASE-VETO] SKIP $${candidate.tokenSymbol} px5m=${_ecPx5mPct.toFixed(0)}% age=${_ecAgeS.toFixed(0)}s (veto >${(_ecChaseVeto*100).toFixed(0)}%)`);
-          continue;
-        }
-        if (_ecPx5m > _ecCap && !_ecViral) {
-          console.log(`[ENTRY-CAP] SKIP $${candidate.tokenSymbol} px5m=${_ecPx5mPct.toFixed(1)}% > ${(_ecCap*100).toFixed(0)}% cap (${_ecMode}, not viral)`);
-          continue;
-        }
-        if (_ecLiq < _ecMinLiq) {
-          console.log(`[LIQ-GUARD] SKIP $${candidate.tokenSymbol} liq=$${_ecLiq.toFixed(0)} < $${_ecMinLiq} (${_ecMode})`);
-          continue;
-        }
-      }
-      // -- END ENTRY CAPS -----------------------------------------------------
       const isLiveBuy = status.tradingMode === "live" && jupiterService !== null;
       const walletBal = isLiveBuy ? remainingBalance : paperBalance;
       const totalPortfolioSol = walletBal + totalExposureSol;
@@ -3458,7 +3531,7 @@ async function runScanCycle() {
         remainingBalance = safeBalance;
       }
       
-      const safety = await checkTokenSafety(candidate.tokenAddress, pair);
+      const safety = await checkTokenSafety(candidate.tokenAddress, pair, (candidate as any)._goldTier);
       if (!safety.safe) {
         console.log(`[SAFETY] BLOCKED $${candidate.tokenSymbol} — ${safety.reason}`);
         if (safety.reason.startsWith("rugcheck_danger") || safety.reason.startsWith("rugcheck_risk_high") || safety.reason.startsWith("rugcheck_veto") || safety.reason.startsWith("insider_ownership_detected") || safety.reason.startsWith("low_liq_depth_ratio")) {
@@ -3845,7 +3918,7 @@ async function initBalanceFromDB() {
     console.log(`[ENGINE] Preserving stored wallet balance: ${storedBalance.toFixed(4)} SOL (auto-reset protocol disabled — drawdown visibility ON)`);
   }
   // LIVE-MODE GUARD: when trading mode is live, walletBalance in DB tracks the
-  // real on-chain SOL amount written by live sell/buy paths — it must NOT be
+  // real on-chain SOL amount written by live sell/buy paths ��� it must NOT be
   // restored into paperBalance, which is paper-mode-only accounting. Doing so
   // set paperBalance = 0.0000 SOL after a live reset (blocking all paper trades)
   // OR to the real wallet high-water mark (inflating paper sizing). In live mode
@@ -4214,9 +4287,7 @@ async function checkOpenPositions() {
                 const _mhSev   = getMidHoldRiskSeverity(String((trade as any).__patchForceExit ?? ''));
                 const _mhGuard = process.env.MID_HOLD_PROFIT_GUARD !== 'false';
                 const _mhTag   = 'MID_HOLD_RISK (freeze=' + String(_patchHasFreeze) + ', lpUnlocked=' + String(_patchHasLpUnlocked) + ', singleHolder=' + String(_patchHasSingleHolder) + ')';
-                // FIX(TDZ): canonical pnlPct is declared later in this loop iteration; compute a local
-                // P&L here from the in-scope currentPrice + entry (trade.price) so the guard works.
-                const _mhEntry  = parseFloat(String(trade.price));
+                const _mhEntry = parseFloat(trade.price);
                 const _mhPnlPct = _mhEntry > 0 ? ((currentPrice - _mhEntry) / _mhEntry) * 100 : 0;
                 if (_mhSev === 'CRITICAL' || _mhPnlPct <= 0) {
                   (trade as any).__patchForceExit = _mhTag;
@@ -5860,35 +5931,24 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           console.log('[GOLD] ' + sig.tier + ' | ' + sig.mintAddress.slice(0, 8) + ' | score=' + String(sig.score));
           if (process.env.MODE === 'live' && sig.tier !== 'LEGENDARY') continue;
           if (sig.tier === 'MEDIUM') continue;
-          // Normalize into a scan candidate. runScanCycle re-fetches the pair and
-          // re-scores via scoreToken, so it only needs tokenAddress + pairAddress; the
-          // remaining fields are hints. This routes gold picks through the IDENTICAL
-          // safety / sizing / edge / circuit-breaker / execution pipeline as normal scan
-          // candidates instead of duplicating any buy logic here.
-          const _goldAgeSec = sig.gmgn.creation_timestamp
-            ? Math.max(0, Math.floor((Date.now() - sig.gmgn.creation_timestamp * 1000) / 1000))
-            : 0;
-          const _goldCand: any = {
-            tokenAddress: sig.mintAddress,
+          const _gt: any = {
+            address: sig.mintAddress,
             pairAddress: sig.dex.pairAddress,
-            tokenSymbol: sig.dex.baseToken.symbol,
-            score: sig.score,
-            dex: String((sig.dex as any).dexId ?? '').toLowerCase(),
-            price: (sig.dex as any).priceUsd,
-            volume5m: sig.dex.volume?.m5 ?? 0,
-            priceChange5m: 0,   // neutral: don't let a stale hint trip the SNIPER 5m-cooling gate
-            buyPressure5m: '0',
-            ageSeconds: _goldAgeSec,
-            source: 'GOLD_HUNTER',
-            _goldTier: sig.tier,
+            symbol: sig.dex.baseToken.symbol,
+            name: sig.dex.baseToken.name,
+            liquidity: sig.dex.liquidity?.usd ?? 0,
+            marketCap: sig.dex.marketCap ?? 0,
+            holders: sig.gmgn.holder_count,
+            volume24h: sig.dex.volume?.h24 ?? 0,
+            buys1h: sig.dex.txns?.h1?.buys ?? 0,
+            sells1h: sig.dex.txns?.h1?.sells ?? 0,
+            priceChangeH1: sig.dex.priceChange?.h1 ?? 0,
+            createdAt: (sig.gmgn.creation_timestamp ?? 0) * 1000,
             _goldScore: sig.score,
+            _goldTier: sig.tier,
+            source: 'GOLD_HUNTER',
           };
-          // Dedupe + bound the queue so a slow scan loop can't let it grow unbounded.
-          if (!goldInjectQueue.some((g: any) => g.tokenAddress === _goldCand.tokenAddress)) {
-            goldInjectQueue.push(_goldCand);
-            if (goldInjectQueue.length > 50) goldInjectQueue.splice(0, goldInjectQueue.length - 50);
-            console.log('[GOLD] Queued ' + sig.tier + ' ' + _goldCand.tokenSymbol + ' for scan-loop entry (score=' + String(sig.score) + ')');
-          }
+          try { await checkTokenSafety(_gt.address, sig.dex as any, _gt._goldTier); } catch (e) { console.log('[GOLD] inject err: ' + String(e)); }
         }
       } catch (e) { console.log('[GOLD HUNTER] cycle error: ' + String(e)); }
     };
