@@ -97,14 +97,24 @@ const EXECUTION_TIMEOUT_MS  = 60_000; // Increased from 30,000 for network stabi
 
 const ADMIN_SECRET = process.env.ADMIN_SECRET?.trim() || null;
 
-// Warn at module load time so the operator sees it immediately in startup logs.
-// The warning fires once — not on every request — to avoid log spam.
-if (!ADMIN_SECRET) {
-  console.warn(
-    "[SECURITY] ADMIN_SECRET env var is not set — all admin endpoints " +
-    "are publicly accessible. Set ADMIN_SECRET before going live."
-  );
-}
+// AI-FIX(2026-06-28 ADMIN-FALSE-ALARM): the module-level ADMIN_SECRET const above is
+// read at module-eval time, but esbuild hoists the ./routes import ABOVE dotenv.config()
+// in index.ts (see requireAdmin note below), so process.env is still empty here and the
+// const is ALWAYS null on boot — producing a FALSE "not set / publicly accessible" warning
+// even though .env defines it and requireAdmin() authenticates every request at request time.
+// Defer the check by one tick with setImmediate: by then the synchronous module load has
+// completed and dotenv.config() has populated process.env, so we report the TRUE state.
+setImmediate(() => {
+  const adminSecret = process.env.ADMIN_SECRET?.trim() || null;
+  if (!adminSecret) {
+    console.warn(
+      "[SECURITY] ADMIN_SECRET env var is not set — all admin endpoints " +
+      "are publicly accessible. Set ADMIN_SECRET before going live."
+    );
+  } else {
+    console.log("[SECURITY] ADMIN_SECRET loaded — admin endpoints require authentication (requireAdmin active).");
+  }
+});
 
 // ── MICRO-AWARE EDGE GATE ────────────────────────────────────────────────
 // One source of truth for both the live and paper edge checks. Micro wallets
@@ -263,7 +273,7 @@ let engineSettings = {
 
   // -- Core Exit & Speed Strategy --
   // PATCH #3: lowered from 15/8 to 5/3. Memecoin pumps rarely reach +15% in a single
-  trailingStopActivation: 50, // RESTORED to your engineered MOONSHOT value (I should not have changed it).
+  trailingStopActivation: 12, // AI-TUNE(2026-06-28 LOCK-GAINS): 50 -> 12. ROOT CAUSE of growth -86%: at activation=50 the trail (and the laddered trailingFloor protection in FIX H) NEVER armed for any peak under +50%, so winners round-tripped to ~0 and were booked as losses. PROOF: $VORF peaked +25.74% -> sold -1.41% via STAGNANT_GREEN_KILL, peak never armed trail @50%. Arming at +12% lets the laddered floor (peak>30->60%, >15->50%, >8->40%) actually protect moderate runners. Paired with the floor-trigger added to TRAIL_STOP below so the exit fires AT the floor (honest fill, no paper inflation) instead of only on a full 25-pt drawdown.
   trailingStopDistance: 25, // RESTORED to your engineered MOONSHOT value.
   hardTakeProfit: 100000000, // AI-FIX(2026-06-27b): REVERTED to uncapped. Profit engine is the rare +400% runner ($AC=+429%); an +80% cap would destroy it. Let winners run; control risk on the LOSS side instead.
   stopLoss: -40, // RESTORED to your engineered -40% thesis. Bleed on dead days should be fixed by a REGIME GATE (only trade when runners are appearing), NOT by tightening the stop — a tighter stop would kill moonshot survival.
@@ -1171,7 +1181,7 @@ async function checkCircuitBreakers(): Promise<{ canTrade: boolean; reason: stri
       circuitBreakerActive = false;
       flightToSafetyAbandoned = false; // FIX(flight-spam): re-arm flight-to-safety for any future breaker trip
       triggerReturnFromSafety();
-      console.log(`[RISK] Circuit breaker cleared during cooldown — returning from USDC to SOL`);
+      console.log(`[RISK] Circuit breaker cleared during cooldown ��� returning from USDC to SOL`);
     }
     return { canTrade: false, reason: `MINI_LOSS_COOLDOWN (${remaining}s remaining — 2 consecutive losses)` };
   }
@@ -1857,8 +1867,18 @@ function whaleScore(sig: SmartMoneySignal | null): number {
   let sc = 0;
   if (net >= 4) sc = 25; else if (net >= 3) sc = 18; else if (net >= 2) sc = 12; else if (net >= 1) sc = 6;
   // Distribution penalty: big wallets net-selling => fade the entry (do not be exit liquidity).
-  if (sig.whaleNetSellers >= 3 && sig.whaleNetBuyers === 0) sc -= 20;
-  else if (sig.whaleNetSellers > sig.whaleNetBuyers) sc -= 8;
+  // AI-TUNE(2026-06-28): gate the penalty to a REAL wallet-level tape (birdeye/helius) ONLY. The
+  // scan-scoring path calls fetchSmartMoneyConvergence with both tapes disabled, so it falls back to
+  // the free getTokenLargestAccounts delta, which counts ANY wallet that rotated out of the top-N as a
+  // "seller" (and caps sellers at 4 vs buyers at 3). That asymmetry tags ~every token as net-
+  // distributing, stamping a universal -8 on otherwise top candidates (e.g. $BP showed netBuy=10/
+  // netSell=0 on the real Helius tape yet was still dinged -8 from the noisy free proxy). The genuine
+  // distribution veto/exit still runs off the real tape in checkTokenSafety + mid-hold, untouched.
+  const _realTape = sig.source === "birdeye" || sig.source === "helius";
+  if (_realTape) {
+    if (sig.whaleNetSellers >= 3 && sig.whaleNetBuyers === 0) sc -= 20;
+    else if (sig.whaleNetSellers > sig.whaleNetBuyers) sc -= 8;
+  }
   return sc;
 }
 
@@ -4844,7 +4864,7 @@ async function checkOpenPositions() {
           else if (pnlPct <= -45) { shouldClose = true; reason = `HARD_LOSS_KILL (pnl ${pnlPct.toFixed(2)}% <= -45% hard floor)`; }
           // ---- TIER 2: profit capture ----
           else if (pnlPct >= engineSettings.hardTakeProfit) { shouldClose = true; reason = `HARD_TAKE_PROFIT (+${pnlPct.toFixed(2)}% >= ${engineSettings.hardTakeProfit}% ceiling)`; }
-          else if (peakPnl >= activation && drawdownFromPeak >= engineSettings.trailingStopDistance) { shouldClose = true; reason = `TRAIL_STOP (peak +${peakPnl.toFixed(1)}%, fell ${drawdownFromPeak.toFixed(1)}%, floor +${trailingFloor.toFixed(1)}%)`; }
+          else if (peakPnl >= activation && (drawdownFromPeak >= engineSettings.trailingStopDistance || (trailingFloor > 0 && pnlPct <= trailingFloor))) { shouldClose = true; reason = `TRAIL_STOP (peak +${peakPnl.toFixed(1)}%, now +${pnlPct.toFixed(1)}%, locked floor +${trailingFloor.toFixed(1)}%, fell ${drawdownFromPeak.toFixed(1)}%)`; } // AI-TUNE(2026-06-28 LOCK-GAINS): added the floor-trigger `pnlPct <= trailingFloor`. The old condition ONLY fired on a 25-PRICE-POINT drawdown from peak, which for a +25% peak lands BELOW entry (peak*0.75 = -5.7% pnl) — useless for moderate runners. Now once armed (peak>=12%), the position is SOLD the moment pnl falls back to the laddered floor (e.g. peak+25% -> floor +12.5%), so $VORF-type peaks are crystallized near the floor instead of given back. trailWasArmed in FIX H now matches, so the recorded pnl is the real fill, not inflated.
           // MOONSHOT: Disabled PNL_STAGNANT and PROFIT_DECLINE. Moonshots consolidate and pull back. We must hold.
           // else if (peakPnl < activation && clearsRoundTrip && _isStagnant) { const stableSec = Math.round((Date.now() - _stable!.since) / 1000); shouldClose = true; reason = `PNL_STAGNANT (+${pnlPct.toFixed(2)}% real-profit, unchanged for ${stableSec}s)`; }
           // else if (peakPnl < activation && holdTime > 20 && prevPnl !== null && prevPnl >= 1.0 && pnlPct > 0 && pnlPct < prevPnl && (prevPnl - pnlPct) >= 15.0) { shouldClose = true; reason = `PROFIT_DECLINE (was +${prevPnl.toFixed(2)}%, now +${pnlPct.toFixed(2)}%, drop=${(prevPnl - pnlPct).toFixed(2)}%)`; }
@@ -4865,9 +4885,9 @@ async function checkOpenPositions() {
           else if (pnlPct > 5 && volLiqRatio > 7) { shouldClose = true; reason = `LIQUIDITY_EXHAUSTION (${volLiqRatio.toFixed(2)}x)`; }
           else if (holdTime > 180 && pnlPct > 1 && expVol5m > 100 && vol5m < expVol5m * 0.15) { shouldClose = true; reason = `VOL_COLLAPSE (5m vol ${vol5m.toFixed(0)} < 15% of expected ${expVol5m.toFixed(0)})`; }
           // MOONSHOT: Dip Recovery Architecture
-          // 1. Stagnant Green Kill: If a token is slightly green (0 to 20%) for 10 minutes without mooning, purge it.
+          // 1. Stagnant Green Kill: If a token is slightly green (0 to 20%) for 25 minutes without mooning, purge it.
           // 2. Dip Recovery: If it is in a loss (down to -45%), give it up to 30 minutes to bounce back before purging.
-          else if (holdTime > 600 && pnlPct >= 0 && pnlPct < 20) { shouldClose = true; reason = `STAGNANT_GREEN_KILL (Held 10m but PNL is only ${pnlPct.toFixed(1)}%)`; }
+          else if (holdTime > 1500 && pnlPct >= 0 && pnlPct < 20) { shouldClose = true; reason = `STAGNANT_GREEN_KILL (Held 25m but PNL is only ${pnlPct.toFixed(1)}%)`; } // AI-TUNE(2026-06-28 COST-GATE): 600s(10m) -> 1500s(25m). ROOT CAUSE: modeled round-trip cost floor is ~8% (3.76% x2), but the 10m stagnant-kill flattened any winner stuck between 0% and +8% before it could clear cost. PROOF: $SPCX peaked +3.91% -> killed at +2.25% gross / +0.19% net after exit cost. 25m lets a sub-8% green position mature past the cost floor instead of booking a forced scratch; DIP_RECOVERY_FAILED(30m) and ABSOLUTE_MAX_HOLD still cap the tail.
           else if (holdTime > 1800 && pnlPct < 0) { shouldClose = true; reason = `DIP_RECOVERY_FAILED (Held 30m, failed to bounce from ${pnlPct.toFixed(1)}% loss)`; }
           else if (holdTime > engineSettings.dynamicHoldMaxSeconds) { shouldClose = true; reason = `ABSOLUTE_MAX_HOLD(${Math.round(holdTime)}s > ${engineSettings.dynamicHoldMaxSeconds}s cap, pnl ${pnlPct.toFixed(2)}%)`; }
         }
@@ -4979,7 +4999,7 @@ async function checkOpenPositions() {
 
               const sellImpactPct = parseFloat(sellQuote?.priceImpactPct ?? "0");
               if (sellImpactPct > 50) console.warn(`[SELL] Extreme impact ${sellImpactPct.toFixed(1)}% for ${trade.tokenSymbol} — forcing sell anyway (rugpull escape)`);
-              // ───────────────────────────────────────────────────
+              // ────────────��──────────────────────────────────────
               // FIX LOCK: use a shorter per-cycle timeout (12 s) rather than EXECUTION_TIMEOUT_MS (30 s).
               // priceCheckLock is held for the full duration of this await — a 30 s block means other
               // open positions get zero price checks for 30 s during any slow/failed sell.
