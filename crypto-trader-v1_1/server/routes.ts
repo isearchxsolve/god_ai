@@ -9,6 +9,10 @@ import { existsSync, readFileSync, writeFileSync, promises as fsPromises } from 
 import { join as pathJoin } from "path";
 import { startHeartbeat, isHalted, healthState } from "./runtime-hooks";
 import { setDefaultResultOrder as __setDnsResultOrder } from "node:dns";
+// =============================================================
+// GOLD STANDARD HUNTER
+// =============================================================
+import { runHunter, checkMint } from './gold_standard_hunter';
 
 // AI-FIX(2026-06-24): Force IPv4-first DNS resolution. Node 17+ defaults to "verbatim"
 // (AAAA/IPv6 returned first); on hosts without working IPv6, undici fetch() to
@@ -98,6 +102,19 @@ const EXECUTION_TIMEOUT_MS  = 60_000; // Increased from 30,000 for network stabi
 const ADMIN_SECRET = process.env.ADMIN_SECRET?.trim() || null;
 
 // AI-FIX(2026-06-28 ADMIN-FALSE-ALARM): the module-level ADMIN_SECRET const above is
+// EXIT STRATEGY HELPERS
+function getDynamicTrailPct(peakPnl: number): number {
+  if (peakPnl < 1)  return 0.8;
+  if (peakPnl < 3)  return 1.2;
+  if (peakPnl < 6)  return 1.8;
+  if (peakPnl < 12) return 2.5;
+  return 3.5;
+}
+function getMidHoldRiskSeverity(flags: string): string {
+  if (/honeypot|freeze.*true|mint.*true/i.test(flags)) return 'CRITICAL';
+  if (/lp_unlocked|lpUnlocked.*true/i.test(flags))     return 'MODERATE';
+  return 'LOW';
+}
 // read at module-eval time, but esbuild hoists the ./routes import ABOVE dotenv.config()
 // in index.ts (see requireAdmin note below), so process.env is still empty here and the
 // const is ALWAYS null on boot — producing a FALSE "not set / publicly accessible" warning
@@ -273,14 +290,14 @@ let engineSettings = {
 
   // -- Core Exit & Speed Strategy --
   // PATCH #3: lowered from 15/8 to 5/3. Memecoin pumps rarely reach +15% in a single
-  trailingStopActivation: 8, // AI-TUNE(2026-06-28 IGNITER v2): 12 -> 8 (arm the trail as soon as a position clears the ~8% round-trip cost floor, so cost-positive winners get the laddered floor protection and are BANKED instead of force-sold by the dud-kill). Prior LOCK-GAINS note: 50 -> 12. ROOT CAUSE of growth -86%: at activation=50 the trail (and the laddered trailingFloor protection in FIX H) NEVER armed for any peak under +50%, so winners round-tripped to ~0 and were booked as losses. PROOF: $VORF peaked +25.74% -> sold -1.41% via STAGNANT_GREEN_KILL, peak never armed trail @50%. Arming at +12% lets the laddered floor (peak>30->60%, >15->50%, >8->40%) actually protect moderate runners. Paired with the floor-trigger added to TRAIL_STOP below so the exit fires AT the floor (honest fill, no paper inflation) instead of only on a full 25-pt drawdown.
-  trailingStopDistance: 18, // AI-TUNE(2026-06-28 IGNITER): 25 -> 18. Tighter trail to lock igniter gains faster; thin pumpers reverse hard ($LEXAPRO +68% -> -36% in one scan), so give back less from peak. The laddered trailingFloor (peak>30->60%, >15->50%, >8->40%) still rides the big runs.
+  trailingStopActivation: 12, // AI-TUNE(2026-06-28 LOCK-GAINS): 50 -> 12. ROOT CAUSE of growth -86%: at activation=50 the trail (and the laddered trailingFloor protection in FIX H) NEVER armed for any peak under +50%, so winners round-tripped to ~0 and were booked as losses. PROOF: $VORF peaked +25.74% -> sold -1.41% via STAGNANT_GREEN_KILL, peak never armed trail @50%. Arming at +12% lets the laddered floor (peak>30->60%, >15->50%, >8->40%) actually protect moderate runners. Paired with the floor-trigger added to TRAIL_STOP below so the exit fires AT the floor (honest fill, no paper inflation) instead of only on a full 25-pt drawdown.
+  trailingStopDistance: 25, // RESTORED to your engineered MOONSHOT value.
   hardTakeProfit: 100000000, // AI-FIX(2026-06-27b): REVERTED to uncapped. Profit engine is the rare +400% runner ($AC=+429%); an +80% cap would destroy it. Let winners run; control risk on the LOSS side instead.
-  stopLoss: -15, // AI-TUNE(2026-06-28 IGNITER): -40 -> -15, and the stop is now WIRED into the exit ladder below (the moonshot build had STOP_LOSS disabled, so losers bled to the -45% HARD_LOSS_KILL). On thin sub-$25k igniters a -45% bleed is ruinous; -15% cuts duds fast so the single slot recycles into the next runner.
+  stopLoss: -40, // RESTORED to your engineered -40% thesis. Bleed on dead days should be fixed by a REGIME GATE (only trade when runners are appearing), NOT by tightening the stop — a tighter stop would kill moonshot survival.
 
   // -- Conviction Gates --
   minScoreToTrade: 80, // AI-FIX(2026-06-28): 70 -> 80. Shadow analysis: the 70-79 band was the WORST (-3.90%/trade); every band >=80 was positive. Floor lifted to the proven-positive line so the generic gate stops admitting the worst segment. Do not lower without fresh shadow data.
-  microMinScoreToTrade: 55, // AI-TUNE(2026-06-28 IGNITER): 65 -> 55. Pivot to igniter capture: every pump in the 12:41 log (Hotsauce +116%, GORP +66%, $1%, uncsem, Susan) scored 49-64 combined and was skipped by the 65 gate. Lowered to admit the sub-65 momentum band. The added risk is controlled by the re-armed -15% hard stop, the 120s dud-kill, and the tightened trail (all in this same build). Drop toward 50 only with fresh shadow data.
+  microMinScoreToTrade: 65, // AI-TUNE(2026-06-27): 70 -> 65. Shadow ledger +3.65%/trade over n=45 (win 64.4%, growth +76.79%); dense momentum band at 65-69 (rej=[], strong mlScore) was being skipped by 1-9 pts. Whale-distribution exit (proved on KNICKS +7%), post-loss cooldown, and price-drift gate now protect entries, so admitting the 65-69 band is +EV. FLOOR at 65 — do not go lower; keep collecting shadow data.
   
   // -- SNIPER Mode Calibration --
   sniperMinScore: 20, 
@@ -413,7 +430,7 @@ const REGIME_GATE = {
 };
 let isFetchingCandidates = false; // <-- The Anti-Spam Lock
 
-// ── Shadow mode ───────────────────────────────────────────────────────────────
+// ── Shadow mode ───────────────────────────�����───────────────────────────────────
 // Runs alongside paper mode. For every token the bot WOULD buy, we:
 //   1. Fetch a real Jupiter quote (real slippage + route)
 //   2. Record the quoted entry price
@@ -718,7 +735,7 @@ async function closeShadowTrade(
 }
 const MAX_SINGLE_TRADE_PCT   = 0.55; // restored from old profitable routes.ts
 const MIN_EDGE_PCT           = 5.0; // restored from old profitable routes.ts
-// ─────────────────────────────────────────────────────────────────────────────
+// ────────────────���────────────────────────────────────────────────────────────
 let tradedAddresses = new Map<string, number>();
 let stoppedOutAddresses = new Map<string, number>();
 const hardBlockedAddresses = new Map<string, number>();
@@ -876,6 +893,9 @@ async function readLiveWalletBalance(): Promise<number> {
   return paperBalance;
 }
 let pendingBuys = new Map<string, number>();
+// GOLD HUNTER discovery queue: picks pushed by the background hunter loop and drained
+// by runScanCycle each cycle, then merged into the normal candidate stream.
+let goldInjectQueue: any[] = [];
 let recentlyAttemptedBuys = new Map<string, number>();
 // Tracks consecutive on-chain zero-balance reads per trade id.
 // A single zero read can be RPC lag — require 3 in a row before closing as desync.
@@ -888,7 +908,7 @@ const ZERO_STRIKES_REQUIRED = 3;
 // consecutive zero-price cycles (~30s), force-close at last known DB price so a dead
 // feed can never permanently freeze a position open.
 const zeroPriceStrikes = new Map<number, number>();
-const ZERO_PRICE_STRIKES_REQUIRED = 30; // 30s at 1000ms priceCheckIntervalMs
+const ZERO_PRICE_STRIKES_REQUIRED = 8; // AI-TUNE(2026-06-28 SURVIVAL-STOP): 30 -> 8. A rug drains the pool in seconds; 30s of unfetchable-price tolerance froze the position open while the pool emptied. 8s still rides out transient RPC/API blips but force-closes a delisted/migrated pair fast.
 // FIX: sellFailureStrikes and MAX_SELL_FAILURES were used in the live sell-failure
 // handler but never declared — caused ReferenceError crashing the position manager
 // on the first failed live sell attempt.
@@ -1402,7 +1422,7 @@ async function fetchTokenPriceForExit(tokenAddress: string): Promise<{ price: nu
 // Endpoint: GET /defi/v2/tokens/top_traders (documented; x-chain: solana)
 // ────────────────────────────────────────────────────────────────
 interface SmartMoneySignal { count: number; netBuyers: number; topRealizedPnl: number; whaleCount: number; whaleNetBuyers: number; whaleNetSellers: number; washSuspects: number; source?: "birdeye" | "free" | "helius"; }
-// ── BIRDEYE MULTI-KEY ROTATION SYSTEM (AI-FIX 2026-06-24) ──────────────────���──────
+// ── BIRDEYE MULTI-KEY ROTATION SYSTEM (AI-FIX 2026-06-24) ─────────────────────────
 // Birdeye free-tier keys have a daily CU limit (~1000 CU). A single key runs out mid-session
 // and the bot goes blind (no discovery, no whale tape). Multi-key rotation distributes load
 // across N keys and auto-disables exhausted keys until their CU resets (estimated 24h).
@@ -1929,20 +1949,20 @@ function scoreToken(
   const __mc = pair.marketCap || pair.fdv || 0;
   const __ageSec = pair.pairCreatedAt ? (Date.now() - pair.pairCreatedAt) / 1000 : 0;
   if (__mc > 0 && (__mc < 300000 || __mc > 5000000)) combinedScore = Math.max(0, combinedScore - 8);
-  if (__ageSec > 21600) combinedScore = Math.max(0, combinedScore - 6);
+  if (__ageSec > 10800) combinedScore = Math.max(0, combinedScore - 8); if ((priceChange5m < 4) && (volMomentum < 2.0)) combinedScore = Math.max(0, combinedScore - 12);
   // LAYER-2b BLOW-OFF GUARD: the px component maxes at +10%, so a healthy +10% breakout and a +60%
   // parabolic earn the identical 15 points. Discount the *already-extended* move so the engine stops
   // buying tops — root cause of the $?/$nibbly score-65 losses (px5m 54%/72%). Healthy breakouts
   // (<=25%) are untouched; >25% soft -6; >40% hard -12 (clearly parabolic / chasing).
-  const __pxPen = priceChange5m > 40 ? -12 : priceChange5m > 25 ? -6 : 0;
-  if (__pxPen < 0) combinedScore = Math.max(0, combinedScore + __pxPen);
+  const __pxPen = priceChange5m > 120 ? -18 : priceChange5m > 80 ? -10 : (priceChange5m >= 10 && priceChange5m <= 40) ? 4 : 0;
+  combinedScore = Math.max(0, Math.min(100, combinedScore + __pxPen));
   // READ-ONLY DIAGNOSTIC: per-component score anatomy so we can tell an *early* 65 (age/momentum-driven)
   // from a *late* 65 (price-spike-driven). Toggle with SCORE_BREAKDOWN_LOG=false.
   if (String(process.env.SCORE_BREAKDOWN_LOG ?? "true").toLowerCase() !== "false") {
     const __mlAdj = mlScore !== null ? Math.round(mlScore * (1 - (mlPrediction?.dumpRisk ?? 0) * 0.5)) : null;
     const __mcPen = (__mc > 0 && (__mc < 300000 || __mc > 5000000)) ? -8 : 0;
-    const __agePen = (__ageSec > 21600) ? -6 : 0;
-    console.log(`[SCORE-BREAKDOWN] $${pair.baseToken?.symbol || "?"} combined=${combinedScore} raw=${score}(liq${liqScore}+bp${bpScore}+vol${volScore}+px${priceScore}+tx${txScore}+age${ageScore}+bp1h${bp1hScore}+fdv${fdvScore}=${rawTotal}/95) ml=${mlScore ?? "n/a"}(adj${__mlAdj ?? "n/a"} dump${mlPrediction ? (mlPrediction.dumpRisk * 100).toFixed(0) + "%" : "n/a"}) sm=${smScore} wh=${whScore} pen=${__mcPen + __agePen + __pxPen}(mc${__mcPen}/age${__agePen}/px${__pxPen}) | drivers: px5m=${priceChange5m.toFixed(1)}% volMom=${volMomentum.toFixed(2)} bp5m=${bp5m.toFixed(2)} ageS=${ageSeconds} liq=$${liq.toFixed(0)}`);
+    const __agePen = (__ageSec > 10800) ? -8 : 0; const __flatPen = ((priceChange5m < 4) && (volMomentum < 2.0)) ? -12 : 0;
+    console.log(`[SCORE-BREAKDOWN] $${pair.baseToken?.symbol || "?"} combined=${combinedScore} raw=${score}(liq${liqScore}+bp${bpScore}+vol${volScore}+px${priceScore}+tx${txScore}+age${ageScore}+bp1h${bp1hScore}+fdv${fdvScore}=${rawTotal}/95) ml=${mlScore ?? "n/a"}(adj${__mlAdj ?? "n/a"} dump${mlPrediction ? (mlPrediction.dumpRisk * 100).toFixed(0) + "%" : "n/a"}) sm=${smScore} wh=${whScore} pen=${__mcPen + __agePen + __pxPen + __flatPen}(mc${__mcPen}/age${__agePen}/px${__pxPen}/flat${__flatPen}) | drivers: px5m=${priceChange5m.toFixed(1)}% volMom=${volMomentum.toFixed(2)} bp5m=${bp5m.toFixed(2)} ageS=${ageSeconds} liq=$${liq.toFixed(0)}`);
   }
   const metrics = { liq, ageSeconds, bp5m, bp1h, volMomentum, priceChange5m, priceChange1h, txVelocity5m, vol5m, vol1h, fdv, h1buys: h1b, h1sells: h1s, m5buys: m5b, m5sells: m5s, buyPressure5m: bp5m, buyPressure1h: bp1h };
 
@@ -2769,7 +2789,7 @@ async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair): Pr
   // Requiring deep liquidity pushes the price-impact component of round-trip cost under ~3%,
   // so a paper "winner" can actually be crystallized instead of being held forever by the cost gate.
   // Tunable via ENTRY_MIN_LIQ_USD; default $25,000. // AI-TUNE(2026-06-28): default 100000 -> 25000. NEEDLE-MOVER: the live $40k floor was the dominant no-trade cause — nearly all fresh runners (CLIVE/ORANGIE/Cedric/MVLL/SBF/drooling) sit in the $15k-$36k band, were scored top-5, then killed by liquidity_below_entry_floor; only stale large-caps cleared $40k and either scored too low or were vetoed. $25k = documented old-profitable floor, still above the BioCraft $21k disaster line. NOTE: the running .env still sets ENTRY_MIN_LIQ_USD=40000 — change it to 25000 (or remove the line) for this to take effect at runtime.
-  const ENTRY_MIN_LIQ_USD = Number(process.env.ENTRY_MIN_LIQ_USD) || 15000;
+  const ENTRY_MIN_LIQ_USD = Number(process.env.ENTRY_MIN_LIQ_USD) || 25000;
   if (liq < ENTRY_MIN_LIQ_USD) return { safe: false, reason: `liquidity_below_entry_floor($${Math.round(liq)} < $${ENTRY_MIN_LIQ_USD})` };
   const m5sells = pair.txns?.m5?.sells || 0;
   // AGE-SCALED honeypot gate: brand-new launches legitimately have few sells in their first
@@ -2994,18 +3014,11 @@ async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair): Pr
       const _vetoSlug = String(_vetoRisk.name || "unknown").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
       reason = `rugcheck_veto_${_vetoSlug}`;
       console.log(`[SAFETY-VETO] $${pair.baseToken?.symbol || tokenAddress} HARD-VETO on risk flag: ${_vetoRisk.name}`);
-    } else if (_lpRelaxGateReason && _safetyTradingMode === "live") {
+    } else if (_lpRelaxGateReason) {
       // LITERATURE-GROUNDED LP-UNLOCKED DISCRIMINATOR: organized distribution / wash-bundle on
       // an unlocked-LP token (the ~98%-rug pond). Vetoed AFTER absolute flags, BEFORE mint/norm.
       safe = false; reason = _lpRelaxGateReason;
       console.log(`[SAFETY-VETO] $${pair.baseToken?.symbol || tokenAddress} HARD-VETO (LP-unlocked discriminator): ${_lpRelaxGateReason}`);
-    } else if (_lpRelaxGateReason) {
-      // PAPER-PROBE (AI-TUNE 2026-06-28 IGNITER): the LP-unlocked discriminator (whale distribution / wash / concentration)
-      // was hard-vetoing ~every parabolic Pump.fun runner — a coin pumping +20-200% shows early bundle whales DISTRIBUTING
-      // (netSell high), which is structurally anti-correlated with the pump, so the only admitted names were slow
-      // accumulators that never move (e.g. $USA250 px+1.3%). Admit these in PAPER ONLY so the shadow ledger can measure
-      // whether buying into the distribution actually pays. LIVE stays hard-vetoed above (real-money rug protection unchanged).
-      console.log(`[LP-DISCRIMINATOR-PAPER-PROBE:PAPER] $${pair.baseToken?.symbol || tokenAddress} ADMITTED despite ${_lpRelaxGateReason} for PAPER/SHADOW measurement only; LIVE remains hard-vetoed.`);
     } else if (_mintActive) {
       // FIX: MINT authority active but freeze is null -> dilution risk only, token is still sellable.
       // Allow the trade (safe stays true) but log it for monitoring. Honeypot (freeze) is already blocked above,
@@ -3088,7 +3101,7 @@ async function runScanCycle() {
     }
 
     const openTrades = await storage.getOpenTrades();
-    const candidates = await fetchDexScreenerCandidates(isMicroWallet);
+    let candidates = await fetchDexScreenerCandidates(isMicroWallet);
     const top10 = candidates.slice(0, 10);
     if (top10.length === 0) { console.log("[SCAN] No tradeable candidates from DexScreener this cycle — waiting for fresh pairs."); return; }
     
@@ -3166,6 +3179,19 @@ async function runScanCycle() {
     let currentOpenCount = openTrades.length, tradesThisCycle = 0;
     let totalExposureSol = openTrades.reduce((sum, t) => sum + parseFloat(t.amount || "0"), 0);
     
+    // GOLD HUNTER: merge discovery-sourced picks into the candidate stream so they run
+    // through the same per-candidate gates + execution below. Placed AFTER the capital /
+    // open-position / risk early-returns (so gold picks still respect those limits),
+    // ahead of the per-candidate loop, letting them bypass only the market-quiet PAUSE.
+    if (goldInjectQueue.length > 0) {
+      const _goldPicks = goldInjectQueue.splice(0, goldInjectQueue.length);
+      const _seenAddrs = new Set(candidates.map((c: any) => c.tokenAddress));
+      const _newGold = _goldPicks.filter((g: any) => !_seenAddrs.has(g.tokenAddress));
+      if (_newGold.length > 0) {
+        console.log('[GOLD] Injecting ' + _newGold.length + ' hunter pick(s): ' + _newGold.map((g: any) => g.tokenSymbol).join(', '));
+        candidates = [..._newGold, ...candidates];
+      }
+    }
     for (const candidate of candidates) {
       const addr = candidate.tokenAddress;
       if (boughtThisCycle.has(addr)) continue;
@@ -3309,9 +3335,9 @@ async function runScanCycle() {
         const __ageSec2 = pair?.pairCreatedAt ? (Date.now() - pair.pairCreatedAt) / 1000 : 0;
         let __combined2 = combined;
         if (__mc2 > 0 && (__mc2 < 300000 || __mc2 > 5000000)) __combined2 = Math.max(0, __combined2 - 8);
-        if (__ageSec2 > 21600) __combined2 = Math.max(0, __combined2 - 6);
+        if (__ageSec2 > 10800) __combined2 = Math.max(0, __combined2 - 8); if ((scoring.metrics.priceChange5m < 4) && (scoring.metrics.volMomentum < 2.0)) __combined2 = Math.max(0, __combined2 - 12);
         const __px5m2 = pair?.priceChange?.m5 || 0;
-        if (__px5m2 > 40) __combined2 = Math.max(0, __combined2 - 12); else if (__px5m2 > 25) __combined2 = Math.max(0, __combined2 - 6);
+        if (__px5m2 > 120) __combined2 = Math.max(0, __combined2 - 18); else if (__px5m2 > 80) __combined2 = Math.max(0, __combined2 - 10); else if (__px5m2 >= 10 && __px5m2 <= 40) __combined2 = Math.min(100, __combined2 + 4);
         scoring = { ...scoring, mlScore, combinedScore: __combined2 };
       } else {
         const freshMl = await getMLPrediction(scoring.metrics);
@@ -3323,9 +3349,9 @@ async function runScanCycle() {
           const __ageSec3 = pair?.pairCreatedAt ? (Date.now() - pair.pairCreatedAt) / 1000 : 0;
           let __combined3 = combined;
           if (__mc3 > 0 && (__mc3 < 300000 || __mc3 > 5000000)) __combined3 = Math.max(0, __combined3 - 8);
-          if (__ageSec3 > 21600) __combined3 = Math.max(0, __combined3 - 6);
+          if (__ageSec3 > 10800) __combined3 = Math.max(0, __combined3 - 8); if ((scoring.metrics.priceChange5m < 4) && (scoring.metrics.volMomentum < 2.0)) __combined3 = Math.max(0, __combined3 - 12);
           const __px5m3 = pair?.priceChange?.m5 || 0;
-          if (__px5m3 > 40) __combined3 = Math.max(0, __combined3 - 12); else if (__px5m3 > 25) __combined3 = Math.max(0, __combined3 - 6);
+          if (__px5m3 > 120) __combined3 = Math.max(0, __combined3 - 18); else if (__px5m3 > 80) __combined3 = Math.max(0, __combined3 - 10); else if (__px5m3 >= 10 && __px5m3 <= 40) __combined3 = Math.min(100, __combined3 + 4);
           scoring = { ...scoring, mlScore, combinedScore: __combined3 };
         }
       }
@@ -3385,9 +3411,9 @@ async function runScanCycle() {
       // in (which rarely classify as SNIPER), letting score>=90 through any mode keeps the
       // gate honest without artificially excluding mature high-confidence candidates.
       const _isSniperEdge = _EDGE_MODES.includes(scoring.qualifiedMode) && scoring.combinedScore >= _EDGE_MIN_SCORE;
-      const _isHighConfidence = scoring.combinedScore >= 90;
-      if (_edgePocketOnly && !_isSniperEdge && !_isHighConfidence) {
-          console.log(`[EDGE-POCKET] SKIP $${candidate.tokenSymbol} — outside positive-expectancy pocket (mode=${scoring.qualifiedMode} score=${scoring.combinedScore}; need (${_EDGE_MODES.join("/")}+score>=${_EDGE_MIN_SCORE}) OR score>=90). Set EDGE_POCKET_ONLY=false to disable.`);
+      const _isHighConfidence = scoring.combinedScore >= (Number(process.env.EDGE_HIGH_CONF_SCORE) || 90); // AI-FIX(2026-06-28b): reverted 85 -> 90. Live evidence (USA250 MG score=85, veto=none) ENTERED and LOST -1.01% (mid-hold single-holder rug + cost floor); lowering the any-mode bar admitted exactly the net-negative MG band. Kept env-tunable (EDGE_HIGH_CONF_SCORE) but default restored to the author-calibrated 90 so only genuinely high-conviction any-mode coins bypass the SNIPER-only pocket.
+      const _eqScore = Number(process.env.EDGE_EXPLOSIVE_SCORE) || 85; const _eqMl = Number(process.env.EDGE_EXPLOSIVE_ML) || 80; const _eqPx5m = Number(process.env.EDGE_EXPLOSIVE_PX5M) || 8; const _eqVolMom = Number(process.env.EDGE_EXPLOSIVE_VOLMOM) || 1.5; const _isExplosiveQuality = (scoring.combinedScore >= _eqScore) && (Number(scoring.mlScore ?? 0) >= _eqMl) && (Number((scoring.metrics as any)?.priceChange5m ?? 0) >= _eqPx5m) && (Number((scoring.metrics as any)?.volMomentum ?? 0) >= _eqVolMom); /* AI-FIX(2026-06-28c): explosive-quality pocket. Zero trades for hours because the only repeat top candidate ($USWR) is MG mode capped at score 84-89, just under the any-mode 90 bar. This admits any-mode coins that are genuinely pumping (USWR-class: ml>=80, px5m>=8%, volMom>=1.5) while STILL excluding the stagnant net-negative MG band that lost under the old blanket-85 bar ($USA250: ml73/px0.9%/volMom0.68 -> fails ml & px & volMom). Paper/shadow only earns the data we never collected on this class. Tunable/disable via EDGE_EXPLOSIVE_* envs (set EDGE_EXPLOSIVE_SCORE=999 to turn off). */ if (_edgePocketOnly && !_isSniperEdge && !_isHighConfidence && !_isExplosiveQuality) {
+          console.log(`[EDGE-POCKET] SKIP $${candidate.tokenSymbol} — outside positive-expectancy pocket (mode=${scoring.qualifiedMode} score=${scoring.combinedScore}; need (${_EDGE_MODES.join("/")}+score>=${_EDGE_MIN_SCORE}) OR score>=90 OR (score>=${_eqScore} & ml>=${_eqMl} & px5m>=${_eqPx5m}% & volMom>=${_eqVolMom})). Set EDGE_POCKET_ONLY=false to disable.`);
           continue;
       }
 
@@ -3409,6 +3435,36 @@ async function runScanCycle() {
           continue;
       }
 
+      // -- ENTRY CAPS (env-tunable; wired from PX5M_*/MIN_LIQ_* knobs) ----------
+      // NOTE: PX5M_* knobs are FRACTIONS (0.08 = 8%), but candidate.priceChange5m /
+      // pair.priceChange.m5 are PERCENTS, so convert percent->fraction before compare.
+      // Anti-chase veto + per-mode 5m entry cap + per-mode liquidity floor.
+      // Disable entirely with PX5M_ENTRY_CAPS_ENABLED=false.
+      if (String(process.env.PX5M_ENTRY_CAPS_ENABLED ?? "true").toLowerCase() !== "false") {
+        const _ecMode    = scoring.qualifiedMode || "MG";
+        const _ecPx5mPct = Number(pair?.priceChange?.m5 ?? candidate.priceChange5m ?? 0); // percent
+        const _ecPx5m    = _ecPx5mPct / 100; // fraction, to match env knob units
+        const _ecVolMom  = Number((scoring.metrics as any)?.volMomentum ?? (candidate as any).volMomentum ?? 0);
+        const _ecAgeS    = Number((scoring.metrics as any)?.ageSeconds ?? (candidate as any).ageSeconds ?? 99999);
+        const _ecLiq     = Number(pair?.liquidity?.usd ?? (candidate as any).liquidity ?? (scoring.metrics as any)?.liq ?? 0);
+        const _ecChaseVeto = Number(process.env.PX5M_CHASE_VETO || 2.0);
+        const _ecCap       = _ecMode === "SNIPER" ? Number(process.env.PX5M_ENTRY_CAP_SNIPER || 0.08) : Number(process.env.PX5M_ENTRY_CAP_MG || 0.15);
+        const _ecMinLiq    = _ecMode === "MG" ? Number(process.env.MIN_LIQ_MG || 20000) : Number(process.env.MIN_LIQ_SNIPER || 15000);
+        const _ecViral     = _ecVolMom > 8.0 && _ecAgeS < 300;
+        if (_ecPx5m > _ecChaseVeto && _ecAgeS > 120) {
+          console.log(`[CHASE-VETO] SKIP $${candidate.tokenSymbol} px5m=${_ecPx5mPct.toFixed(0)}% age=${_ecAgeS.toFixed(0)}s (veto >${(_ecChaseVeto*100).toFixed(0)}%)`);
+          continue;
+        }
+        if (_ecPx5m > _ecCap && !_ecViral) {
+          console.log(`[ENTRY-CAP] SKIP $${candidate.tokenSymbol} px5m=${_ecPx5mPct.toFixed(1)}% > ${(_ecCap*100).toFixed(0)}% cap (${_ecMode}, not viral)`);
+          continue;
+        }
+        if (_ecLiq < _ecMinLiq) {
+          console.log(`[LIQ-GUARD] SKIP $${candidate.tokenSymbol} liq=$${_ecLiq.toFixed(0)} < $${_ecMinLiq} (${_ecMode})`);
+          continue;
+        }
+      }
+      // -- END ENTRY CAPS -----------------------------------------------------
       const isLiveBuy = status.tradingMode === "live" && jupiterService !== null;
       const walletBal = isLiveBuy ? remainingBalance : paperBalance;
       const totalPortfolioSol = walletBal + totalExposureSol;
@@ -3526,7 +3582,7 @@ async function runScanCycle() {
       // Live test: $LIFE score=90 mode=SNIPER passed safety + sizing, then missed entry while waiting
       // for socials. Fresh SNIPER launches often have incomplete DexScreener metadata; the actual
       // quality checks here are score, buy pressure, liquidity, age<=900, RugCheck, and edge-pocket.
-      const bypassSocialWatchlist = scoring.qualifiedMode === "SNIPER" && currentScore >= 80;
+      const bypassSocialWatchlist = (scoring.qualifiedMode === "SNIPER" && currentScore >= 80) || currentScore >= 85; // AI-FIX(2026-06-28): added `|| currentScore >= 85`. The social-staging gate parked clean 85-91 MG-mode coins that already PASSED every safety veto (USA250 staged "waiting for socials" -> never bought). Memecoins routinely lack DexScreener socials early; a score>=85 coin that cleared rugcheck/single-holder/LP-distribution should not be blocked on missing socials. Mirrors the existing SNIPER>=80 bypass for MG/HWR high-scorers.
 
       if (currentScore >= 85 && currentScore < 92 && !hasSocials && !isPumpFunCandidate && !bypassSocialWatchlist) {
           if (!watchlistCache.has(addr)) {
@@ -4027,7 +4083,7 @@ async function initBalanceFromDB() {
   const openTrades = await storage.getOpenTrades();
   // FIX: When no positions survive a restart there is zero unrealised drawdown.
   // A stale peakBalance from a prior session (e.g. 0.630 SOL vs current 0.50)
-  // that slipped past the 1.2× guard above would still show phantom drawdown and
+  // that slipped past the 1.2�� guard above would still show phantom drawdown and
   // block the circuit breaker before any trade executes. Safe to reset here
   // because with no open trades there is nothing to measure drawdown against.
   if (openTrades.length === 0 && peakBalance > paperBalance) {
@@ -4257,7 +4313,25 @@ async function checkOpenPositions() {
                 // the existing flow. The cleanest path is to log and let the price-drop
                 // detector (PATCH #4) catch the resulting price action — but if the rug
                 // hasn't started yet, we still want out. So we record a flag and exit below.
-                (trade as any).__patchForceExit = `MID_HOLD_RISK (freeze=${_patchHasFreeze}, lpUnlocked=${_patchHasLpUnlocked}, singleHolder=${_patchHasSingleHolder})`;
+                // -- MID_HOLD PROFIT GUARD ------------------------------------
+              {
+                const _mhSev   = getMidHoldRiskSeverity(String((trade as any).__patchForceExit ?? ''));
+                const _mhGuard = process.env.MID_HOLD_PROFIT_GUARD !== 'false';
+                const _mhTag   = 'MID_HOLD_RISK (freeze=' + String(_patchHasFreeze) + ', lpUnlocked=' + String(_patchHasLpUnlocked) + ', singleHolder=' + String(_patchHasSingleHolder) + ')';
+                // FIX(TDZ): canonical pnlPct is declared later in this loop iteration; compute a local
+                // P&L here from the in-scope currentPrice + entry (trade.price) so the guard works.
+                const _mhEntry  = parseFloat(String(trade.price));
+                const _mhPnlPct = _mhEntry > 0 ? ((currentPrice - _mhEntry) / _mhEntry) * 100 : 0;
+                if (_mhSev === 'CRITICAL' || _mhPnlPct <= 0) {
+                  (trade as any).__patchForceExit = _mhTag;
+                } else if (_mhSev === 'MODERATE' && _mhGuard && _mhPnlPct > 0.5) {
+                  (trade as any)._dynamicStopFloor = _mhPnlPct - 0.8;
+                  console.log('[MID-HOLD][MODERATE] ' + String(trade.tokenSymbol) + ' profitable +' + _mhPnlPct.toFixed(2) + 'pct tightening trail');
+                } else {
+                  (trade as any).__patchForceExit = _mhTag;
+                }
+              }
+              // -- END MID_HOLD GUARD
               }
             }
           } catch { /* transient rugcheck failure — ignore, will retry next cycle */ }
@@ -4668,6 +4742,26 @@ async function checkOpenPositions() {
           );
         }
         const peakPnl = ((peak - entryPrice) / entryPrice) * 100;
+        // -- DYNAMIC TRAIL + BREAKEVEN LOCK --------------------------
+        if (process.env.DYNAMIC_TRAIL_ENABLED !== 'false') {
+          const _BE_TRIG  = parseFloat(process.env.BREAKEVEN_TRIGGER_PCT ?? '1.0');
+          const _BE_FLOOR = parseFloat(process.env.BREAKEVEN_FLOOR_PCT   ?? '-0.2');
+          if (!(trade as any)._breakevenLocked && peakPnl >= _BE_TRIG) {
+            (trade as any)._breakevenLocked  = true;
+            (trade as any)._dynamicStopFloor = _BE_FLOOR;
+            console.log('[PROFIT-LOCK] ' + String(trade.tokenSymbol) + ' floor=' + _BE_FLOOR.toFixed(1) + 'pct (peak=' + peakPnl.toFixed(2) + 'pct)');
+          }
+          const _trailPct   = getDynamicTrailPct(peakPnl);
+          const _trailFloor = peakPnl - _trailPct;
+          const _stopFloor  = (trade as any)._dynamicStopFloor ?? -Infinity;
+          const _effStop    = Math.max(_trailFloor, _stopFloor);
+          if (pnlPct < _effStop) {
+            const _dReason = (trade as any)._breakevenLocked ? 'BREAKEVEN_LOCK_HIT' : 'DYNAMIC_TRAIL';
+            console.log('[EXIT][' + _dReason + '] ' + String(trade.tokenSymbol) + ' pnl=' + pnlPct.toFixed(2) + 'pct trail=' + _trailPct.toFixed(1) + 'pct peak=' + peakPnl.toFixed(2) + 'pct');
+            (trade as any).__patchForceExit = _dReason;
+          }
+        }
+        // -- END DYNAMIC TRAIL --------------------------------------
         const drawdownFromPeak = peak > 0 ? ((peak - currentPrice) / peak) * 100 : 0;
         
         // BUGFIX #18: was `await` — blocks price-check loop on DB writes (50-200ms each).
@@ -4869,7 +4963,8 @@ async function checkOpenPositions() {
           // else if (holdTime > 20 && dropFromPeakPct >= 25) { shouldClose = true; reason = `PRICE_RUG (-${dropFromPeakPct.toFixed(1)}% from peak)`; }
           else if (pair && (_liqCollapsed || _liqDroppedThreshold)) { shouldClose = true; reason = `LIQ_COLLAPSE (entry $${_effectiveEntryLiq.toFixed(0)} -> now $${_currentLiq.toFixed(0)}, ${_liqCollapsed ? "below $1000 floor" : ">20% drain"})`; }
           else if (pnlPct <= -45) { shouldClose = true; reason = `HARD_LOSS_KILL (pnl ${pnlPct.toFixed(2)}% <= -45% hard floor)`; }
-          else if (pnlPct <= engineSettings.stopLoss) { shouldClose = true; reason = `STOP_LOSS (pnl ${pnlPct.toFixed(2)}% <= ${engineSettings.stopLoss}% igniter hard stop)`; } // AI-TUNE(2026-06-28 IGNITER): re-armed the hard stop the moonshot thesis had disabled. Cuts losers at engineSettings.stopLoss (-15%) instead of letting thin-liquidity names bleed to -45%.
+          // AI-TUNE(2026-06-28 SURVIVAL-STOP): re-armed a real STOP_LOSS. ROOT CAUSE of the -87% ($UNNF) and -50% ($SQQQ) blowups: the MOONSHOT exit disabled STOP_LOSS entirely, leaving only HARD_LOSS_KILL(-45)/DEEP_RUG_KILL(-50) -- a rug gaps from ~-10% past -50% to -87% between two 1s reads. One -87% loss erases three +37% wins on a micro wallet. -22% fires while price is still readable and liquidity present, BEFORE the gap. Moonshots that arm the trail (peak>=12%) exit via the laddered floor far above this, so this only catches positions that dumped before ever arming -- i.e. the rugs.
+          else if (pnlPct <= -22) { shouldClose = true; reason = `STOP_LOSS (pnl ${pnlPct.toFixed(2)}% <= -22% survival stop)`; }
           // ---- TIER 2: profit capture ----
           else if (pnlPct >= engineSettings.hardTakeProfit) { shouldClose = true; reason = `HARD_TAKE_PROFIT (+${pnlPct.toFixed(2)}% >= ${engineSettings.hardTakeProfit}% ceiling)`; }
           else if (peakPnl >= activation && (drawdownFromPeak >= engineSettings.trailingStopDistance || (trailingFloor > 0 && pnlPct <= trailingFloor))) { shouldClose = true; reason = `TRAIL_STOP (peak +${peakPnl.toFixed(1)}%, now +${pnlPct.toFixed(1)}%, locked floor +${trailingFloor.toFixed(1)}%, fell ${drawdownFromPeak.toFixed(1)}%)`; } // AI-TUNE(2026-06-28 LOCK-GAINS): added the floor-trigger `pnlPct <= trailingFloor`. The old condition ONLY fired on a 25-PRICE-POINT drawdown from peak, which for a +25% peak lands BELOW entry (peak*0.75 = -5.7% pnl) — useless for moderate runners. Now once armed (peak>=12%), the position is SOLD the moment pnl falls back to the laddered floor (e.g. peak+25% -> floor +12.5%), so $VORF-type peaks are crystallized near the floor instead of given back. trailWasArmed in FIX H now matches, so the recorded pnl is the real fill, not inflated.
@@ -4895,7 +4990,7 @@ async function checkOpenPositions() {
           // MOONSHOT: Dip Recovery Architecture
           // 1. Stagnant Green Kill: If a token is slightly green (0 to 20%) for 25 minutes without mooning, purge it.
           // 2. Dip Recovery: If it is in a loss (down to -45%), give it up to 30 minutes to bounce back before purging.
-          else if (holdTime > 300 && pnlPct < 2) { shouldClose = true; reason = `STAGNANT_DUD_KILL (Held ${Math.round(holdTime)}s, only ${pnlPct.toFixed(1)}% — flat/red after 5m, recycling slot)`; } // AI-TUNE(2026-06-28 IGNITER v2): was (holdTime>120 && pnl<8). That force-sold CLIMBING winners — $TQQQ hit +6.18% and was knifed under the 8% cost floor (the cost-gate said HOLD, this rule said SELL; they cancelled into a sub-cost exit). Now: only recycle positions that are genuinely flat/red (pnl<2%) AND have had 5 full minutes (300s) to clear cost. A green position climbing toward the floor is left alone to arm the trail (activation now +8%); only true duds are recycled. Pairs with trailingStopActivation 8 so cost-clearing winners get banked instead of dud-killed.
+          else if (holdTime > 1500 && pnlPct >= 0 && pnlPct < 20) { shouldClose = true; reason = `STAGNANT_GREEN_KILL (Held 25m but PNL is only ${pnlPct.toFixed(1)}%)`; } // AI-TUNE(2026-06-28 COST-GATE): 600s(10m) -> 1500s(25m). ROOT CAUSE: modeled round-trip cost floor is ~8% (3.76% x2), but the 10m stagnant-kill flattened any winner stuck between 0% and +8% before it could clear cost. PROOF: $SPCX peaked +3.91% -> killed at +2.25% gross / +0.19% net after exit cost. 25m lets a sub-8% green position mature past the cost floor instead of booking a forced scratch; DIP_RECOVERY_FAILED(30m) and ABSOLUTE_MAX_HOLD still cap the tail.
           else if (holdTime > 1800 && pnlPct < 0) { shouldClose = true; reason = `DIP_RECOVERY_FAILED (Held 30m, failed to bounce from ${pnlPct.toFixed(1)}% loss)`; }
           else if (holdTime > engineSettings.dynamicHoldMaxSeconds) { shouldClose = true; reason = `ABSOLUTE_MAX_HOLD(${Math.round(holdTime)}s > ${engineSettings.dynamicHoldMaxSeconds}s cap, pnl ${pnlPct.toFixed(2)}%)`; }
         }
@@ -5856,5 +5951,57 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     console.log(`[DESYNC_FIX] Done — closed ${fixed}, recovered ${recovered}. Wallet: ${newBal.toFixed(4)} SOL`);
     res.json({ success: true, fixedCount: fixed, recoveredCount: recovered, newWalletBalance: newBal.toFixed(4), openPositionsRemaining: openNow });
   });
+  // ============================================================
+  // GOLD STANDARD HUNTER - Background polling loop (every 30s)
+  // ============================================================
+  if (process.env.GOLD_HUNTER_ENABLED === 'true') {
+    console.log('[GOLD HUNTER] Starting background polling...');
+    const _runGoldCycle = async () => {
+      try {
+        const _sigs = await runHunter();
+        for (const sig of _sigs) {
+          if (sig.tier === 'SKIP' || !sig.gmgn || !sig.dex) continue;
+          console.log('[GOLD] ' + sig.tier + ' | ' + sig.mintAddress.slice(0, 8) + ' | score=' + String(sig.score));
+          if (process.env.MODE === 'live' && sig.tier !== 'LEGENDARY') continue;
+          if (sig.tier === 'MEDIUM') continue;
+          // Normalize into a scan candidate. runScanCycle re-fetches the pair and
+          // re-scores via scoreToken, so it only needs tokenAddress + pairAddress; the
+          // remaining fields are hints. This routes gold picks through the IDENTICAL
+          // safety / sizing / edge / circuit-breaker / execution pipeline as normal scan
+          // candidates instead of duplicating any buy logic here.
+          const _goldAgeSec = sig.gmgn.creation_timestamp
+            ? Math.max(0, Math.floor((Date.now() - sig.gmgn.creation_timestamp * 1000) / 1000))
+            : 0;
+          const _goldCand: any = {
+            tokenAddress: sig.mintAddress,
+            pairAddress: sig.dex.pairAddress,
+            tokenSymbol: sig.dex.baseToken.symbol,
+            score: sig.score,
+            dex: String((sig.dex as any).dexId ?? '').toLowerCase(),
+            price: (sig.dex as any).priceUsd,
+            volume5m: sig.dex.volume?.m5 ?? 0,
+            priceChange5m: 0,   // neutral: don't let a stale hint trip the SNIPER 5m-cooling gate
+            buyPressure5m: '0',
+            ageSeconds: _goldAgeSec,
+            source: 'GOLD_HUNTER',
+            _goldTier: sig.tier,
+            _goldScore: sig.score,
+          };
+          // Dedupe + bound the queue so a slow scan loop can't let it grow unbounded.
+          if (!goldInjectQueue.some((g: any) => g.tokenAddress === _goldCand.tokenAddress)) {
+            goldInjectQueue.push(_goldCand);
+            if (goldInjectQueue.length > 50) goldInjectQueue.splice(0, goldInjectQueue.length - 50);
+            console.log('[GOLD] Queued ' + sig.tier + ' ' + _goldCand.tokenSymbol + ' for scan-loop entry (score=' + String(sig.score) + ')');
+          }
+        }
+      } catch (e) { console.log('[GOLD HUNTER] cycle error: ' + String(e)); }
+    };
+    setTimeout(() => { _runGoldCycle(); setInterval(_runGoldCycle, 30_000); }, 10_000);
+    console.log('[GOLD HUNTER] Active - polling every 30s');
+  } else {
+    console.log('[GOLD HUNTER] Disabled - set GOLD_HUNTER_ENABLED=true to activate');
+  }
+  // ============================================================
+
   return httpServer;
 }

@@ -5,7 +5,7 @@
   "license": "MIT",
   "scripts": {
     "dev": "cross-env NODE_ENV=development tsx server/index.ts",
-    "build": "tsx script/build.ts && npm run build:liquidator",
+    "build": "npm run check && tsx script/build.ts && npm run build:liquidator",
     "build:liquidator": "esbuild server/liquidator.ts --bundle --platform=node --format=cjs --outfile=dist/liquidator.cjs --packages=external",
     "start": "cross-env NODE_ENV=production node dist/index.cjs",
     "start:engine": "cross-env NODE_ENV=production node dist/index.cjs",
