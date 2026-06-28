@@ -269,7 +269,7 @@ let engineSettings = {
   stopLoss: -40, // RESTORED to your engineered -40% thesis. Bleed on dead days should be fixed by a REGIME GATE (only trade when runners are appearing), NOT by tightening the stop — a tighter stop would kill moonshot survival.
 
   // -- Conviction Gates --
-  minScoreToTrade: 70, 
+  minScoreToTrade: 80, // AI-FIX(2026-06-28): 70 -> 80. Shadow analysis: the 70-79 band was the WORST (-3.90%/trade); every band >=80 was positive. Floor lifted to the proven-positive line so the generic gate stops admitting the worst segment. Do not lower without fresh shadow data.
   microMinScoreToTrade: 65, // AI-TUNE(2026-06-27): 70 -> 65. Shadow ledger +3.65%/trade over n=45 (win 64.4%, growth +76.79%); dense momentum band at 65-69 (rej=[], strong mlScore) was being skipped by 1-9 pts. Whale-distribution exit (proved on KNICKS +7%), post-loss cooldown, and price-drift gate now protect entries, so admitting the 65-69 band is +EV. FLOOR at 65 — do not go lower; keep collecting shadow data.
   
   // -- SNIPER Mode Calibration --
@@ -344,7 +344,7 @@ let engineSettings = {
   hwrMinBuyPressure1h: 0.51, // old profitable // old profitable // OLD PROFITABLE: was 0.50
 
   // -- Operational Safety & Discovery --
-  maxTradesPerCycle: 1, // old profitable // FREQ(2026-06-24): 1 -> 2. Lets the bot fill multiple of the now-3 slots without waiting a full scan cycle per entry. 
+  maxTradesPerCycle: 2, // AI-FIX(2026-06-28): 1 -> 2. Frequency via PARALLELISM (zero entry-quality cost): fills up to 2 of the 3 open slots per scan cycle instead of one-at-a-time. Quality bar (minScore 80 + EDGE-POCKET SNIPER>=80 / any>=90) is unchanged. 
   reentryDelayMs: 60000, // old profitable // old profitable // RE-ENTRY CHURN FIX: was 60s. After a flat/stagnant exit (no SL, so no 15min SL blackout) the bot re-bought the SAME token ~60-120s later as it rolled over ($Jetchua: WIN +1.96% -> re-entry #10259 -> SLOW_BLEED -9.65%, peak 0.00%). 5min lets a stalled token either resume a real trend (re-qualifies fresh) or drop off the candidate set. Score>=85 still bypasses (genuine renewed strength).
   slReentryDelayMs: 900000, // old profitable // old profitable 
   txCostsEnabled: 1, // old profitable // old profitable
@@ -935,6 +935,7 @@ const partialTpFailuresMap = new Map<number, number>();
 const midHoldRugcheckMs = new Map<number, number>();
 const midHoldRugcheckLastHash = new Map<number, string>();
 const midHoldWhaleMs = new Map<number, number>(); // LAYER-3b: per-trade last whale-distribution poll
+const whaleExitShadowSeen = new Map<number, { priceAtSignal: number; ts: number }>(); // WHALE_EXIT_SHADOW: records first would-have-exit signal per trade to measure dump-vs-noise (read-only)
 // FIX PRICE_SANITY SPAM + STUCK TRADE: tracks consecutive PRICE_SANITY rejections per
 // trade. A single bad-feed tick is transient and self-corrects in 1–3 cycles. But a
 // token that stays below PRICE_RATIO_MIN for 30+ consecutive cycles (~30 seconds) has
@@ -1521,9 +1522,14 @@ function freeWhaleEnabled(): boolean {
 }
 function smartMoneyEnabled(): boolean {
   _ensureBirdeyeKeysLoaded();
-  // Enabled when EITHER Birdeye keys exist OR the free RPC whale layer is available, so whale
-  // scoring survives Birdeye outages (the free layer is advisory: entry scoring only).
-  return _birdeyeKeys.length > 0 || freeWhaleEnabled();
+  // Enabled when Birdeye keys exist, OR the Helius wallet-level tape is configured, OR the free RPC
+  // whale layer is available, so whale scoring/veto/exit survives Birdeye retirement.
+  // CU-FIX(2026-06-28): added heliusTapeEnabled(). Previously this was Birdeye||free only, so removing
+  // all BIRDEYE_API_KEY* with SOLANA_RPC_URL unset would return false and silently disable the ENTIRE
+  // whale tape (whaleScore + mid-hold exit are gated on whaleTrackingEnabled()->smartMoneyEnabled())
+  // even though Helius keys were present. heliusTapeEnabled() is a hoisted function declaration, so
+  // calling it here (defined later in the file) is safe.
+  return _birdeyeKeys.length > 0 || heliusTapeEnabled() || freeWhaleEnabled();
 }
 
 // AI-FIX(2026-06-24d): shared Birdeye 429 cooldown. The free/Lite tier is CU-metered; once a
@@ -1814,6 +1820,17 @@ async function fetchWhaleTapeHelius(tokenAddress: string, bypassCache: boolean =
 // also trusted for veto + exit). The free getTokenLargestAccounts snapshot is the last advisory resort.
 async function fetchSmartMoneyConvergence(tokenAddress: string, bypassCache: boolean = false, heliusAllowed: boolean = true, birdeyeAllowed: boolean = true): Promise<SmartMoneySignal> {
   if (!tokenAddress) return { count: 0, netBuyers: 0, topRealizedPnl: 0, whaleCount: 0, whaleNetBuyers: 0, whaleNetSellers: 0, washSuspects: 0 };
+  // A/B SWITCH (2026-06-28): WHALE_TAPE=off blinds the entire whale tape (Birdeye + Helius +
+  // free fallback). This reproduces the "Friday" Birdeye-429 state where the tape returned no
+  // data (_wc=0), so the LP-unlocked wash veto in checkTokenSafety goes DORMANT (paper fail-
+  // closed thresholds=101 -> admit) and the mid-hold wash-exit can't fire. The $40k liquidity
+  // floor (ENTRY_MIN_LIQ_USD) is INDEPENDENT of this and stays fully active. Default = on (tape
+  // works). HONEST CAVEAT: blinding the tape re-opens the unlocked-LP rug door ($AC-type winners
+  // AND $AAIF-type -99% rugs come from the same pond). Use only for A/B measurement.
+  const _whaleTapeMode = String(process.env.WHALE_TAPE ?? "on").trim().toLowerCase();
+  if (_whaleTapeMode === "off" || _whaleTapeMode === "false" || _whaleTapeMode === "0" || _whaleTapeMode === "blind") {
+    return { count: 0, netBuyers: 0, topRealizedPnl: 0, whaleCount: 0, whaleNetBuyers: 0, whaleNetSellers: 0, washSuspects: 0, source: "helius" };
+  }
   const bird = birdeyeAllowed ? await fetchSmartMoneyBirdeye(tokenAddress, bypassCache) : ({ count: 0, netBuyers: 0, topRealizedPnl: 0, whaleCount: 0, whaleNetBuyers: 0, whaleNetSellers: 0, washSuspects: 0, source: "birdeye" } as SmartMoneySignal);
   if (bird.count > 0 || bird.whaleCount > 0) return bird;
   const helius = heliusAllowed ? await fetchWhaleTapeHelius(tokenAddress, bypassCache) : ({ count: 0, netBuyers: 0, topRealizedPnl: 0, whaleCount: 0, whaleNetBuyers: 0, whaleNetSellers: 0, washSuspects: 0, source: "helius" } as SmartMoneySignal);
@@ -1893,6 +1910,20 @@ function scoreToken(
   const __ageSec = pair.pairCreatedAt ? (Date.now() - pair.pairCreatedAt) / 1000 : 0;
   if (__mc > 0 && (__mc < 300000 || __mc > 5000000)) combinedScore = Math.max(0, combinedScore - 8);
   if (__ageSec > 21600) combinedScore = Math.max(0, combinedScore - 6);
+  // LAYER-2b BLOW-OFF GUARD: the px component maxes at +10%, so a healthy +10% breakout and a +60%
+  // parabolic earn the identical 15 points. Discount the *already-extended* move so the engine stops
+  // buying tops — root cause of the $?/$nibbly score-65 losses (px5m 54%/72%). Healthy breakouts
+  // (<=25%) are untouched; >25% soft -6; >40% hard -12 (clearly parabolic / chasing).
+  const __pxPen = priceChange5m > 40 ? -12 : priceChange5m > 25 ? -6 : 0;
+  if (__pxPen < 0) combinedScore = Math.max(0, combinedScore + __pxPen);
+  // READ-ONLY DIAGNOSTIC: per-component score anatomy so we can tell an *early* 65 (age/momentum-driven)
+  // from a *late* 65 (price-spike-driven). Toggle with SCORE_BREAKDOWN_LOG=false.
+  if (String(process.env.SCORE_BREAKDOWN_LOG ?? "true").toLowerCase() !== "false") {
+    const __mlAdj = mlScore !== null ? Math.round(mlScore * (1 - (mlPrediction?.dumpRisk ?? 0) * 0.5)) : null;
+    const __mcPen = (__mc > 0 && (__mc < 300000 || __mc > 5000000)) ? -8 : 0;
+    const __agePen = (__ageSec > 21600) ? -6 : 0;
+    console.log(`[SCORE-BREAKDOWN] $${pair.baseToken?.symbol || "?"} combined=${combinedScore} raw=${score}(liq${liqScore}+bp${bpScore}+vol${volScore}+px${priceScore}+tx${txScore}+age${ageScore}+bp1h${bp1hScore}+fdv${fdvScore}=${rawTotal}/95) ml=${mlScore ?? "n/a"}(adj${__mlAdj ?? "n/a"} dump${mlPrediction ? (mlPrediction.dumpRisk * 100).toFixed(0) + "%" : "n/a"}) sm=${smScore} wh=${whScore} pen=${__mcPen + __agePen + __pxPen}(mc${__mcPen}/age${__agePen}/px${__pxPen}) | drivers: px5m=${priceChange5m.toFixed(1)}% volMom=${volMomentum.toFixed(2)} bp5m=${bp5m.toFixed(2)} ageS=${ageSeconds} liq=$${liq.toFixed(0)}`);
+  }
   const metrics = { liq, ageSeconds, bp5m, bp1h, volMomentum, priceChange5m, priceChange1h, txVelocity5m, vol5m, vol1h, fdv, h1buys: h1b, h1sells: h1s, m5buys: m5b, m5sells: m5s, buyPressure5m: bp5m, buyPressure1h: bp1h };
 
   // Micro‑wallet mode: lower score thresholds slightly to allow recovery trades
@@ -2713,6 +2744,13 @@ async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair): Pr
   if (rugcheckBlockedUntil && Date.now() < rugcheckBlockedUntil) return { safe: false, reason: "rugcheck_block_cached" };
 
   const liq = pair.liquidity?.usd || 0;
+  // HARD LIQUIDITY FLOOR (entry gate) — the decisive profitability lever.
+  // Below this, modeled round-trip slippage swallows the move (~8% RT @ $37k liq, ~12% @ $18k).
+  // Requiring deep liquidity pushes the price-impact component of round-trip cost under ~3%,
+  // so a paper "winner" can actually be crystallized instead of being held forever by the cost gate.
+  // Tunable via ENTRY_MIN_LIQ_USD; default $25,000. // AI-TUNE(2026-06-28): default 100000 -> 25000. NEEDLE-MOVER: the live $40k floor was the dominant no-trade cause — nearly all fresh runners (CLIVE/ORANGIE/Cedric/MVLL/SBF/drooling) sit in the $15k-$36k band, were scored top-5, then killed by liquidity_below_entry_floor; only stale large-caps cleared $40k and either scored too low or were vetoed. $25k = documented old-profitable floor, still above the BioCraft $21k disaster line. NOTE: the running .env still sets ENTRY_MIN_LIQ_USD=40000 — change it to 25000 (or remove the line) for this to take effect at runtime.
+  const ENTRY_MIN_LIQ_USD = Number(process.env.ENTRY_MIN_LIQ_USD) || 25000;
+  if (liq < ENTRY_MIN_LIQ_USD) return { safe: false, reason: `liquidity_below_entry_floor($${Math.round(liq)} < $${ENTRY_MIN_LIQ_USD})` };
   const m5sells = pair.txns?.m5?.sells || 0;
   // AGE-SCALED honeypot gate: brand-new launches legitimately have few sells in their first
   // minutes, so a flat `<10` floor blocked most SNIPER-age candidates before RugCheck ran.
@@ -2816,7 +2854,7 @@ async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair): Pr
       // real keys land, set GRADED_LP_ENTRY_WHALE_PRECHECK=true and these wash tokens get vetoed
       // before paying the round-trip. DEFAULT ON (Birdeye retired): the bypass routes to Helius (7 keys), not Birdeye, so no 429 starvation. Set GRADED_LP_ENTRY_WHALE_PRECHECK=false to revert to cached entry behavior.
       const _gradedLpEntryPrecheck = String(process.env.GRADED_LP_ENTRY_WHALE_PRECHECK || "true").toLowerCase() === "true";
-      try { _wsig = await fetchSmartMoneyConvergence(tokenAddress, _gradedLpEntryPrecheck); } catch { _wsig = null; }
+      try { _wsig = await fetchSmartMoneyConvergence(tokenAddress, _gradedLpEntryPrecheck, true, false); } catch { _wsig = null; } // CU-FIX: birdeyeAllowed=false — route this entry precheck to Helius (7 keys, separate quota), matching the "Birdeye retired" intent. Previously defaulted birdeyeAllowed=true and hit Birdeye top_traders FIRST, draining the shared single-account CU pool.
       const _wc = _wsig?.whaleCount ?? 0;            // # top-volume wallets sampled
       const _wSell = _wsig?.whaleNetSellers ?? 0;    // big wallets net-distributing
       const _wBuy = _wsig?.whaleNetBuyers ?? 0;      // big wallets net-accumulating
@@ -2834,7 +2872,7 @@ async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair): Pr
         //  (2) wash-dominated tape with ZERO genuine accumulation: organized fake volume / bundle.
         if (_wSell >= WHALE_DISTRIBUTION_SELLERS) {
           _lpRelaxGateReason = `lp_unlocked_whale_distribution(netSell=${_wSell}>=${WHALE_DISTRIBUTION_SELLERS})`;
-        } else if (_accumQ === 0 && _wash >= Math.ceil(_wc / 2)) {
+        } else if (_accumQ === 0 && _wBuy <= _wSell && _wash >= Math.ceil(_wc / 2)) { // AI-TUNE(2026-06-28): added _wBuy <= _wSell guard. The Helius tape reports accumQ(netBuyers)=0 as an artifact even when whales are net-BUYING (e.g. TQQQ/drooling: netBuy=10 netSell=0 wash=5), causing a permanent false wash veto on otherwise top-scoring candidates. Only treat wash-no-accumulation as a real bundle/wash exit when whales are NOT net-accumulating (_wBuy <= _wSell). The whale_distribution branch above is untouched, so genuine organized exits still hard-veto.
           _lpRelaxGateReason = `lp_unlocked_wash_no_accumulation(wash=${_wash}/${_wc})`;
         }
         if (_lpRelaxGateReason) {
@@ -3245,6 +3283,8 @@ async function runScanCycle() {
         let __combined2 = combined;
         if (__mc2 > 0 && (__mc2 < 300000 || __mc2 > 5000000)) __combined2 = Math.max(0, __combined2 - 8);
         if (__ageSec2 > 21600) __combined2 = Math.max(0, __combined2 - 6);
+        const __px5m2 = pair?.priceChange?.m5 || 0;
+        if (__px5m2 > 40) __combined2 = Math.max(0, __combined2 - 12); else if (__px5m2 > 25) __combined2 = Math.max(0, __combined2 - 6);
         scoring = { ...scoring, mlScore, combinedScore: __combined2 };
       } else {
         const freshMl = await getMLPrediction(scoring.metrics);
@@ -3257,6 +3297,8 @@ async function runScanCycle() {
           let __combined3 = combined;
           if (__mc3 > 0 && (__mc3 < 300000 || __mc3 > 5000000)) __combined3 = Math.max(0, __combined3 - 8);
           if (__ageSec3 > 21600) __combined3 = Math.max(0, __combined3 - 6);
+          const __px5m3 = pair?.priceChange?.m5 || 0;
+          if (__px5m3 > 40) __combined3 = Math.max(0, __combined3 - 12); else if (__px5m3 > 25) __combined3 = Math.max(0, __combined3 - 6);
           scoring = { ...scoring, mlScore, combinedScore: __combined3 };
         }
       }
@@ -3307,9 +3349,9 @@ async function runScanCycle() {
       // Combined with the quality-only source feed (Jupiter Verified + top-traded), this is the tightened gate:
       // SNIPER mode AND combinedScore >= 80 (the only data-proven positive pocket).
       // Disable with EDGE_POCKET_ONLY=false in .env if you want all modes/scores back.
-      const _edgePocketOnly = false; // FREQUENCY FIX: Disabled edge pocket completely
+      const _edgePocketOnly = String(process.env.EDGE_POCKET_ONLY ?? "true").toLowerCase() !== "false"; // AI-FIX(2026-06-28): re-enabled (was hard-disabled by "FREQUENCY FIX"). Restricts entries to the only data-proven positive pocket: SNIPER+score>=EDGE_MIN_SCORE OR any mode score>=90. MG (-0.50%) and HWR (-1.71%) are net-negative and excluded. Default ON; set EDGE_POCKET_ONLY=false to revert.
       const _EDGE_MODES = ["SNIPER"];
-      const _EDGE_MIN_SCORE = 75; // AI-TUNE(2026-06-24): 80 -> 75. 80 starved entries (best clean candidate $YSY at 79 SNIPER rej=[] blocked by 1 point). 75 admits the 75-79 SNIPER band which has strong mode qualification (rej=[]) with no score-gate failure. Paper-mode validation run.
+      const _EDGE_MIN_SCORE = Number(process.env.EDGE_MIN_SCORE) || 80; // AI-FIX(2026-06-28): 75 -> 80. Shadow data: every score band >=80 was positive; the 75-79 slice sits inside the worst (-3.90%) band. Restored to the proven-positive line. Tunable via EDGE_MIN_SCORE.
       // AI-TUNE(2026-06-24) Smarter pocket: (SNIPER mode + score>=80) OR (any mode + score>=90).
       // Rationale: data showed SNIPER+score>=80 was the cleanest edge (+4.71%), but also that
       // score>=90 was positive across ALL modes. With more verified/mature tokens now flowing
@@ -4017,7 +4059,7 @@ function getEffectiveMinScore(isMicroWallet: boolean = false): number {
 const FORCE_SELL_INTERVAL_MS  = 15_000;          // FIX 5: retry interval for persistent liquidation
 const MAX_FORCE_SELL_TIME_MS  = 5 * 60_000;       // FIX 5: max 5-minute liquidation window
 
-// ─────────���───��───────────────────────────��───────────────────────────────────
+// ───────���─���───��───────────────────────────��───────────────────────────────────
 // FIX 5: Persistent forced-liquidation loop.
 //
 // When a normal sell exhausts its retry budget (sellFailureStrikes > MAX_SELL_FAILURES)
@@ -4201,12 +4243,23 @@ async function checkOpenPositions() {
         if (whaleTrackingEnabled() && _patchHoldAgeMs > 30_000 && Date.now() - (midHoldWhaleMs.get(trade.id) ?? 0) > (Number(process.env.MID_HOLD_WHALE_THROTTLE_MS) || 120_000)) {
           midHoldWhaleMs.set(trade.id, Date.now());
           try {
-            const _wsig = await fetchSmartMoneyConvergence(trade.tokenAddress, true);
+            const _wsig = await fetchSmartMoneyConvergence(trade.tokenAddress, true, true, false); // CU-FIX: birdeyeAllowed=false — mid-hold whale exit now uses Helius only. Previously defaulted birdeyeAllowed=true AND bypassCache=true, so every open position polled Birdeye top_traders fresh every MID_HOLD_WHALE_THROTTLE_MS, ignoring the 120s cache — the dominant CU drain. Helius source still satisfies the exit's source-trust check, so the distribution/wash exit still fires.
             // EXIT trusts Birdeye flow only -- the free snapshot layer is advisory and must never force-exit a winner.
-            const _distributing = (_wsig.source === "birdeye" || _wsig.source === "helius") && _wsig.whaleNetSellers >= WHALE_DISTRIBUTION_SELLERS && _wsig.whaleNetSellers > _wsig.whaleNetBuyers; const _washExitMidHold = (_wsig.source === "birdeye" || _wsig.source === "helius") && (_wsig.whaleCount ?? 0) > 0 && (_wsig.netBuyers ?? 0) === 0 && (_wsig.washSuspects ?? 0) >= Math.ceil((_wsig.whaleCount ?? 0) / 2); /* AI-FIX(2026-06-27): same lp_unlocked_wash_no_accumulation discriminator used at entry, now applied mid-hold. AAIF entered Birdeye-blind (wash=0) then flipped wash=9/10 while the probe suppressed LP mid-hold exits and rode it to -99%. Organized wash/bundle != overt net-selling, so the seller-count exit missed it. */
+            const _distributing = (_wsig.source === "birdeye" || _wsig.source === "helius") && _wsig.whaleNetSellers >= WHALE_DISTRIBUTION_SELLERS && _wsig.whaleNetSellers > _wsig.whaleNetBuyers; const _washExitMidHold = (_wsig.source === "birdeye" || _wsig.source === "helius") && (_wsig.whaleCount ?? 0) > 0 && (_wsig.netBuyers ?? 0) === 0 && ((_wsig.whaleNetBuyers ?? 0) <= (_wsig.whaleNetSellers ?? 0)) && (_wsig.washSuspects ?? 0) >= Math.ceil((_wsig.whaleCount ?? 0) / 2); /* AI-TUNE(2026-06-28): added (whaleNetBuyers <= whaleNetSellers) guard to mirror the entry-side fix — the Helius accumQ=0 artifact must not force-exit a winner whose whales are actually net-buying. Genuine net-selling still trips _distributing above. */ /* AI-FIX(2026-06-27): same lp_unlocked_wash_no_accumulation discriminator used at entry, now applied mid-hold. AAIF entered Birdeye-blind (wash=0) then flipped wash=9/10 while the probe suppressed LP mid-hold exits and rode it to -99%. Organized wash/bundle != overt net-selling, so the seller-count exit missed it. */
             if ((_distributing || _washExitMidHold) && !(trade as any).__patchForceExit) {
-              console.warn(`[WHALE-DISTRIBUTION] #${trade.id} ${trade.tokenSymbol} — ${_washExitMidHold ? "organized wash/bundle with zero accumulation" : "top wallets flipped to net-selling"} (sellers=${_wsig.whaleNetSellers} buyers=${_wsig.whaleNetBuyers} wash=${_wsig.washSuspects}/${_wsig.whaleCount} accumQ=${_wsig.netBuyers}); exiting ahead of dump.`);
-              (trade as any).__patchForceExit = _washExitMidHold ? `WASH_NO_ACCUMULATION (wash=${_wsig.washSuspects}/${_wsig.whaleCount}, accumQ=${_wsig.netBuyers})` : `WHALE_DISTRIBUTION (sellers=${_wsig.whaleNetSellers}, buyers=${_wsig.whaleNetBuyers})`;
+              const _whaleExitReason = _washExitMidHold ? `WASH_NO_ACCUMULATION (wash=${_wsig.washSuspects}/${_wsig.whaleCount}, accumQ=${_wsig.netBuyers})` : `WHALE_DISTRIBUTION (sellers=${_wsig.whaleNetSellers}, buyers=${_wsig.whaleNetBuyers})`;
+              // WHALE_EXIT_SHADOW (default OFF): when enabled, do NOT act on the whale-distribution signal —
+              // just log it and let the position ride, so we can measure whether the exit front-runs a real
+              // dump (price keeps falling => keep it) or panics on noise (price recovers => relax it).
+              // Default OFF preserves the live exit exactly. Run this only in paper for a measurement window.
+              const _whaleExitShadow = String(process.env.WHALE_EXIT_SHADOW ?? "false").toLowerCase() === "true";
+              if (_whaleExitShadow) {
+                if (!whaleExitShadowSeen.has(trade.id)) whaleExitShadowSeen.set(trade.id, { priceAtSignal: currentPrice, ts: Date.now() });
+                console.warn(`[WHALE-WOULD-EXIT] #${trade.id} $${trade.tokenSymbol} — SHADOW (not acting): ${_whaleExitReason} | priceAtSignal=$${currentPrice.toFixed(8)} (sellers=${_wsig.whaleNetSellers} buyers=${_wsig.whaleNetBuyers} wash=${_wsig.washSuspects}/${_wsig.whaleCount} accumQ=${_wsig.netBuyers}). Tracking forward via LIFECYCLE:HOLD.`);
+              } else {
+                console.warn(`[WHALE-DISTRIBUTION] #${trade.id} ${trade.tokenSymbol} — ${_washExitMidHold ? "organized wash/bundle with zero accumulation" : "top wallets flipped to net-selling"} (sellers=${_wsig.whaleNetSellers} buyers=${_wsig.whaleNetBuyers} wash=${_wsig.washSuspects}/${_wsig.whaleCount} accumQ=${_wsig.netBuyers}); exiting ahead of dump.`);
+                (trade as any).__patchForceExit = _whaleExitReason;
+              }
             }
           } catch { /* transient whale-flow fetch failure — ignore, retry next cycle */ }
         }
@@ -4613,7 +4666,9 @@ async function checkOpenPositions() {
         const _now = Date.now();
         if (_now - (lifecycleLastLogMs.get(trade.id) ?? 0) >= LIFECYCLE_HOLD_INTERVAL_MS) {
           lifecycleLastLogMs.set(trade.id, _now);
-          console.log(`[LIFECYCLE:HOLD] id=#${trade.id} $${trade.tokenSymbol} | age: ${Math.round(holdTime)}s | pnl: ${pnlPct.toFixed(2)}% | peak: ${peakPnl.toFixed(2)}% | price: $${currentPrice.toFixed(8)} | mode: ${trade.mode}`);
+          const _wsh = whaleExitShadowSeen.get(trade.id);
+          const _wshTag = _wsh ? ` | WHALE-SHADOW: ${Math.round((Date.now() - _wsh.ts) / 1000)}s since signal, px $${_wsh.priceAtSignal.toFixed(8)}->$${currentPrice.toFixed(8)} (${_wsh.priceAtSignal > 0 ? (((currentPrice - _wsh.priceAtSignal) / _wsh.priceAtSignal) * 100).toFixed(2) + "%" : "n/a"} since signal)` : "";
+          console.log(`[LIFECYCLE:HOLD] id=#${trade.id} $${trade.tokenSymbol} | age: ${Math.round(holdTime)}s | pnl: ${pnlPct.toFixed(2)}% | peak: ${peakPnl.toFixed(2)}% | price: $${currentPrice.toFixed(8)} | mode: ${trade.mode}${_wshTag}`);
         }
         // TRAIL:ACTIVATED — logged once when trailing stop becomes armed
         if (!trailActivatedLogged.has(trade.id) && peakPnl >= engineSettings.trailingStopActivation) {
