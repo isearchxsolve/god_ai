@@ -5,8 +5,8 @@ const target = path.join(__dirname, 'fast_scanner.cjs');
 let s = fs.readFileSync(target, 'utf8');
 
 // 1. Tune Constants
-s = s.replace(/const MIN_LP_USD = 0;/g, 'const MIN_LP_USD = 10000;');
-s = s.replace(/const MIN_VOL_LIQ_RATIO = 0;/g, 'const MIN_VOL_LIQ_RATIO = 1.0;');
+s = s.replace(/const MIN_LP_USD = 50000;/g, 'const MIN_LP_USD = 10000;');
+s = s.replace(/const MIN_VOL_LIQ_RATIO = 1;/g, 'const MIN_VOL_LIQ_RATIO = 1.0;');
 s = s.replace(/const MAX_TOP_HOLDER_PCT = 20;/g, 'const MAX_TOP_HOLDER_PCT = 15;');
 s = s.replace(/const MAX_TOP10_HOLDERS_PCT = 60;/g, 'const MAX_TOP10_HOLDERS_PCT = 50;');
 

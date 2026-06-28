@@ -351,9 +351,14 @@ export function goldScore(
   const ageH = (Date.now() / 1000 - (g.creation_timestamp ?? 0)) / 3600;
   if (ageH < 1) {
     score += 15; signals.push(`Age ${(ageH * 60).toFixed(0)}min [<1h FIRE] (+15)`);
-  } else if (ageH < 6) {
-    score += 10; signals.push(`Age ${ageH.toFixed(1)}h [<6h, 2.33x ratio] (+10)`);
-  } else if (ageH > 24) {
+  } else if (ageH < CFG.MAX_TOKEN_AGE_HOURS) {
+    const ageRatio = CFG.MAX_TOKEN_AGE_HOURS / Math.max(1, ageH);
+    if (ageRatio > 2) {
+      score += 10; signals.push(`Age ${ageH.toFixed(1)}h [<${CFG.MAX_TOKEN_AGE_HOURS}h, ${ageRatio.toFixed(2)}x ratio] (+10)`);
+    } else {
+      score += 5;  signals.push(`Age ${ageH.toFixed(1)}h [<${CFG.MAX_TOKEN_AGE_HOURS}h] (+5)`);
+    }
+  } else {
     score -= 5;  signals.push(`Age ${ageH.toFixed(0)}h [stale, -5]`);
   }
 
@@ -364,7 +369,7 @@ export function goldScore(
     score += 15; signals.push(`BuyRatio ${(buyRatio * 100).toFixed(1)}% [68% moon] (+15)`);
   } else if (buyRatio >= 0.97) {
     score += 10; signals.push(`BuyRatio ${(buyRatio * 100).toFixed(1)}% [step function] (+10)`);
-  } else if (buyRatio < 0.50) {
+  } else if (buyRatio < 0.40) {
     score -= 5;  signals.push(`BuyRatio ${(buyRatio * 100).toFixed(1)}% [weak, -5]`);
   }
 
@@ -386,7 +391,7 @@ export function goldScore(
     score += 10; signals.push(`CapEff $${capEff.toFixed(0)}/swap [elite] (+10)`);
   } else if (capEff >= 500) {
     score += 6;  signals.push(`CapEff $${capEff.toFixed(0)}/swap [serious] (+6)`);
-  } else if (capEff < 50) {
+  } else if (capEff < 20) {
     score -= 5;  signals.push(`CapEff $${capEff.toFixed(0)}/swap [bot spam, -5]`);
   }
 

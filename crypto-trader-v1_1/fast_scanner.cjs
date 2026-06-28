@@ -1,10 +1,157 @@
-console.log("================================================================");
-console.log("🛑 FAST SCANNER DISABLED 🛑");
-console.log("Per user instruction, the generic fast_scanner feeds are disabled.");
-console.log("All discovery is now exclusively routed through the GMGN God-Tier");
-console.log("Hunter to ensure only High-Quantity, High-Quality coins enter the pipeline.");
-console.log("You can close this window/process.");
-console.log("================================================================");
 
-// Prevent immediate exit if run in a loop script, but do no work.
-setInterval(() => {}, 1000 * 60 * 60);
+require('dotenv').config();
+const WebSocket = require('ws');
+const fs = require('fs');
+const path = require('path');
+
+const HELIUS_RPC = process.env.SOLANA_RPC_URL;
+const HELIUS_WSS = HELIUS_RPC ? HELIUS_RPC.replace('https://', 'wss://') : '';
+const CANDIDATES_FILE = path.join(__dirname, 'candidates.csv');
+
+// Verified Solana program IDs (post-graduation venues only)
+const RAYDIUM_AMM_V4 = '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8';
+const PUMPSWAP_AMM  = 'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA';
+
+// Filter thresholds (from the safety plan)
+const MIN_LP_USD = 10000;
+const MIN_AGE_HOURS = 0;
+const MAX_AGE_HOURS = 72;
+const MIN_VOL_LIQ_RATIO = 1.0;
+const MAX_VOL_LIQ_RATIO = 10;
+const MAX_TOP_HOLDER_PCT = 15;   // includes LP, so cap is looser than 10%
+const MAX_TOP10_HOLDERS_PCT = 50; // same reason
+
+const SOL_MINT = 'So11111111111111111111111111111111111111112';
+
+if (!fs.existsSync(CANDIDATES_FILE)) {
+    fs.writeFileSync(CANDIDATES_FILE,
+        'timestamp,mint,rugcheck_score,liq_usd,age_hours,top1_pct,top10_pct,vol_liq_ratio,dexscreener_url\n');
+}
+
+function log(msg) { console.log(`[${new Date().toISOString()}] ${msg}`); }
+
+async function rugcheckPass(mint) {
+    try {
+        const r = await fetch(`https://api.rugcheck.xyz/v1/tokens/${mint}/report/summary`);
+        if (!r.ok) return { pass: false, reason: `rugcheck http ${r.status}` };
+        const d = await r.json();
+        if (d.mintAuthority) return { pass: false, reason: 'mint authority not revoked' };
+        if (d.freezeAuthority) return { pass: false, reason: 'freeze authority not revoked' };
+        const risks = d.risks || [];
+        if (risks.some(x => x.level === 'danger')) return { pass: false, reason: 'rugcheck danger flag' };
+        if (risks.some(x => x.level === 'high'))   return { pass: false, reason: 'rugcheck high-risk flag' };
+        return { pass: true, score: d.score ?? 0 };
+    } catch (e) { return { pass: false, reason: `rugcheck err: ${e.message}` }; }
+}
+
+async function dexscreenerPass(mint) {
+    try {
+        const r = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${mint}`);
+        if (!r.ok) return { pass: false, reason: `dex http ${r.status}` };
+        const d = await r.json();
+        const sol = (d.pairs || []).filter(p => p.chainId === 'solana');
+        if (!sol.length) return { pass: false, reason: 'no solana pair' };
+        const best = sol.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
+        const liq = best.liquidity?.usd || 0;
+        const vol = best.volume?.h24 || 0;
+        const ageH = (Date.now() - (best.pairCreatedAt || Date.now())) / 3600000;
+        const ratio = liq > 0 ? vol / liq : 0;
+        if (liq < MIN_LP_USD)      return { pass: false, reason: `liq $${liq.toFixed(0)} < $${MIN_LP_USD}` };
+        if (ageH < MIN_AGE_HOURS)  return { pass: false, reason: `age ${ageH.toFixed(1)}h < ${MIN_AGE_HOURS}h` };
+        if (ageH > MAX_AGE_HOURS)  return { pass: false, reason: `age ${ageH.toFixed(1)}h > ${MAX_AGE_HOURS}h` };
+        if (ratio < MIN_VOL_LIQ_RATIO) return { pass: false, reason: `vol/liq ${ratio.toFixed(2)} (dead)` };
+        if (ratio > MAX_VOL_LIQ_RATIO) return { pass: false, reason: `vol/liq ${ratio.toFixed(2)} (wash)` };
+        return { pass: true, liq, ageH, ratio, url: best.url };
+    } catch (e) { return { pass: false, reason: `dex err: ${e.message}` }; }
+}
+
+async function holderPass(mint) {
+    try {
+        const lg = await (await fetch(HELIUS_RPC, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getTokenLargestAccounts', params: [mint] })
+        })).json();
+        const accs = lg.result?.value || [];
+        if (accs.length < 10) return { pass: false, reason: 'too few large holders' };
+        const sup = await (await fetch(HELIUS_RPC, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getTokenSupply', params: [mint] })
+        })).json();
+        const total = Number(sup.result?.value?.amount || 0);
+        if (!total) return { pass: false, reason: 'zero supply' };
+        const top1  = (Number(accs[0].amount) / total) * 100;
+        const top10 = accs.slice(0, 10).reduce((s, a) => s + Number(a.amount), 0) / total * 100;
+        if (top1  > MAX_TOP_HOLDER_PCT)   return { pass: false, reason: `top1 ${top1.toFixed(1)}%` };
+        if (top10 > MAX_TOP10_HOLDERS_PCT) return { pass: false, reason: `top10 ${top10.toFixed(1)}%` };
+        return { pass: true, top1, top10 };
+    } catch (e) { return { pass: false, reason: `holder err: ${e.message}` }; }
+}
+
+const seen = new Set();
+const q = [];
+let busy = false;
+
+async function evaluate(mint) {
+    log(`Evaluating ${mint}`);
+    const a = await rugcheckPass(mint);
+    if (!a.pass) { log(`  ✗ RugCheck: ${a.reason}`); return; }
+    const b = await dexscreenerPass(mint);
+    if (!b.pass) { log(`  ✗ DexScreener: ${b.reason}`); return; }
+    const c = await holderPass(mint);
+    if (!c.pass) { log(`  ✗ Holders: ${c.reason}`); return; }
+    const row = [
+        new Date().toISOString(), mint, (a.score || 0).toFixed(0),
+        b.liq.toFixed(0), b.ageH.toFixed(1),
+        c.top1.toFixed(1), c.top10.toFixed(1),
+        b.ratio.toFixed(2), b.url
+    ].join(',') + '\n';
+    fs.appendFileSync(CANDIDATES_FILE, row);
+    log(`★ CANDIDATE: ${mint} | LP $${b.liq.toFixed(0)} | age ${b.ageH.toFixed(1)}h | ${b.url}`);
+}
+
+async function drain() {
+    if (busy) return; busy = true;
+    while (q.length) {
+        const m = q.shift();
+        if (seen.has(m)) continue;
+        seen.add(m);
+        try { await evaluate(m); } catch (e) { log(`eval err: ${e.message}`); }
+        await new Promise(r => setTimeout(r, 600));
+    }
+    busy = false;
+}
+
+// WSS Removed, exclusively using HTTP polling
+
+
+
+// -- REST polling discovery via GeckoTerminal trending-pools --
+async function pollTrendingPools() {
+    let nextDelay = POLL_INTERVAL_MS * 2; // Poll trending every 16s
+    try {
+        const url = "https://" + GT_HOST + "/api/v2/networks/solana/trending_pools?page=1";
+        const r = await fetch(url, { headers: { "Accept": "application/json" } });
+        if (r.status === 429) {
+            log("GeckoTerminal 429 (trending)");
+        } else if (r.ok) {
+            const d = await r.json();
+            const pools = d?.data || [];
+            let n = 0;
+            for (const p of pools) {
+                const baseId = p?.relationships?.base_token?.data?.id || "";
+                const mint = baseId.indexOf("solana_") === 0 ? baseId.slice(7) : "";
+                const dexId = (p?.relationships?.dex?.data?.id || "").toLowerCase();
+                if (!mint || mint === SOL_MINT || mint.length < 32 || seen.has(mint)) continue;
+                if (!_dexAllowAll && !_dexAllow.some(a => dexId.includes(a))) continue;
+                log("Queued trending pool mint: " + mint);
+                q.push(mint); n++;
+            }
+            if (n) { log("GeckoTerminal Trending: " + n + " mint(s) queued"); drain(); }
+        }
+    } catch (e) {
+        log("trending-pools poll err: " + e.message);
+    } finally {
+        setTimeout(pollTrendingPools, nextDelay + Math.floor(Math.random() * 1000));
+    }
+}
+pollTrendingPools();

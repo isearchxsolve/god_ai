@@ -37,7 +37,8 @@ async function simulate() {
       passingCoins++;
       console.log(`    ✅ PASS: ${coin.mintAddress.slice(0,6)}... | Score: ${coin.score} | Tier: ${coin.tier} | Signals: ${coin.signals.length}`);
     } else {
-      // console.log(`    ❌ FAIL: ${coin.mintAddress.slice(0,6)}... | Score: ${coin.score}`);
+      console.log(`    ❌ FAIL: ${coin.mintAddress.slice(0,6)}... | Score: ${coin.score} | Tier: ${coin.tier}`);
+      console.log(`       -> Signals: ${JSON.stringify(coin.signals)}`);
     }
   }
 
