@@ -402,7 +402,7 @@ export function goldScore(
     score -= 5;  signals.push('No smart money (-5)');
   }
 
-  const ratRate = g.stat.top_rat_trader_percentage ? parseFloat(g.stat.top_rat_trader_percentage.toString()) : -1;
+  const ratRate = g.stat.rat_trader_amount_rate ?? -1;
   if (ratRate >= 0 && ratRate < 0.01) {
     score += 12; signals.push(`RatRate ${(ratRate*100).toFixed(1)}% [12.5x edge] (+12)`);
   } else if (ratRate >= 0 && ratRate < 0.03) {
