@@ -156,14 +156,14 @@ const CFG = {
   CHAIN: 'sol' as const,
 
   // === LAYER 3: Quality Thresholds ===
-  MIN_LIQUIDITY_USD:    50_000,   // 369x ratio at 50K–100K
-  MIN_HOLDER_COUNT:     1_000,    // 65.90% moon rate
+  MIN_LIQUIDITY_USD:    15_000,   // AI-TUNED for high quantity God-Tier   // 369x ratio at 50K–100K
+  MIN_HOLDER_COUNT:     300,      // AI-TUNED for high quantity God-Tier    // 65.90% moon rate
   MAX_HOLDER_COUNT:     5_000,    // sweet spot top
   MIN_MARKET_CAP:       100_000,  // 78.32% moon rate
   MAX_MARKET_CAP:     1_000_000,
 
   // === LAYER 4: Timing ===
-  MAX_TOKEN_AGE_HOURS:  6,        // 2.33x ratio
+  MAX_TOKEN_AGE_HOURS:  72,       // AI-TUNED for high quantity God-Tier        // 2.33x ratio
   MIN_BUY_RATIO:        0.97,     // step function threshold
   MIN_VOL_ACCEL:        3.0,      // explosive = >5x
   MIN_CAPITAL_EFF:      500,      // $500 avg/swap = serious buyers
@@ -364,7 +364,7 @@ export function goldScore(
     score += 15; signals.push(`BuyRatio ${(buyRatio * 100).toFixed(1)}% [68% moon] (+15)`);
   } else if (buyRatio >= 0.97) {
     score += 10; signals.push(`BuyRatio ${(buyRatio * 100).toFixed(1)}% [step function] (+10)`);
-  } else if (buyRatio < 0.80) {
+  } else if (buyRatio < 0.50) {
     score -= 5;  signals.push(`BuyRatio ${(buyRatio * 100).toFixed(1)}% [weak, -5]`);
   }
 
@@ -402,10 +402,10 @@ export function goldScore(
     score -= 5;  signals.push('No smart money (-5)');
   }
 
-  const ratRate = g.stat.rat_trader_amount_rate ?? 1;
-  if (ratRate < 0.01) {
+  const ratRate = g.stat.top_rat_trader_percentage ? parseFloat(g.stat.top_rat_trader_percentage.toString()) : -1;
+  if (ratRate >= 0 && ratRate < 0.01) {
     score += 12; signals.push(`RatRate ${(ratRate*100).toFixed(1)}% [12.5x edge] (+12)`);
-  } else if (ratRate < 0.03) {
+  } else if (ratRate >= 0 && ratRate < 0.03) {
     score += 8;  signals.push(`RatRate ${(ratRate*100).toFixed(1)}% [clean] (+8)`);
   } else if (ratRate > 0.10) {
     score -= 8;  signals.push(`RatRate ${(ratRate*100).toFixed(1)}% [bot dominated, -8]`);
@@ -602,7 +602,7 @@ export async function pollSmartMoneyFeed(): Promise<GoldSignal[]> {
   const results: GoldSignal[] = [];
 
   const feed = await gmgnList<SmartMoneyTrade>(
-    `track smartmoney --chain ${CFG.CHAIN} --side buy --limit 100`
+    `track smartmoney --chain ${CFG.CHAIN} --side buy --limit 300`
   );
 
   if (!feed.length) return results;
@@ -687,13 +687,13 @@ export async function pollTrending(): Promise<GoldSignal[]> {
     ` --platform Pump.fun --platform letsbonk --platform pump_mayhem --platform believe --platform boop` +
     ` --filter renounced --filter frozen --filter not_wash_trading --filter has_social --filter creator_hold` +
     ` --min-smart-degen-count 1` +
-    ` --max-created 6h` +
+    ` --max-created ${CFG.MAX_TOKEN_AGE_HOURS}h` +
     ` --min-liquidity ${CFG.MIN_LIQUIDITY_USD}` +
     ` --min-holder-count ${CFG.MIN_HOLDER_COUNT}` +
     ` --max-insider-rate ${CFG.MAX_INSIDER_RATE}` +
     ` --max-bundler-rate ${CFG.MAX_BUNDLER_RATE}` +
     ` --max-entrapment-ratio ${CFG.MAX_ENTRAPMENT_RATE}` +
-    ` --order-by smart_degen_count --limit 50`
+    ` --order-by smart_degen_count --limit 200`
   );
 
   if (!data.length) return results;
@@ -748,7 +748,7 @@ export async function pollTrenches(): Promise<GoldSignal[]> {
     ` --max-bundler-rate ${CFG.MAX_BUNDLER_RATE}` +
     ` --min-holder-count 300` +
     ` --max-top-holder-rate 0.30` +
-    ` --sort-by smart_degen_count --limit 50`
+    ` --sort-by smart_degen_count --limit 200`
   );
 
   if (nearComp.length) {
@@ -917,6 +917,11 @@ export async function checkMint(mint: string): Promise<GoldSignal | null> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 7. MASTER HUNTER — runs all feeds, deduplicates, returns top signals
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -941,6 +946,7 @@ export async function runHunter(): Promise<GoldSignal[]> {
     }
   };
 
+  
   // Run all hunters in parallel
   const [signalResults, clusterResults, trendingResults, trenchesResults, dexResults] =
     await Promise.allSettled([
@@ -948,7 +954,7 @@ export async function runHunter(): Promise<GoldSignal[]> {
       pollSmartMoneyFeed(),
       pollTrending(),
       pollTrenches(),
-      pollDexScreenerFeeds(),
+      pollDexScreenerFeeds()
     ]);
 
   if (signalResults.status  === 'fulfilled') addUnique(signalResults.value);
@@ -956,6 +962,7 @@ export async function runHunter(): Promise<GoldSignal[]> {
   if (trendingResults.status === 'fulfilled') addUnique(trendingResults.value);
   if (trenchesResults.status === 'fulfilled') addUnique(trenchesResults.value);
   if (dexResults.status     === 'fulfilled') addUnique(dexResults.value);
+  
 
   // Sort by score descending
   allResults.sort((a, b) => b.score - a.score);

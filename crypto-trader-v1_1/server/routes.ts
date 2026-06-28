@@ -291,30 +291,30 @@ let engineSettings = {
   // -- Core Exit & Speed Strategy --
   // PATCH #3: lowered from 15/8 to 5/3. Memecoin pumps rarely reach +15% in a single
   trailingStopActivation: 12, // AI-TUNE(2026-06-28 LOCK-GAINS): 50 -> 12. ROOT CAUSE of growth -86%: at activation=50 the trail (and the laddered trailingFloor protection in FIX H) NEVER armed for any peak under +50%, so winners round-tripped to ~0 and were booked as losses. PROOF: $VORF peaked +25.74% -> sold -1.41% via STAGNANT_GREEN_KILL, peak never armed trail @50%. Arming at +12% lets the laddered floor (peak>30->60%, >15->50%, >8->40%) actually protect moderate runners. Paired with the floor-trigger added to TRAIL_STOP below so the exit fires AT the floor (honest fill, no paper inflation) instead of only on a full 25-pt drawdown.
-  trailingStopDistance: 25, // RESTORED to your engineered MOONSHOT value.
+  trailingStopDistance: 5, // RESTORED to your engineered MOONSHOT value.
   hardTakeProfit: 100000000, // AI-FIX(2026-06-27b): REVERTED to uncapped. Profit engine is the rare +400% runner ($AC=+429%); an +80% cap would destroy it. Let winners run; control risk on the LOSS side instead.
-  stopLoss: -40, // RESTORED to your engineered -40% thesis. Bleed on dead days should be fixed by a REGIME GATE (only trade when runners are appearing), NOT by tightening the stop — a tighter stop would kill moonshot survival.
+  stopLoss: -5, // RESTORED to your engineered -40% thesis. Bleed on dead days should be fixed by a REGIME GATE (only trade when runners are appearing), NOT by tightening the stop — a tighter stop would kill moonshot survival.
 
   // -- Conviction Gates --
-  minScoreToTrade: 80, // AI-FIX(2026-06-28): 70 -> 80. Shadow analysis: the 70-79 band was the WORST (-3.90%/trade); every band >=80 was positive. Floor lifted to the proven-positive line so the generic gate stops admitting the worst segment. Do not lower without fresh shadow data.
-  microMinScoreToTrade: 65, // AI-TUNE(2026-06-27): 70 -> 65. Shadow ledger +3.65%/trade over n=45 (win 64.4%, growth +76.79%); dense momentum band at 65-69 (rej=[], strong mlScore) was being skipped by 1-9 pts. Whale-distribution exit (proved on KNICKS +7%), post-loss cooldown, and price-drift gate now protect entries, so admitting the 65-69 band is +EV. FLOOR at 65 — do not go lower; keep collecting shadow data.
+  minScoreToTrade: 90, // AI-FIX(2026-06-28): 70 -> 80. Shadow analysis: the 70-79 band was the WORST (-3.90%/trade); every band >=80 was positive. Floor lifted to the proven-positive line so the generic gate stops admitting the worst segment. Do not lower without fresh shadow data.
+  microMinScoreToTrade: 90, // AI-TUNE(2026-06-27): 70 -> 65. Shadow ledger +3.65%/trade over n=45 (win 64.4%, growth +76.79%); dense momentum band at 65-69 (rej=[], strong mlScore) was being skipped by 1-9 pts. Whale-distribution exit (proved on KNICKS +7%), post-loss cooldown, and price-drift gate now protect entries, so admitting the 65-69 band is +EV. FLOOR at 65 — do not go lower; keep collecting shadow data.
   
   // -- SNIPER Mode Calibration --
-  sniperMinScore: 20, 
+  sniperMinScore: 85, 
   sniperMinBuyPressure: 0.05,
   // -- Core Exit & Speed Strategy --
   // trailingStopActivation: 5, 
   // trailingStopDistance: 2.5, 
   // hardTakeProfit: 80, 
-  // stopLoss: -6,
+  // stopLoss: -5,
   maxHoldSeconds: 14400, // MOONSHOT: 4 hour absolute ceiling (Conditional 10-min kill switch handles mundane coins) 
-    maxOpenPositions: 3, // old profitable: one position at a time // FREQ(2026-06-24): 1 -> 3. Parallelism is the #1 frequency lever and costs ZERO entry quality. Total exposure is still bounded by maxTotalExposure (~maxPositionSize*2, see ~L2670), so 3 slots just split the SAME capital into smaller, more numerous trades — more frequency, same aggregate risk. Self-caps in live by balance/exposure.
+    maxOpenPositions: 1, // old profitable: one position at a time // FREQ(2026-06-24): 1 -> 3. Parallelism is the #1 frequency lever and costs ZERO entry quality. Total exposure is still bounded by maxTotalExposure (~maxPositionSize*2, see ~L2670), so 3 slots just split the SAME capital into smaller, more numerous trades — more frequency, same aggregate risk. Self-caps in live by balance/exposure.
     startingBalance: 0.05,        // Paper-mode starting balance: 0.05 SOL
   scanIntervalMs: 4000, // old profitable: slower scan / less churn // FREQ(2026-06-24): 30000 -> 10000. Hunt for entries every 10s instead of 30s (3x cadence). Same entry gates, so no quality change — just less idle waiting between scans. Birdeye rate-limit is fine (top_traders cached 120s; 300 req/min tier).
   priceCheckIntervalMs: 1000, // old profitable: faster exit checks // old profitable: faster exit checks   // OLD PROFITABLE: 3s price check
 
   // -- Conviction Gates (Lowered for current market) --
-  // minScoreToTrade: 70,          // was 85 → matches actual B+ setups
+  // minScoreToTrade: 90,          // was 85 → matches actual B+ setups
   mlServiceUrl: "http://localhost:5001",
   mlWeight: 0.50,  
   scoreWeight: 0.50, 
@@ -330,11 +330,11 @@ let engineSettings = {
   partialTpCostMargin: 4,        // PAPER-TEST(cost-relative): profit cushion in % added on top of the modeled round-trip cost when computing the effective partial-TP trigger. effectivePartialTp = max(partialTpThreshold, modeledRoundTrip + this). Keeps the partial from firing until it nets real profit above the trade's actual exit cost.
 
   // -- Sizing Strategy (Calibrated for 1000x compounding) --
-  minPositionSize: 0.012, // UPGRADE: Reduced to 100 INR (0.015 SOL) to give 3 bullets.
+  minPositionSize: 0.005, // UPGRADE: Reduced to 100 INR (0.015 SOL) to give 3 bullets.
   maxPositionSize: 0.015, // UPGRADE: Cap at 0.018 SOL for micro-wallet safety.
   
   // -- SNIPER Mode Calibration --
-  // sniperMinScore: 70,
+  // sniperMinScore: 85,
   sniperMaxAge: 14400, // FREQUENCY FIX: raised from 300 to 1800 (30 mins)
   // sniperMinBuyPressure: 0.55, 
   sniperMinLiquidity: 10000, // old profitable non-micro setting // AI-TUNE(2026-06-24e): 40000 -> 25000. NEEDLE-MOVER: re-enables the only EMPIRICALLY-positive pocket. EDGE-POCKET realized data = SNIPER+score>=80 -> +3.06%/trade (n=63, +159.8% growth); MG/HWR are net-negative and stay excluded by EDGE_POCKET_ONLY. The 40-60k floor was set by a Monte Carlo model that predicted +7.5%/trade but live shadow is -0.78% (model falsified). The 40k floor excluded ~every high-score SNIPER candidate (live: $man s89/$3k, $Yippee s92/$17k, $EPSTEINZE s84/$22k). 25k = documented old-profitable floor, still ABOVE the BioCraft $21k disaster line; the +3.06% pocket was sampled at ~this floor. PAPER-mode hypothesis test; EDGE-POCKET stays ON; do NOT go live on this alone. // MC(2026-06-24): 60000 -> 40000. The $60k floor starved entries in this market (live log: strong score-79..88 candidates at $42-55k liq all rejected [liq < 60000], nothing qualified). $40k is the pre-identified fallback: modeled EV still ~+6.7%/trade (dampened) vs +7.5% at $60k, but it admits the $48-54k cluster that actually exists right now. // MC(2026-06-24): raised 20000 -> 60000. Calibrated Monte Carlo (reproduces live win 42.1%/EV -0.24%) shows the ~3.76% round-trip spread at $20k is the dominant per-trade drag; $60k cuts RT cost to ~2.25% and lifts modeled EV from +4.9% to +7.5%/trade, robust even under maturity-dampening. Gains plateau past $60k. Score>=90 entry gate deferred until win-rate-by-score is logged (unanchored + starves flow). // old profitable non-micro setting // OLD PROFITABLE: was 25000 — too restrictive, starved SNIPER of fresh launches for ~$0.37 paper orders, pool depth barely affects slippage — the real round-trip cost is fees/spread, now handled by the +12% trailing-stop activation. The $50k floor starved the bot in this market (every clean token is <$50k; the only >$50k tokens are all rug-vetoed for unlocked LP). $25k stays above the BioCraft $21k disaster line; downside is protected by rugcheck + the fixed exit economics, not by pool depth.
@@ -366,7 +366,7 @@ let engineSettings = {
   mgMaxAge: 86400,           // FIX(mg-stale-entry): 2400s = 40min. Every MG winner was < 36min old (WCT 2153s).
                             // Every MG loss on aged tokens (RDR2 8.4k-10.6k, MYLOO 9.7k-11.2k, MrAsteroid 3.2k+)
                             // was on a stale token whose momentum had already exited. Caps MG to live momentum only.
-  maxEntryPriceChange5m: 300, // HARDENED: Extreme anti-chase disabled for frequency
+  maxEntryPriceChange5m: 10, // HARDENED: Extreme anti-chase disabled for frequency
   hwrMinBuyPressure5m: 0.55, // FREQUENCY FIX: relaxed from 0.70 to 0.55
   hwrMinBuyPressure1h: 0.51, // old profitable // old profitable // OLD PROFITABLE: was 0.50
 
@@ -387,7 +387,7 @@ let engineSettings = {
   // re-admits fee-bleed/optimism. They stay hardcoded in getEdgeParams().
   minEdgePct:       -5.0,   // non-micro edge threshold (pass if edge >= this)
   edgeBuffer:       1.0,   // non-micro flat cushion, pct
-  microMinEdgePct:  -5.0,   // OLD PROFITABLE: was 0.5 — relaxed for micro-wallet
+  microMinEdgePct: 5.0,   // OLD PROFITABLE: was 0.5 — relaxed for micro-wallet
   microEdgeBuffer:  0.5,   // micro-wallet flat cushion, pct
 
   maxVolLiqRatioNewToken: 14, // old profitable // old profitable // OLD PROFITABLE: was 14
@@ -5658,8 +5658,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (!updates || typeof updates !== "object") return res.status(400).json({ message: "Invalid settings payload" });
       const validKeys = Object.keys(engineSettings) as (keyof typeof engineSettings)[];
       let restartIntervals = false;
-      const minValues: Record<string, number> = { scanIntervalMs: 4000, priceCheckIntervalMs: 1000, reentryDelayMs: 0, slReentryDelayMs: 0, lossCooldownMs: 0, maxHoldSeconds: 10, maxOpenPositions: 3, maxTradesPerCycle: 1, minScoreToTrade: 30, microMinScoreToTrade: 30, startingBalance: 0.1, minPositionSize: 0.01, maxPositionSize: 0.0075, txFeePercent: 0, rugcheckMinScore: 0, maxVolLiqRatioNewToken: 1, maxDiscoveryAgeSeconds: 86400, dynamicHoldMaxSeconds: 60, txCostsEnabled: 0, safetyChecksEnabled: 0, dynamicHoldEnabled: 0, compoundBoostEnabled: 0, compoundRefSol: 0.1, compoundPower: 0.5, compoundMaxMultiplier: 1.0, compoundAbsCapSol: 0.1, minEdgePct: 0, edgeBuffer: 0, microMinEdgePct: 0, microEdgeBuffer: 0 };
-      const maxValues: Record<string, number> = { mlWeight: 1, scoreWeight: 1, partialTpRatio: 1, dailyLossLimitPct: 100, maxDrawdownPct: 100, txFeePercent: 5, rugcheckMinScore: 1000, maxVolLiqRatioNewToken: 50, maxDiscoveryAgeSeconds: 86400, dynamicHoldMaxSeconds: 14400, txCostsEnabled: 1, safetyChecksEnabled: 1, dynamicHoldEnabled: 1, compoundBoostEnabled: 1, compoundRefSol: 100.0, compoundPower: 5.0, compoundMaxMultiplier: 10.0, compoundAbsCapSol: 10.0, minEdgePct: 20, edgeBuffer: 10, microMinEdgePct: 20, microEdgeBuffer: 10 };
+      const minValues: Record<string, number> = { scanIntervalMs: 4000, priceCheckIntervalMs: 1000, reentryDelayMs: 0, slReentryDelayMs: 0, lossCooldownMs: 0, maxHoldSeconds: 10, maxOpenPositions: 1, maxTradesPerCycle: 1, minScoreToTrade: 90, microMinScoreToTrade: 90, startingBalance: 0.1, minPositionSize: 0.005, maxPositionSize: 0.015, txFeePercent: 0, rugcheckMinScore: 0, maxVolLiqRatioNewToken: 1, maxDiscoveryAgeSeconds: 86400, dynamicHoldMaxSeconds: 60, txCostsEnabled: 0, safetyChecksEnabled: 0, dynamicHoldEnabled: 0, compoundBoostEnabled: 0, compoundRefSol: 0.1, compoundPower: 0.5, compoundMaxMultiplier: 1.0, compoundAbsCapSol: 0.1, minEdgePct: 0, edgeBuffer: 0, microMinEdgePct: 5.0, microEdgeBuffer: 0 };
+      const maxValues: Record<string, number> = { mlWeight: 1, scoreWeight: 1, partialTpRatio: 1, dailyLossLimitPct: 100, maxDrawdownPct: 100, txFeePercent: 5, rugcheckMinScore: 1000, maxVolLiqRatioNewToken: 50, maxDiscoveryAgeSeconds: 86400, dynamicHoldMaxSeconds: 14400, txCostsEnabled: 1, safetyChecksEnabled: 1, dynamicHoldEnabled: 1, compoundBoostEnabled: 1, compoundRefSol: 100.0, compoundPower: 5.0, compoundMaxMultiplier: 10.0, compoundAbsCapSol: 10.0, minEdgePct: 20, edgeBuffer: 10, microMinEdgePct: 5.0, microEdgeBuffer: 10 };
       for (const key of validKeys) {
         if (key in updates) {
           const newVal = updates[key];
