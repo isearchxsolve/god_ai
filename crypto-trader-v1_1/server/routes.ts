@@ -5897,8 +5897,16 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     if (sig.tier === 'LEGENDARY' && !scoring.qualifiedMode) {
       scoring = { ...scoring, qualifiedMode: 'SNIPER' };
     }
+    // New-mint funnel survivors enter at a DEDICATED lower bar (default 80) without
+    // touching the global 90 gate that protects the GMGN/scanner paths. They already
+    // passed: 90s delay + liquidity floor + net m5 buyers + not-in-freefall + young-age.
+    const NEW_MINT_MIN_SCORE = Number(process.env.NEW_MINT_MIN_SCORE) || 80;
+    const _isNewMintSurvivor = sig.tier === 'NEW_MINT' && scoring.combinedScore >= NEW_MINT_MIN_SCORE;
+    if (_isNewMintSurvivor && !scoring.qualifiedMode) {
+      scoring = { ...scoring, qualifiedMode: 'SNIPER', sizeSol: Math.max(engineSettings.minPositionSize, scoring.sizeSol || engineSettings.minPositionSize) };
+    }
     
-    const effectiveMinScore = getEffectiveMinScore(isMicroWallet);
+    const effectiveMinScore = _isNewMintSurvivor ? NEW_MINT_MIN_SCORE : getEffectiveMinScore(isMicroWallet);
     if (!scoring.qualifiedMode || scoring.combinedScore < effectiveMinScore) {
       console.log(`[GOLD-ENTRY] SKIP $${sig.dex.baseToken.symbol.slice(0,8)} — score ${scoring.combinedScore} < ${effectiveMinScore} mode=${scoring.qualifiedMode || 'none'}`);
       return;
@@ -6153,6 +6161,63 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   }
   const _newMintShapeLogged = new Set<string>();
 
+  // --- New-mint confirmation funnel (2026-06-29) -----------------------------
+  // The first Raydium swap IS the creator's exit, so entering at T+0 is -EV.
+  // Instead we watchlist the mint and only enter after a delay IF it survived the
+  // dump (liquidity floor + net m5 buyers + not in freefall). New mints are NOT
+  // scored LEGENDARY; they route through the normal gates with a neutral score.
+  const NEW_MINT_ENTRY_DELAY_MS = Number(process.env.NEW_MINT_ENTRY_DELAY_MS) || 90_000;
+  const NEW_MINT_MAX_AGE_MS = Number(process.env.NEW_MINT_MAX_AGE_MS) || 600_000;
+  const NEW_MINT_MIN_LIQ_USD = Number(process.env.NEW_MINT_MIN_LIQ_USD) || 25_000;
+  const NEW_MINT_MIN_M5_CHANGE = Number(process.env.NEW_MINT_MIN_M5_CHANGE ?? '-5');
+  const NEW_MINT_SCORE = Number(process.env.NEW_MINT_SCORE) || 0;
+  const NEW_MINT_MAX_TOKEN_AGE_MIN = Number(process.env.NEW_MINT_MAX_TOKEN_AGE_MIN) || 60;
+  let _promoteRunning = false;
+  const newMintWatchlist = new Map<string, { firstSeenTs: number; symbol: string; label: string }>();
+
+  async function promoteNewMintWatchlist(): Promise<void> {
+    if (newMintWatchlist.size === 0) return;
+    if (_promoteRunning) return; // prevent overlapping 6s cycles from double-processing the same mint
+    _promoteRunning = true;
+    try {
+    const now = Date.now();
+    for (const [mint, info] of [...newMintWatchlist.entries()]) {
+      const age = now - info.firstSeenTs;
+      if (age < NEW_MINT_ENTRY_DELAY_MS) continue;
+      // One shot per mint: drop from the watchlist regardless of outcome.
+      newMintWatchlist.delete(mint);
+      if (age > NEW_MINT_MAX_AGE_MS) { _newMintDiag('expired ' + mint.slice(0, 8) + ' (aged out before confirm)'); continue; }
+      if (tradedAddresses.has(mint) || recentlyAttemptedBuys.has(mint) || hardBlockedAddresses.has(mint) || stoppedOutAddresses.has(mint)) continue;
+
+      let pair: DexScreenerPair | null = null;
+      try {
+        const data = await throttledDexScreenerFetch('https://api.dexscreener.com/latest/dex/tokens/' + mint, 5000);
+        const pairs: DexScreenerPair[] = (data?.pairs || []).filter((p: any) => p.chainId === 'solana');
+        pair = pairs.length > 0 ? pairs.reduce((best: DexScreenerPair, p: DexScreenerPair) => (p.liquidity?.usd || 0) > (best.liquidity?.usd || 0) ? p : best) : null;
+      } catch (e: any) { _newMintDiag('confirm fetch failed ' + mint.slice(0, 8) + ': ' + (e?.message || String(e))); continue; }
+
+      if (!pair) { console.log('[NEW-MINT] DROP $' + info.symbol + ' - no DexScreener pair after ' + Math.round(age / 1000) + 's (never listed / died)'); continue; }
+      const price = parseFloat(pair.priceUsd || '0');
+      const liq = pair.liquidity?.usd || 0;
+      const m5buys = pair.txns?.m5?.buys || 0;
+      const m5sells = pair.txns?.m5?.sells || 0;
+      const m5change = pair.priceChange?.m5 ?? 0;
+      const tokenAgeMin = pair.pairCreatedAt ? (Date.now() - pair.pairCreatedAt) / 60000 : 0;
+
+      if (price <= 0) { console.log('[NEW-MINT] DROP $' + info.symbol + ' - zero price'); continue; }
+      if (pair.pairCreatedAt && tokenAgeMin > NEW_MINT_MAX_TOKEN_AGE_MIN) { console.log('[NEW-MINT] DROP $' + info.symbol + ' - not a new mint (pool age ' + Math.round(tokenAgeMin) + 'min > ' + NEW_MINT_MAX_TOKEN_AGE_MIN + 'min)'); continue; }
+      if (liq < NEW_MINT_MIN_LIQ_USD) { console.log('[NEW-MINT] DROP $' + info.symbol + ' - liq $' + liq.toFixed(0) + ' < floor $' + NEW_MINT_MIN_LIQ_USD); continue; }
+      if (m5buys <= m5sells) { console.log('[NEW-MINT] DROP $' + info.symbol + ' - net sellers m5 (buys=' + m5buys + ' sells=' + m5sells + ', dump not passed)'); continue; }
+      if (m5change < NEW_MINT_MIN_M5_CHANGE) { console.log('[NEW-MINT] DROP $' + info.symbol + ' - m5 ' + m5change + '% < ' + NEW_MINT_MIN_M5_CHANGE + '% (freefall)'); continue; }
+
+      const sig: any = { mintAddress: mint, score: NEW_MINT_SCORE, tier: 'NEW_MINT', dex: { baseToken: { symbol: info.symbol } } };
+      console.log('[NEW-MINT] CONFIRM $' + info.symbol + ' (' + mint.slice(0, 8) + '...) age=' + Math.round(age / 1000) + 's liq=$' + liq.toFixed(0) + ' m5buys=' + m5buys + '/' + m5sells + ' m5chg=' + m5change + '% -> normal-gate entry');
+      try { await goldHunterTradeEntry(sig); }
+      catch (e: any) { console.warn('[NEW-MINT] entry error for ' + mint.slice(0, 8) + ': ' + (e?.message || String(e))); }
+    }
+    } finally { _promoteRunning = false; }
+  }
+
   async function pollNewMintsHelius(): Promise<void> {
     const programs: Array<[string, string]> = [['RAYV4', RAYDIUM_AMM_V4], ['PUMPSWAP', PUMP_SWAP_PROGRAM]];
     let pollTxTotal = 0;
@@ -6208,12 +6273,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           // Skip during bootstrap - we are just learning the existing mint set.
           if (!newMintDetectorBootstrapped) continue;
           if (tradedAddresses.has(mint) || recentlyAttemptedBuys.has(mint) || hardBlockedAddresses.has(mint) || stoppedOutAddresses.has(mint)) continue;
+          if (newMintWatchlist.has(mint)) continue;
 
+          // STRATEGY (2026-06-29): do NOT enter at T+0 -- the first Raydium swap is the
+          // creator's exit. Watchlist it; promoteNewMintWatchlist() re-checks after a
+          // delay and only enters survivors via the normal gates.
           const symbol = mint.slice(0, 6);
-          const syntheticSig: any = { mintAddress: mint, score: 100, tier: 'LEGENDARY', dex: { baseToken: { symbol } } };
-          console.log('[NEW-MINT] $' + symbol + ' (' + mint.slice(0, 8) + '...) - first seen via ' + label + ', feeding into pipeline');
-          try { await goldHunterTradeEntry(syntheticSig); }
-          catch (e: any) { console.warn('[NEW-MINT] entry error for ' + mint.slice(0, 8) + ': ' + (e?.message || String(e))); }
+          newMintWatchlist.set(mint, { firstSeenTs: Date.now(), symbol, label });
+          console.log('[NEW-MINT] $' + symbol + ' (' + mint.slice(0, 8) + '...) - first seen via ' + label + ', watchlisted (confirm in ' + Math.round(NEW_MINT_ENTRY_DELAY_MS / 1000) + 's)');
         }
       }
       if (!sawTokenTransfers) _newMintDiag('[' + label + '] ' + txs.length + ' txs but NONE had tokenTransfers (parsed-tx shape mismatch)');
@@ -6233,6 +6300,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       // when there are zero new mints - distinguishes "no new mints" from "API failing".
       _newMintDiag('heartbeat - okPrograms=' + pollOkPrograms + '/2 txs=' + pollTxTotal + ' newMints=' + pollNewMints + ' known=' + knownMintsOnRaydium.size, 60000);
     }
+
+    // Confirmation funnel: promote aged, surviving watchlist mints.
+    await promoteNewMintWatchlist();
 
     if (knownMintsOnRaydium.size > 20000) {
       const arr = [...knownMintsOnRaydium];
