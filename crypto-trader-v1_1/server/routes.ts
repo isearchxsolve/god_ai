@@ -13,6 +13,7 @@ import { setDefaultResultOrder as __setDnsResultOrder } from "node:dns";
 // GOLD STANDARD HUNTER
 // =============================================================
 import { runHunter, checkMint, pollSignalFeed, pollTrending, pollTrenches, pollSmartMoneyFeed, pollDexScreenerFeeds } from './gold_standard_hunter';
+import { evaluateNewMintGate, GateInput } from './lib/newMintGate';
 
 // AI-FIX(2026-06-24): Force IPv4-first DNS resolution. Node 17+ defaults to "verbatim"
 // (AAAA/IPv6 returned first); on hosts without working IPv6, undici fetch() to
@@ -289,7 +290,7 @@ let engineSettings = {
   // -- Core Exit & Speed Strategy --
   // PATCH #3: lowered from 15/8 to 5/3. Memecoin pumps rarely reach +15% in a single
   trailingStopActivation: 12, // AI-TUNE(2026-06-28 LOCK-GAINS): 50 -> 12. ROOT CAUSE of growth -86%: at activation=50 the trail (and the laddered trailingFloor protection in FIX H) NEVER armed for any peak under +50%, so winners round-tripped to ~0 and were booked as losses. PROOF: $VORF peaked +25.74% -> sold -1.41% via STAGNANT_GREEN_KILL, peak never armed trail @50%. Arming at +12% lets the laddered floor (peak>30->60%, >15->50%, >8->40%) actually protect moderate runners. Paired with the floor-trigger added to TRAIL_STOP below so the exit fires AT the floor (honest fill, no paper inflation) instead of only on a full 25-pt drawdown.
-  trailingStopDistance: 5, // RESTORED to your engineered MOONSHOT value.
+  trailingStopDistance: Number(process.env.TRAIL_DISTANCE_PCT) || 15, // PLAYBOOK(2026-06-29): 5 -> 15. Standard new-token trailing stop is -15% to -20% (let winners run; works alongside the laddered trailingFloor). Override via TRAIL_DISTANCE_PCT (set =5 to restore the engineered MOONSHOT value).
   hardTakeProfit: 100000000, // AI-FIX(2026-06-27b): REVERTED to uncapped. Profit engine is the rare +400% runner ($AC=+429%); an +80% cap would destroy it. Let winners run; control risk on the LOSS side instead.
   stopLoss: -5, // RESTORED to your engineered -40% thesis. Bleed on dead days should be fixed by a REGIME GATE (only trade when runners are appearing), NOT by tightening the stop — a tighter stop would kill moonshot survival.
 
@@ -4815,7 +4816,7 @@ async function checkOpenPositions() {
           else if (pair && (_liqCollapsed || _liqDroppedThreshold)) { shouldClose = true; reason = `LIQ_COLLAPSE (entry $${_effectiveEntryLiq.toFixed(0)} -> now $${_currentLiq.toFixed(0)}, ${_liqCollapsed ? "below $1000 floor" : ">20% drain"})`; }
           else if (pnlPct <= -45) { shouldClose = true; reason = `HARD_LOSS_KILL (pnl ${pnlPct.toFixed(2)}% <= -45% hard floor)`; }
           // AI-TUNE(2026-06-28 SURVIVAL-STOP): re-armed a real STOP_LOSS. ROOT CAUSE of the -87% ($UNNF) and -50% ($SQQQ) blowups: the MOONSHOT exit disabled STOP_LOSS entirely, leaving only HARD_LOSS_KILL(-45)/DEEP_RUG_KILL(-50) -- a rug gaps from ~-10% past -50% to -87% between two 1s reads. One -87% loss erases three +37% wins on a micro wallet. -22% fires while price is still readable and liquidity present, BEFORE the gap. Moonshots that arm the trail (peak>=12%) exit via the laddered floor far above this, so this only catches positions that dumped before ever arming -- i.e. the rugs.
-          else if (pnlPct <= -22) { shouldClose = true; reason = `STOP_LOSS (pnl ${pnlPct.toFixed(2)}% <= -22% survival stop)`; }
+          else if (pnlPct <= (Number(process.env.HARD_STOP_PCT) || -20)) { shouldClose = true; reason = `STOP_LOSS (pnl ${pnlPct.toFixed(2)}% <= ${(Number(process.env.HARD_STOP_PCT) || -20)}% survival stop)`; } // PLAYBOOK(2026-06-29): -22 -> -20 hard stop. Override via HARD_STOP_PCT.
           // ---- TIER 2: profit capture ----
           else if (pnlPct >= engineSettings.hardTakeProfit) { shouldClose = true; reason = `HARD_TAKE_PROFIT (+${pnlPct.toFixed(2)}% >= ${engineSettings.hardTakeProfit}% ceiling)`; }
           else if (peakPnl >= activation && (drawdownFromPeak >= engineSettings.trailingStopDistance || (trailingFloor > 0 && pnlPct <= trailingFloor))) { shouldClose = true; reason = `TRAIL_STOP (peak +${peakPnl.toFixed(1)}%, now +${pnlPct.toFixed(1)}%, locked floor +${trailingFloor.toFixed(1)}%, fell ${drawdownFromPeak.toFixed(1)}%)`; } // AI-TUNE(2026-06-28 LOCK-GAINS): added the floor-trigger `pnlPct <= trailingFloor`. The old condition ONLY fired on a 25-PRICE-POINT drawdown from peak, which for a +25% peak lands BELOW entry (peak*0.75 = -5.7% pnl) — useless for moderate runners. Now once armed (peak>=12%), the position is SOLD the moment pnl falls back to the laddered floor (e.g. peak+25% -> floor +12.5%), so $VORF-type peaks are crystallized near the floor instead of given back. trailWasArmed in FIX H now matches, so the recorded pnl is the real fill, not inflated.
@@ -4838,6 +4839,7 @@ async function checkOpenPositions() {
           // 1. Stagnant Green Kill: If a token is slightly green (0 to 20%) for 25 minutes without mooning, purge it.
           // 2. Dip Recovery: If it is in a loss (down to -45%), give it up to 30 minutes to bounce back before purging.
           else if (holdTime > 1500 && pnlPct >= 0 && pnlPct < 20) { shouldClose = true; reason = `STAGNANT_GREEN_KILL (Held 25m but PNL is only ${pnlPct.toFixed(1)}%)`; } // AI-TUNE(2026-06-28 COST-GATE): 600s(10m) -> 1500s(25m). ROOT CAUSE: modeled round-trip cost floor is ~8% (3.76% x2), but the 10m stagnant-kill flattened any winner stuck between 0% and +8% before it could clear cost. PROOF: $SPCX peaked +3.91% -> killed at +2.25% gross / +0.19% net after exit cost. 25m lets a sub-8% green position mature past the cost floor instead of booking a forced scratch; DIP_RECOVERY_FAILED(30m) and ABSOLUTE_MAX_HOLD still cap the tail.
+          else if (holdTime > (Number(process.env.MAX_HOLD_SECONDS_OVERRIDE) || 300) && peakPnl < activation) { shouldClose = true; reason = `TIME_EXIT (held ${Math.round(holdTime)}s > cap, never armed trail; peak ${peakPnl.toFixed(1)}%, pnl ${pnlPct.toFixed(2)}%)`; } // PLAYBOOK(2026-06-29): standard memecoin time-stop at 300s. Only cuts positions that NEVER armed the moonshot trail (peak < activation=12%); armed runners keep running under the laddered floor. Disable/extend via MAX_HOLD_SECONDS_OVERRIDE (e.g. =1800 to restore old behavior).
           else if (holdTime > 1800 && pnlPct < 0) { shouldClose = true; reason = `DIP_RECOVERY_FAILED (Held 30m, failed to bounce from ${pnlPct.toFixed(1)}% loss)`; }
           else if (holdTime > engineSettings.dynamicHoldMaxSeconds) { shouldClose = true; reason = `ABSOLUTE_MAX_HOLD(${Math.round(holdTime)}s > ${engineSettings.dynamicHoldMaxSeconds}s cap, pnl ${pnlPct.toFixed(2)}%)`; }
         }
@@ -5893,54 +5895,43 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const goldBoosted = Math.max(scoring.combinedScore, Math.round(sig.score * 1.1));
     scoring = { ...scoring, combinedScore: goldBoosted };
     
-    // Force SNIPER mode for LEGENDARY gold picks (they're the real-time sniper-grade tokens)
-    if (sig.tier === 'LEGENDARY' && !scoring.qualifiedMode) {
-      scoring = { ...scoring, qualifiedMode: 'SNIPER' };
-    }
-    // New-mint funnel survivors enter at a DEDICATED lower bar (default 65) without
-    // touching the global 90 gate that protects the GMGN/scanner paths. They already
-    // passed: 90s delay + liquidity floor + net m5 buyers + not-in-freefall + young-age.
-    const NEW_MINT_MIN_SCORE = Number(process.env.NEW_MINT_MIN_SCORE) || 65;
-    const _isNewMintSurvivor = sig.tier === 'NEW_MINT' && scoring.combinedScore >= NEW_MINT_MIN_SCORE;
-    if (_isNewMintSurvivor && !scoring.qualifiedMode) {
-      scoring = { ...scoring, qualifiedMode: 'SNIPER', sizeSol: Math.max(engineSettings.minPositionSize, scoring.sizeSol || engineSettings.minPositionSize) };
+    // New-mint survivors get a size floor (runtime concern, not gate logic)
+    if (sig.tier === 'NEW_MINT' && scoring.combinedScore >= (Number(process.env.NEW_MINT_MIN_SCORE) || 65)) {
+      scoring = { ...scoring, sizeSol: Math.max(engineSettings.minPositionSize, scoring.sizeSol || engineSettings.minPositionSize) };
     }
     
-    const effectiveMinScore = _isNewMintSurvivor ? NEW_MINT_MIN_SCORE : getEffectiveMinScore(isMicroWallet);
-    if (!scoring.qualifiedMode || scoring.combinedScore < effectiveMinScore) {
-      console.log(`[GOLD-ENTRY] SKIP $${sig.dex.baseToken.symbol.slice(0,8)} — score ${scoring.combinedScore} < ${effectiveMinScore} mode=${scoring.qualifiedMode || 'none'}`);
+    // Evaluate gate via the pure decision function
+    const gateResult = evaluateNewMintGate({
+      tier: sig.tier,
+      sigScore: sig.score,
+      combinedScore: scoring.combinedScore,
+      mlScore: scoring.mlScore ?? 0,
+      px5m: Number((scoring.metrics as any)?.priceChange5m ?? 0),
+      volMom: Number((scoring.metrics as any)?.volMomentum ?? 0),
+      bp5m: parseFloat(String((scoring.metrics as any)?.bp5m ?? '0')),
+      pc5m: Number((scoring.metrics as any)?.priceChange5m ?? 0),
+      qualifiedMode: scoring.qualifiedMode,
+      isMicroWallet,
+      minScoreOverride: getEffectiveMinScore(isMicroWallet),
+      env: {
+        NEW_MINT_MIN_SCORE: Number(process.env.NEW_MINT_MIN_SCORE) || 65,
+        EDGE_POCKET_ONLY: process.env.EDGE_POCKET_ONLY,
+        EDGE_MIN_SCORE: Number(process.env.EDGE_MIN_SCORE) || 80,
+        EDGE_HIGH_CONF_SCORE: Number(process.env.EDGE_HIGH_CONF_SCORE) || 90,
+        EDGE_EXPLOSIVE_SCORE: Number(process.env.EDGE_EXPLOSIVE_SCORE) || 85,
+        EDGE_EXPLOSIVE_ML: Number(process.env.EDGE_EXPLOSIVE_ML) || 80,
+        EDGE_EXPLOSIVE_PX5M: Number(process.env.EDGE_EXPLOSIVE_PX5M) || 8,
+        EDGE_EXPLOSIVE_VOLMOM: Number(process.env.EDGE_EXPLOSIVE_VOLMOM) || 1.5,
+        ENTRY_CONFIRM_MIN_BP: Number(process.env.ENTRY_CONFIRM_MIN_BP ?? 0.50),
+        ENTRY_CONFIRM_MIN_PC5M: Number(process.env.ENTRY_CONFIRM_MIN_PC5M ?? 0),
+      },
+    });
+    if (!gateResult.admit) {
+      console.log(`[GOLD-ENTRY] SKIP $${sig.dex.baseToken.symbol.slice(0,8)} — ${gateResult.reason}`);
       return;
     }
-    
-    // EDGE_POCKET_ONLY gate — same as main pipeline
-    const _edgePocketOnly = String(process.env.EDGE_POCKET_ONLY ?? 'true').toLowerCase() !== 'false';
-    const _EDGE_MODES = ['SNIPER'];
-    const _EDGE_MIN_SCORE = Number(process.env.EDGE_MIN_SCORE) || 80;
-    const _isSniperEdge = _EDGE_MODES.includes(scoring.qualifiedMode) && scoring.combinedScore >= _EDGE_MIN_SCORE;
-    const _isHighConfidence = scoring.combinedScore >= (Number(process.env.EDGE_HIGH_CONF_SCORE) || 90);
-    const _eqScore = Number(process.env.EDGE_EXPLOSIVE_SCORE) || 85;
-    const _eqMl = Number(process.env.EDGE_EXPLOSIVE_ML) || 80;
-    const _eqPx5m = Number(process.env.EDGE_EXPLOSIVE_PX5M) || 8;
-    const _eqVolMom = Number(process.env.EDGE_EXPLOSIVE_VOLMOM) || 1.5;
-    const _isExplosiveQuality = (scoring.combinedScore >= _eqScore) && (Number(scoring.mlScore ?? 0) >= _eqMl) && (Number((scoring.metrics as any)?.priceChange5m ?? 0) >= _eqPx5m) && (Number((scoring.metrics as any)?.volMomentum ?? 0) >= _eqVolMom);
-    // Gold Hunter bypass: LEGENDARY picks from GMGN real-time data bypass EDGE_POCKET_ONLY
-    // because they carry verified conviction from smart-money signals, not stale HTTP polling.
-    // HIGH picks still need to pass the standard edge pocket.
-    const _isGoldLegendary = sig.tier === 'LEGENDARY';
-    if (_edgePocketOnly && !_isGoldLegendary && !_isNewMintSurvivor && !_isSniperEdge && !_isHighConfidence && !_isExplosiveQuality) {
-      console.log(`[GOLD-ENTRY] SKIP $${sig.dex.baseToken.symbol.slice(0,8)} — outside EDGE_POCKET (score=${scoring.combinedScore} gold=${sig.tier})`);
-      return;
-    }
-    
-    // Entry confirmation gate
-    const _ecBp5m = parseFloat(String((scoring.metrics as any)?.bp5m ?? '0'));
-    const _ecPc5m = Number((scoring.metrics as any)?.priceChange5m ?? 0);
-    const ENTRY_CONFIRM_MIN_BP = Number(process.env.ENTRY_CONFIRM_MIN_BP ?? 0.50);
-    const ENTRY_CONFIRM_MIN_PC5M = Number(process.env.ENTRY_CONFIRM_MIN_PC5M ?? 0);
-    if (scoring.combinedScore < 90 && _ecBp5m < ENTRY_CONFIRM_MIN_BP && _ecPc5m < ENTRY_CONFIRM_MIN_PC5M) {
-      console.log(`[GOLD-ENTRY] SKIP $${sig.dex.baseToken.symbol.slice(0,8)} — rolling over (bp5m=${_ecBp5m.toFixed(2)} pc5m=${_ecPc5m.toFixed(1)}%)`);
-      return;
-    }
+    // Apply gate decision to scoring for downstream use
+    scoring = { ...scoring, qualifiedMode: gateResult.mode ?? scoring.qualifiedMode, combinedScore: gateResult.newCombinedScore };
     
     // Liquidity floor check
     const SOL_PRICE_USD = await getLiveSolPrice().catch(() => cachedSolPriceUsd || 150);
@@ -6099,7 +6090,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       }
     } else {
       // Paper mode: record virtual trade
-      const paperTxHash = `paper_${Date.now().toString(36)}_${addr.substring(0, 6)}`;
+      const paperTxHash = `paper_${(sig.tier || 'SCANNER').slice(0, 8).toLowerCase()}_${Date.now().toString(36)}_${addr.substring(0, 6)}`;
       tradedAddresses.set(addr, Date.now());
       const paperTradeAmount = Math.min(scoring.sizeSol, remainingBalance);
       paperBalance -= paperTradeAmount;
