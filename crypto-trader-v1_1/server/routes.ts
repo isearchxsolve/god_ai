@@ -2651,11 +2651,11 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
     return liveCandidatesCache;
   }
 }
-const safetyCache = new Map<string, { safe: boolean; reason: string; timestamp: number }>();
+const safetyCache = new Map<string, { safe: boolean; reason: string; timestamp: number; mintActive?: boolean }>();
 const CACHE_TTL_MS = 60_000;
 
 
-async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair, goldTier?: string | null): Promise<{ safe: boolean; reason: string }> {
+async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair, goldTier?: string | null): Promise<{ safe: boolean; reason: string; mintActive?: boolean }> {
   if (!engineSettings.safetyChecksEnabled) return { safe: true, reason: "checks_disabled" };
   const cached = safetyCache.get(tokenAddress);
   if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) return cached;
@@ -2938,7 +2938,7 @@ async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair, gol
         reason = advResult.reason;
       }
     }
-    const result = { safe, reason };
+    const result = { safe, reason, mintActive: _mintActive };
     safetyCache.set(tokenAddress, { ...result, timestamp: Date.now() });
     return result;
   } catch (e) {
@@ -3425,6 +3425,8 @@ async function runScanCycle() {
         continue;
       }
       
+      // PLAYBOOK(2026-06-29): mint-authority-active tokens are admitted (still sellable) but carry DILUTION risk -> size down rather than full size. Freeze-authority is already a hard veto above; this is the literature-recommended size penalty for mint-active. Disable via MINT_ACTIVE_SIZE_MULT=1.
+      if (safety.mintActive) { const _mMult = Number(process.env.MINT_ACTIVE_SIZE_MULT) || 0.5; const _pre = scoring.sizeSol; scoring.sizeSol = parseFloat((scoring.sizeSol * _mMult).toFixed(4)); console.log(`[SIZING] $${candidate.tokenSymbol} mint-active dilution haircut x${_mMult}: ${_pre} -> ${scoring.sizeSol} SOL`); }
       // QUALITY GATE 4: Social Maturity / Watchlist Staging
       const rawInfo = (pair as any).info || {};
       const hasSocials = (rawInfo.socials && rawInfo.socials.length > 0) || (rawInfo.websites && rawInfo.websites.length > 0);
@@ -5992,6 +5994,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       return;
     }
     
+    // PLAYBOOK(2026-06-29): mint-authority-active tokens are admitted (still sellable) but carry DILUTION risk -> size down rather than full size. Disable via MINT_ACTIVE_SIZE_MULT=1.
+    if (safety.mintActive) { const _mMult = Number(process.env.MINT_ACTIVE_SIZE_MULT) || 0.5; const _pre = scoring.sizeSol; scoring.sizeSol = parseFloat((scoring.sizeSol * _mMult).toFixed(4)); console.log(`[SIZING] $${sig.dex.baseToken.symbol.slice(0,8)} mint-active dilution haircut x${_mMult}: ${_pre} -> ${scoring.sizeSol} SOL`); }
     // Whale tape pre-entry gate: skip if whales are net-distributing (sellers > buyers)
     // $Bepe: LEGENDARY score=89 but Helius tape showed 8 sellers vs 2 buyers at entry
     // — whales were ALREADY selling by the time GMGN reported "smart money bought."

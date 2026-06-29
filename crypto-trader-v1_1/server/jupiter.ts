@@ -463,6 +463,11 @@ export class JupiterService {
 
     for (let i = 0; i < maxRetries; i++) {
       retryCount = i;
+      // PLAYBOOK(2026-06-29): escalate Jito tip / priority fee on each retry so a tx that failed to land due to congestion / under-tipping is more competitive on the next attempt (i=0 -> 1x, i=1 -> 1.5x at default 50%). Disable via RETRY_FEE_ESCALATION_PCT=0.
+      const _feeEsc = 1 + i * ((Number(process.env.RETRY_FEE_ESCALATION_PCT) || 50) / 100);
+      const _effPriorityFee = Math.floor(this.priorityFeeLamports * _feeEsc);
+      const _effJitoTip = Math.floor(this.jitoTipLamports * _feeEsc);
+      if (i > 0) log.info(`[JUPITER] Retry ${i + 1} fee escalation x${_feeEsc.toFixed(2)} | priorityFee:${_effPriorityFee} jitoTip:${_effJitoTip}`);
       if (i > 0 && quoteRefresher) {
         try {
           const freshQuote = await quoteRefresher();
@@ -484,7 +489,7 @@ export class JupiterService {
           quoteResponse: quote,
           userPublicKey: this.keypair.publicKey.toBase58(),
           wrapAndUnwrapSol: true,
-          prioritizationFeeLamports: usingJito ? "auto" : this.priorityFeeLamports,
+          prioritizationFeeLamports: usingJito ? "auto" : _effPriorityFee,
           dynamicComputeUnitLimit: true,
           asLegacyTransaction: false,
           otherAmountThreshold: minOut.toString(),
@@ -548,7 +553,7 @@ export class JupiterService {
             const tipIx = SystemProgram.transfer({
               fromPubkey: this.keypair.publicKey,
               toPubkey: tipAccount,
-              lamports: this.jitoTipLamports,
+              lamports: _effJitoTip,
             });
 
             const tipMessage = new TransactionMessage({
