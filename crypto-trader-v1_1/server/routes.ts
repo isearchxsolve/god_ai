@@ -714,7 +714,7 @@ async function closeShadowTrade(
     baseFee:      ((baseFeeLamportsPerLeg * 2) / positionLamports) * 100,
     total:        roundTripFeePct,
   };
-  // ── END EDIT B (REVISED) ───────────────────────────────────────────────────
+  // ── END EDIT B (REVISED) ─────────���─────────────────────────────────────────
 
   const pnlGapPct       = paperPnlPct - shadowPnlPct;
 
@@ -5897,10 +5897,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     if (sig.tier === 'LEGENDARY' && !scoring.qualifiedMode) {
       scoring = { ...scoring, qualifiedMode: 'SNIPER' };
     }
-    // New-mint funnel survivors enter at a DEDICATED lower bar (default 80) without
+    // New-mint funnel survivors enter at a DEDICATED lower bar (default 65) without
     // touching the global 90 gate that protects the GMGN/scanner paths. They already
     // passed: 90s delay + liquidity floor + net m5 buyers + not-in-freefall + young-age.
-    const NEW_MINT_MIN_SCORE = Number(process.env.NEW_MINT_MIN_SCORE) || 80;
+    const NEW_MINT_MIN_SCORE = Number(process.env.NEW_MINT_MIN_SCORE) || 65;
     const _isNewMintSurvivor = sig.tier === 'NEW_MINT' && scoring.combinedScore >= NEW_MINT_MIN_SCORE;
     if (_isNewMintSurvivor && !scoring.qualifiedMode) {
       scoring = { ...scoring, qualifiedMode: 'SNIPER', sizeSol: Math.max(engineSettings.minPositionSize, scoring.sizeSol || engineSettings.minPositionSize) };
@@ -5927,7 +5927,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     // because they carry verified conviction from smart-money signals, not stale HTTP polling.
     // HIGH picks still need to pass the standard edge pocket.
     const _isGoldLegendary = sig.tier === 'LEGENDARY';
-    if (_edgePocketOnly && !_isGoldLegendary && !_isSniperEdge && !_isHighConfidence && !_isExplosiveQuality) {
+    if (_edgePocketOnly && !_isGoldLegendary && !_isNewMintSurvivor && !_isSniperEdge && !_isHighConfidence && !_isExplosiveQuality) {
       console.log(`[GOLD-ENTRY] SKIP $${sig.dex.baseToken.symbol.slice(0,8)} — outside EDGE_POCKET (score=${scoring.combinedScore} gold=${sig.tier})`);
       return;
     }
