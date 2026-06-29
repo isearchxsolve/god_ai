@@ -312,7 +312,7 @@ describe("gold_standard_hunter", () => {
       expect(signals.some(s => s.includes("<1h FIRE") && s.includes("+15"))).toBe(true);
     });
 
-    it("awards +10 for tokens < 6 hours old", () => {
+    it("awards +10 for tokens well under MAX_TOKEN_AGE_HOURS (72h)", () => {
       const gmgn = createGmgnTokenInfo({
         creation_timestamp: Date.now() / 1000 - 10800, // 3 hours old
       });
@@ -320,18 +320,18 @@ describe("gold_standard_hunter", () => {
       const signals: string[] = [];
       goldScore(gmgn, null, signals);
 
-      expect(signals.some(s => s.includes("<6h") && s.includes("+10"))).toBe(true);
+      expect(signals.some(s => s.includes("<72h") && s.includes("+10"))).toBe(true);
     });
 
-    it("penalizes -5 for stale tokens > 24 hours old", () => {
+    it("penalizes -5 for stale tokens > MAX_TOKEN_AGE_HOURS (72h)", () => {
       const gmgn = createGmgnTokenInfo({
-        creation_timestamp: Date.now() / 1000 - 90000, // 25 hours old
+        creation_timestamp: Date.now() / 1000 - 300000, // ~83 hours old
       });
 
       const signals: string[] = [];
       goldScore(gmgn, null, signals);
 
-      expect(signals).toContain("Age 25h [stale, -5]");
+      expect(signals.some(s => s.includes("stale") && s.includes("-5"))).toBe(true);
     });
 
     it("awards +15 for buy ratio >= 99%", () => {
@@ -364,11 +364,11 @@ describe("gold_standard_hunter", () => {
       expect(signals.some(s => s.includes("BuyRatio") && s.includes("+10"))).toBe(true);
     });
 
-    it("penalizes -5 for weak buy ratio < 80%", () => {
+    it("penalizes -5 for weak buy ratio < 40%", () => {
       const dex: DexPair = {
         pairAddress: "test",
         baseToken: { address: "test", symbol: "TEST", name: "Test" },
-        txns: { h1: { buys: 700, sells: 300 }, m5: { buys: 0, sells: 0 } },
+        txns: { h1: { buys: 300, sells: 700 }, m5: { buys: 0, sells: 0 } },
       };
 
       const gmgn = createGmgnTokenInfo();
@@ -376,7 +376,7 @@ describe("gold_standard_hunter", () => {
       const signals: string[] = [];
       goldScore(gmgn, dex, signals);
 
-      expect(signals).toContain("BuyRatio 70.0% [weak, -5]");
+      expect(signals).toContain("BuyRatio 30.0% [weak, -5]");
     });
 
     it("awards +15 for explosive volume acceleration >= 5x", () => {

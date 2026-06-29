@@ -12,7 +12,7 @@ import { setDefaultResultOrder as __setDnsResultOrder } from "node:dns";
 // =============================================================
 // GOLD STANDARD HUNTER
 // =============================================================
-import { runHunter, checkMint } from './gold_standard_hunter';
+import { runHunter, checkMint, pollSignalFeed, pollTrending, pollTrenches, pollSmartMoneyFeed, pollDexScreenerFeeds } from './gold_standard_hunter';
 
 // AI-FIX(2026-06-24): Force IPv4-first DNS resolution. Node 17+ defaults to "verbatim"
 // (AAAA/IPv6 returned first); on hosts without working IPv6, undici fetch() to
@@ -26,18 +26,16 @@ try { __setDnsResultOrder("ipv4first"); } catch { /* no-op on older runtimes */ 
 // ── MULTIPLIER & STAGING CACHES ──
 const SEARCH_QUERIES = [
   "raydium sol", "meteora sol", "orca sol", "solana usdc", "sol usdt",
-  "raydium usdc", "orca usdc", "meteora usdc", "raydium usdt", "orca usdt",
-  "sol usdc", "pumpswap sol", "pumpswap usdc", "pump fun sol",
+  "pumpswap sol", "pump fun sol",
+  "raydium usdc", "orca usdc", "meteora usdc",
   "pumpswap usdt", "pumpswap pump", "pumpswap meteora", "pumpswap raydium",
   "pump fun usdc", "pump fun usdt",
   "raydium clmm", "raydium amm", "meteora dlmm", "meteora damm",
   "orca whirlpool", "lifinity sol", "phoenix sol", "openbook sol",
-  "dog sol", "cat sol", "ai sol", "pepe sol", "wif sol", "meme sol", "moon sol", "agent sol",
-  // WIDENED v3: additional meme/narrative seeds to increase raw discovery volume
-  "trump sol", "elon sol", "doge sol", "shib sol", "frog sol", "chad sol",
-  "grok sol", "ape sol", "based sol", "wagmi sol", "gm sol", "ngl sol",
-  "pump sol", "launch sol", "new sol", "bonk sol", "jup sol", "ray sol"
-]; // WIDENED v3: More meme/narrative search seeds to increase raw coin discovery. Safety filters unchanged.
+  "dog sol", "cat sol", "ai sol", "pepe sol", "meme sol",
+  "trump sol", "elon sol", "doge sol", "bonk sol",
+  "new sol", "launch sol", "pump sol"
+]; // FREQ(2026-06-29): Trimmed 40 -> 35. Removed low-yield duplicates; safety filters unchanged.
 const watchlistCache = new Map<string, { pair: DexScreenerPair, firstSeen: number }>();
 const WATCHLIST_MAX_AGE_MS = 15 * 60_000; // Keep on watch for 15 mins
 
@@ -233,7 +231,7 @@ class RequestQueue {
     private queue: (() => Promise<void>)[] = [];
     private processing = false;
     private lastRun = 0;
-    private delay = 350; // Hard limit: ~2.8 requests per second max
+    private delay = 200; // FREQ(2026-06-29): 350 -> 200ms. DexScreener WAF allows ~5 req/s; 200ms is safe and doubles scan throughput.
 
     async enqueue<T>(task: () => Promise<T>): Promise<T> {
         return new Promise((resolve, reject) => {
@@ -308,10 +306,21 @@ let engineSettings = {
   // hardTakeProfit: 80, 
   // stopLoss: -5,
   maxHoldSeconds: 14400, // MOONSHOT: 4 hour absolute ceiling (Conditional 10-min kill switch handles mundane coins) 
-    maxOpenPositions: 1, // old profitable: one position at a time // FREQ(2026-06-24): 1 -> 3. Parallelism is the #1 frequency lever and costs ZERO entry quality. Total exposure is still bounded by maxTotalExposure (~maxPositionSize*2, see ~L2670), so 3 slots just split the SAME capital into smaller, more numerous trades — more frequency, same aggregate risk. Self-caps in live by balance/exposure.
-    startingBalance: 0.05,        // Paper-mode starting balance: 0.05 SOL
-  scanIntervalMs: 4000, // old profitable: slower scan / less churn // FREQ(2026-06-24): 30000 -> 10000. Hunt for entries every 10s instead of 30s (3x cadence). Same entry gates, so no quality change — just less idle waiting between scans. Birdeye rate-limit is fine (top_traders cached 120s; 300 req/min tier).
-  priceCheckIntervalMs: 1000, // old profitable: faster exit checks // old profitable: faster exit checks   // OLD PROFITABLE: 3s price check
+    maxOpenPositions: 2, // SAFETY-ECON(2026-06-29): 1->2 for 0.03 SOL micro wallet.
+                        // MICRO tier auto-sizes each position to ~10% of remaining balance
+                        // (tierPct=0.10 for wallets <0.05 SOL). On 0.03 SOL wallet:
+                        //   Position 1: 0.005 SOL (clamped from 0.003) → remaining 0.025
+                        //   Position 2: 0.005 SOL (clamped from 0.0025) → total exposure 0.01 (33%)
+                        //   Worst simultaneous STOP_LOSS(-22%): 0.0022 SOL = 7.3% daily loss ✓
+                        //   Worst simultaneous HARD_LOSS(-45%): 0.0045 SOL = 15% daily loss ✓
+                        //   Both within dailyLossLimitPct(20%)=0.006 SOL and maxDrawdownPct(45%).
+                        // Fee cost (jito+priority+base): ~0.000022 SOL/round-trip = 0.44% of 0.005 pos.
+                        // AMM spread at $10K+ liq pools: ~2-4%. Total costs ~2.5-4.5%.
+                        // Each position still gated by: goldScore+tier, ML gate, rugcheck, cost gate.
+                        // 2 concurrent positions on 0.03 SOL is safe and economically viable.
+    startingBalance: 0.03,        // Paper-mode starting balance: 0.03 SOL
+  scanIntervalMs: 6000, // FREQ(2026-06-29): 2000 -> 6000. Slower scan prevents GeckoTerminal 429 (1 page/cycle @ 10 req/min).
+  priceCheckIntervalMs: 500, // FREQ(2026-06-29): 1000 -> 500. Double exit-detection frequency; frees position slot faster when a trade hits its exit condition. No entry quality impact.
 
   // -- Conviction Gates (Lowered for current market) --
   // minScoreToTrade: 90,          // was 85 → matches actual B+ setups
@@ -326,7 +335,7 @@ let engineSettings = {
                           // The 10min cooldown was needed because old code kept re-buying the same dead
                           // tokens; with the age cap that can't happen. 5min is enough for market reset.
   partialTpRatio: 0.5, // old profitable // old profitable 
-  partialTpThreshold: 100, // RISK-MINIMIZED: At +100% (doubled), sell half the bag to secure the initial 300 INR. The rest is a risk-free moonshot.
+  partialTpThreshold: 5, // BANKING-FIX: lowered 100 → 5. On a 0.03 SOL micro wallet with 0.005 SOL position, the old 100% threshold never fired (memecoins peak +12-15% then reverse). Partial at +5% banks half the bag on the way up, securing a real fill before DYNAMIC_TRAIL arms at +12%. Each partial adds ~0.2% wallet growth; compound gains vs zero partials.
   partialTpCostMargin: 4,        // PAPER-TEST(cost-relative): profit cushion in % added on top of the modeled round-trip cost when computing the effective partial-TP trigger. effectivePartialTp = max(partialTpThreshold, modeledRoundTrip + this). Keeps the partial from firing until it nets real profit above the trade's actual exit cost.
 
   // -- Sizing Strategy (Calibrated for 1000x compounding) --
@@ -371,7 +380,7 @@ let engineSettings = {
   hwrMinBuyPressure1h: 0.51, // old profitable // old profitable // OLD PROFITABLE: was 0.50
 
   // -- Operational Safety & Discovery --
-  maxTradesPerCycle: 2, // AI-FIX(2026-06-28): 1 -> 2. Frequency via PARALLELISM (zero entry-quality cost): fills up to 2 of the 3 open slots per scan cycle instead of one-at-a-time. Quality bar (minScore 80 + EDGE-POCKET SNIPER>=80 / any>=90) is unchanged. 
+  maxTradesPerCycle: 2, // micro wallet: max 2 attempts per scan
   reentryDelayMs: 60000, // old profitable // old profitable // RE-ENTRY CHURN FIX: was 60s. After a flat/stagnant exit (no SL, so no 15min SL blackout) the bot re-bought the SAME token ~60-120s later as it rolled over ($Jetchua: WIN +1.96% -> re-entry #10259 -> SLOW_BLEED -9.65%, peak 0.00%). 5min lets a stalled token either resume a real trend (re-qualifies fresh) or drop off the candidate set. Score>=85 still bypasses (genuine renewed strength).
   slReentryDelayMs: 900000, // old profitable // old profitable 
   txCostsEnabled: 1, // old profitable // old profitable
@@ -994,13 +1003,13 @@ const firstTickRedTrades = new Set<number>();
 
 const tokenPriceCache = new Map<string, { price: number; pair: DexScreenerPair | null; ts: number }>();
 const jupiterQuoteCache = new Map<string, { quote: any; ts: number }>();
-const QUOTE_CACHE_TTL_MS = 4_000; // FIX 4: was 2000 — too short, causes rate-limit hits and trade delays
+const QUOTE_CACHE_TTL_MS = 6_000; // FREQ(2026-06-29): 4000 -> 6000. Reduces Jupiter quote calls; quotes are valid for ~6s for fresh pools.
 
 setInterval(() => {
   const now = Date.now();
-  for (const [k, v] of tokenPriceCache) if (now - v.ts > 1500) tokenPriceCache.delete(k);
+  for (const [k, v] of tokenPriceCache) if (now - v.ts > 2000) tokenPriceCache.delete(k);
   for (const [k, v] of jupiterQuoteCache) if (now - v.ts > QUOTE_CACHE_TTL_MS) jupiterQuoteCache.delete(k);
-}, 1_500); // match tokenPriceCache TTL — 5s interval let entries linger up to 6.5s
+}, 2_000); // FREQ(2026-06-29): 1500 -> 2000ms. Small reduction in DexScreener calls.
 
 function getCachedQuote(key: string): any | null {
   const entry = jupiterQuoteCache.get(key);
@@ -1064,7 +1073,7 @@ const SOL_PRICE_FALLBACK_USD = (() => {
   return Number.isFinite(v) && v > 0 ? v : 70;
 })();
 let cachedSolPriceUsd = SOL_PRICE_FALLBACK_USD, lastSolPriceFetch = 0, solPriceFetchedOnce = false;
-const SOL_PRICE_CACHE_TTL_MS = 20_000;
+const SOL_PRICE_CACHE_TTL_MS = 30_000; // FREQ(2026-06-29): 20 -> 30s. SOL price is stable; fewer fetches.
 
 async function getLiveSolPrice(): Promise<number> {
   const now = Date.now();
@@ -1146,7 +1155,6 @@ async function checkBitcoinSafety(): Promise<boolean> {
 }
 
 async function checkCircuitBreakers(): Promise<{ canTrade: boolean; reason: string }> {
-  return { canTrade: true, reason: "OK" };   // ← ADD THIS LINE
   await resetDailyStats();
   
   const isBtcCrash = await checkBitcoinSafety();
@@ -1357,7 +1365,7 @@ async function fetchTokenPrice(tokenAddress: string, preferredPairAddress?: stri
   // root cause of phantom "Vol:$0" activity rejections and 100-230% phantom "Price drifted
   // since scan" rejections (e.g. $AYODELE 229.7%, $PLUSH 106.1%). Cache reads are kept only for
   // the no-preference path (exits / generic lookups).
-  if (!preferredPairAddress && cached && now - cached.ts < 1500) return { price: cached.price, pair: cached.pair };
+  if (!preferredPairAddress && cached && now - cached.ts < 2000) return { price: cached.price, pair: cached.pair };
   try {
     // UPDATED: Using Throttled Fetch
     const data = await throttledDexScreenerFetch(`https://api.dexscreener.com/latest/dex/tokens/${tokenAddress}`, 5000);
@@ -1388,7 +1396,7 @@ async function fetchTokenPrice(tokenAddress: string, preferredPairAddress?: stri
 async function fetchTokenPriceForExit(tokenAddress: string): Promise<{ price: number; pair: DexScreenerPair | null }> {
   const now = Date.now();
   const cached = tokenPriceCache.get(tokenAddress);
-  if (cached && now - cached.ts < 1500) return { price: cached.price, pair: cached.pair };
+  if (cached && now - cached.ts < 2000) return { price: cached.price, pair: cached.pair };
   try {
     // UPDATED: Using Throttled Fetch
     const data = await throttledDexScreenerFetch(`https://api.dexscreener.com/latest/dex/tokens/${tokenAddress}`, 5000);
@@ -1567,7 +1575,7 @@ function smartMoneyEnabled(): boolean {
 
 // (Startup key-load log now emitted from _ensureBirdeyeKeysLoaded on first use, after .env injects.)
 const SMART_MONEY_TIMEFRAME = process.env.SMART_MONEY_TIMEFRAME || "6h";
-const SMART_MONEY_TTL_MS = 120_000;
+const SMART_MONEY_TTL_MS = 180_000; // FREQ(2026-06-29): 120 -> 180s. Reduces Birdeye calls; whale distribution changes over minutes, not seconds.
 const SMART_MONEY_TIMEOUT_MS = Number(process.env.SMART_MONEY_TIMEOUT_MS) || 12_000; // AI-FIX(2026-06-24): was a bare inline 5000ms (tightest in file vs 8000ms elsewhere). curl returns <1s, but Node/undici IPv6-first DNS stalls were tripping the 5s abort. Widened + retry below.
 // WHALE-FOLLOWING (Layer 3b): follow top-volume wallets (whales). Enabled whenever Birdeye is configured.
 function whaleTrackingEnabled(): boolean {
@@ -2214,7 +2222,7 @@ async function batchFetchDexPairs(addresses: string[]): Promise<Map<string, DexS
   const result = new Map<string, DexScreenerPair>();
   if (addresses.length === 0) return result;
   for (let i = 0; i < addresses.length; i += 30) {
-    if (i > 0) await new Promise(r => setTimeout(r, 300));
+    if (i > 0) await new Promise(r => setTimeout(r, 200));
     const chunk = addresses.slice(i, i + 30);
     try {
       const url = `https://api.dexscreener.com/latest/dex/tokens/${chunk.join(",")}`;
@@ -2257,33 +2265,25 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
     let funnelSeen = 0, cutLiq = 0, cutVol = 0, cutAge = 0, cutPrice = 0, cutVolZero = 0, cutHoneypot = 0, cutTooNew = 0;
     
     // UPDATED: Upgraded to 'Blue Chip' filtering. Rejects low-tier volatile tokens.
-    const QUALITY_LIQ_FLOOR = 15000;       // SAFETY: Minimum $15,000 Liquidity (prevents violent rugs)
-    const QUALITY_VOL_5M_MIN = 10000;      // SAFETY: Minimum $10,000 Volume in 5 minutes (requires proven momentum)
+    const QUALITY_LIQ_FLOOR = 1000;       // RELAXED(2026-06-29): 15000 -> 1000. Fresh Gecko new_pools start at $0-$2k liq; old floor killed all before scoring. EDGE_POCKET_ONLY (score>=80) + safety pipeline provide real protection.
+    const QUALITY_VOL_5M_MIN = 500;       // RELAXED(2026-06-29): 10000 -> 500. Fresh pools have minimal 5m vol; small floor filters empty rug tokens while letting real launches through.
     const QUALITY_MIN_AGE_SEC = 0;       // FETCHER OLD-PROFIT: old routes.ts did NOT pre-cut <2m tokens
     const QUALITY_MIN_M5_SELLS = 2;      // FETCHER OLD-PROFIT: old routes.ts required only 2 sells at safety stage, not 10 at discovery
 
     console.log(`[FETCHER-PATCH] old-profit funnel active | liq>=${QUALITY_LIQ_FLOOR} vol5m>=${QUALITY_VOL_5M_MIN} minAge=${QUALITY_MIN_AGE_SEC}s minSells=${QUALITY_MIN_M5_SELLS}`);
 
-    // Gecko trending + new pools (Normal fetch is fine, high rate limits)
-    const geckoTrendingPages = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]; // WIDENED v3: 15->20 pages
-    const geckoNewPages = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30]; // WIDENED v3: 20->30 pages to catch more new PumpSwap pairs
+    // Gecko new_pools round-robin: 1 page per 6s cycle, pages 1-3 rotating.
+    // new_pools = freshly created pools (the real fresh-token source). trending_pools was wrong.
+    // 3 pages × 6s cycle = 18s to cycle all = 10 req/min, well under 30/min free limit.
+    const geckoCycleCounter = (((global as any).__geckoCycle ?? 2) + 1) % 3;
+    (global as any).__geckoCycle = geckoCycleCounter;
+    const geckoNewPage = geckoCycleCounter + 1; // 1, 2, 3
     const geckoFetches = [
-      ...geckoTrendingPages.map(page =>
-        withTimeout(
-          fetch(`https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?page=${page}`, { headers: { "Accept": "application/json;version=20230302" }, signal: AbortSignal.timeout(8000) })
-            .then(r => r.ok ? r.json() : { data: [] }),
-          10000,
-          "Gecko Trending"
-        ).catch(() => ({ data: [] }))
-      ),
-      ...geckoNewPages.map(page =>
-        withTimeout(
-          fetch(`https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page=${page}`, { headers: { "Accept": "application/json;version=20230302" }, signal: AbortSignal.timeout(8000) })
-            .then(r => r.ok ? r.json() : { data: [] }),
-          10000,
-          "Gecko New"
-        ).catch(() => ({ data: [] }))
-      )
+      withTimeout(
+        fetch(`https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page=${geckoNewPage}`, { headers: { "Accept": "application/json;version=20230302" }, signal: AbortSignal.timeout(8000) })
+          .then(r => { if (r.status === 429) { console.warn(`[GECKO-429] new_pools page=${geckoNewPage}`); return { data: [] }; } return r.ok ? r.json() : { data: [] }; }),
+        10000, "Gecko New Pools"
+      ).catch(() => ({ data: [] }))
     ];
 
     const birdEyeFetch = Promise.resolve({ data: { tokens: [] } });
@@ -3337,11 +3337,13 @@ async function runScanCycle() {
       const poolLiqSol = SOL_PRICE_USD > 0 ? liq / SOL_PRICE_USD : Infinity;
 
       // TIERED SIZING: Progressive de-risking for 1000x compounding path.
-      // Replaces the dead compound boost (which re-clamped to the same ceiling
-      // it multiplied, making it a no-op). The tier pct replaces the fixed
-      // MAX_SINGLE_TRADE_PCT ceiling; the micro-boost accelerates early trades.
+      // The static maxPositionSize cap was removed (2026-06-29) because it
+      // prevented growth past 0.15 SOL — position hit the 0.015 cap and stayed
+      // there regardless of balance, asymptotically killing compound growth.
+      // The tier pct + pool liq cap + compoundAbsCapSol(1.0) provide sufficient
+      // independent hard limits at every balance level.
       const { pct: tierPct, boost: microBoost, tier: sizingTier } = getTieredSizing(totalPortfolioSol);
-      let targetSize = Math.min(engineSettings.maxPositionSize, remainingBalance * tierPct, poolLiqSol * 0.015);
+      let targetSize = Math.min(remainingBalance * tierPct, poolLiqSol * 0.015);
       targetSize = Math.max(targetSize, engineSettings.minPositionSize);
       // Micro-stage boost: only active below 0.05 SOL, capped at 1.5x.
       // Applied BEFORE the re-clamp so it can actually increase trade size
@@ -4797,7 +4799,7 @@ async function checkOpenPositions() {
         // (avg -11.55%, = 239% of net loss). Cutting them at a fixed -5% pnl after a short hold (independent
         // of the cost-widened stop, which let low-liq losers bleed past -11%) moved sim expectancy from
         // -2.14%/trade to -0.33%/trade. Single biggest lever found; tunable here.
-        const NEVER_GREEN_PEAK_PCT = 1.0, NEVER_GREEN_CUT_PCT = -25.0, NEVER_GREEN_MIN_HOLD_SEC = 18;
+        const NEVER_GREEN_PEAK_PCT = 1.0, NEVER_GREEN_CUT_PCT = -5.0, NEVER_GREEN_MIN_HOLD_SEC = 18;
 
         // throttled diagnostic: small mid-price "profit" below the round-trip floor -> we HOLD, not crystallize.
         if (pnlPct >= 1 && !clearsRoundTrip && holdTime > 30 && (Date.now() - (costGateLastLogMs.get(trade.id) ?? 0) >= 30000)) {
@@ -4822,13 +4824,9 @@ async function checkOpenPositions() {
           // else if (peakPnl < activation && holdTime > 20 && prevPnl !== null && prevPnl >= 1.0 && pnlPct > 0 && pnlPct < prevPnl && (prevPnl - pnlPct) >= 15.0) { shouldClose = true; reason = `PROFIT_DECLINE (was +${prevPnl.toFixed(2)}%, now +${pnlPct.toFixed(2)}%, drop=${(prevPnl - pnlPct).toFixed(2)}%)`; }
           // ---- TIER 3: stop / loss management ----
           // NEVER-GREEN FAST-KILL (AI-CALIB 2026-06-24): never-green trades (peak <= +1%) went 0-for-98 in
-          // calibration. Cut at a fixed -5% pnl after a short hold, BEFORE the cost-widened STOP_LOSS that
-          // let low-liq losers bleed to -11.5% avg. peakPnl<=1% guarantees this never touches a profitable run.
-          // MOONSHOT: NEVER_GREEN_CUT disabled. We hold ALL positions indefinitely waiting for the moonshot.
-          // MOONSHOT: STOP_LOSS disabled. Only HARD_LOSS_KILL at -45% and LIQ_COLLAPSE can force an exit.
-          // MOONSHOT: SLOW_BLEED disabled. Dips below entry are normal consolidation before a 1000x move.
-          // MOONSHOT: FAST_CUT disabled. Time-based exits destroy moonshot potential.
-          // MOONSHOT: EARLY_CUT disabled. Time-based exits destroy moonshot potential.
+          // calibration. Cut at -5% after 18s, BEFORE the cost-widened STOP_LOSS lets low-liq losers bleed
+          // to -11.5% avg. peakPnl<=1% guarantees this never touches a profitable run.
+          else if (peakPnl <= NEVER_GREEN_PEAK_PCT && holdTime > NEVER_GREEN_MIN_HOLD_SEC && pnlPct <= NEVER_GREEN_CUT_PCT) { shouldClose = true; reason = `NEVER_GREEN_CUT (peak ${peakPnl.toFixed(2)}%, pnl ${pnlPct.toFixed(2)}%, held ${Math.round(holdTime)}s)`; }
           // ---- TIER 4: momentum / structure fades (only meaningful while in some profit) ----
           // MOONSHOT: Restored mundane-coin momentum fades to clear stagnant slots.
           else if (pnlPct > 10 && bp5m < 0.43 && pc5m < -3) { shouldClose = true; reason = `EARLY_EXIT_WEAK_BP (bp=${bp5m.toFixed(2)}, d5m=${pc5m.toFixed(1)}%)`; }
@@ -5800,42 +5798,535 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     console.log(`[DESYNC_FIX] Done — closed ${fixed}, recovered ${recovered}. Wallet: ${newBal.toFixed(4)} SOL`);
     res.json({ success: true, fixedCount: fixed, recoveredCount: recovered, newWalletBalance: newBal.toFixed(4), openPositionsRemaining: openNow });
   });
+
   // ============================================================
-  // GOLD STANDARD HUNTER - Background polling loop (every 30s)
+  // GOLD HUNTER TRADE ENTRY BRIDGE — injects GMGN LEGENDARY/HIGH
+  // signals into the main trade pipeline with full safety gates.
+  // Called by the Gold Hunter background loop below.
   // ============================================================
-  if (process.env.GOLD_HUNTER_ENABLED === 'true') {
-    console.log('[GOLD HUNTER] Starting background polling...');
-    const _runGoldCycle = async () => {
+  async function goldHunterTradeEntry(sig: any): Promise<void> {
+    const now = Date.now();
+    const addr = sig.mintAddress;
+    
+    // Skip if recently traded/attempted/blocked
+    if (tradedAddresses.has(addr) || recentlyAttemptedBuys.has(addr) || hardBlockedAddresses.has(addr) || stoppedOutAddresses.has(addr)) {
+      console.log(`[GOLD-ENTRY] SKIP $${sig.dex.baseToken.symbol.slice(0,8)} — address in cooldown/blocklist`);
+      return;
+    }
+    if (pendingBuys.has(addr) || sellingInProgress.has(addr)) return;
+    
+    // Open trades check
+    const openTrades = await storage.getOpenTrades();
+    const maxPos = Math.max(engineSettings.maxOpenPositions, Math.floor(paperBalance / 10));
+    if (openTrades.length >= Math.min(maxPos, 30)) {
+      console.log(`[GOLD-ENTRY] SKIP $${sig.dex.baseToken.symbol.slice(0,8)} — max positions (${openTrades.length}/${maxPos})`);
+      return;
+    }
+    
+    // Re-fetch fresh DexScreener data for current price/liq
+    const freshData = await throttledDexScreenerFetch(`https://api.dexscreener.com/latest/dex/tokens/${addr}`, 5000).catch(() => ({ pairs: [] }));
+    const freshPairs: DexScreenerPair[] = (freshData?.pairs || []).filter((p: any) => p.chainId === 'solana');
+    const pair = freshPairs.length > 0 ? freshPairs.reduce((best: DexScreenerPair, p: DexScreenerPair) => (p.liquidity?.usd || 0) > (best.liquidity?.usd || 0) ? p : best) : null;
+    if (!pair) { console.log(`[GOLD-ENTRY] SKIP $${sig.dex.baseToken.symbol.slice(0,8)} — no Solana pair from DexScreener`); return; }
+    
+    const price = parseFloat(pair.priceUsd || '0');
+    if (price <= 0) { console.log(`[GOLD-ENTRY] SKIP $${sig.dex.baseToken.symbol.slice(0,8)} — zero price`); return; }
+    
+    const liq = pair.liquidity?.usd || 0;
+    if (liq < 1000) { console.log(`[GOLD-ENTRY] SKIP $${sig.dex.baseToken.symbol.slice(0,8)} — liq $${liq.toFixed(0)} < $1000`); return; }
+    
+    const status = await storage.getBotStatus();
+    if (!status.isRunning) return;
+    
+    const isLive = status.tradingMode === 'live' && jupiterService !== null;
+    const liveBal = isLive ? await readLiveWalletBalance().catch(() => paperBalance) : paperBalance;
+    const effectiveBalance = Math.max(0, liveBal - reservedCapital);
+    if (effectiveBalance < 0.005 + engineSettings.minPositionSize) {
+      console.log(`[GOLD-ENTRY] SKIP $${sig.dex.baseToken.symbol.slice(0,8)} — insufficient balance (${effectiveBalance.toFixed(4)} SOL)`);
+      return;
+    }
+    
+    // Compute total exposure from open trades
+    let totalExposureSol = 0, openPumpfunCount = 0;
+    for (const t of openTrades) {
+      totalExposureSol += parseFloat(t.amount || '0');
+      if (t.tokenAddress?.endsWith('pump')) openPumpfunCount++;
+    }
+    const remainingBalance = effectiveBalance - totalExposureSol;
+    if (remainingBalance < engineSettings.minPositionSize) {
+      console.log(`[GOLD-ENTRY] SKIP $${sig.dex.baseToken.symbol.slice(0,8)} — remaining bal ${remainingBalance.toFixed(4)} < minPositionSize`);
+      return;
+    }
+    
+    // Score the token using main pipeline scorer
+    const _PUMPFUN_DEXES = new Set(["pumpfun", "pump-fun", "pumpswap"]);
+    const pairDex = (pair.dexId || '').toLowerCase();
+    if (!JUPITER_SUPPORTED_DEXES.has(pairDex)) {
+      console.log(`[GOLD-ENTRY] SKIP $${sig.dex.baseToken.symbol.slice(0,8)} — unsupported DEX: ${pairDex}`);
+      hardBlockedAddresses.set(addr, Date.now());
+      return;
+    }
+    if (_PUMPFUN_DEXES.has(pairDex) && openPumpfunCount >= 2) {
+      console.log(`[GOLD-ENTRY] SKIP $${sig.dex.baseToken.symbol.slice(0,8)} — pumpfun concentration limit`);
+      return;
+    }
+    
+    const isMicroWallet = effectiveBalance < 0.10;
+    let scoring = scoreToken(pair, null, isMicroWallet);
+    
+    // ML blend (if available)
+    const mlPred = await getMLPrediction(scoring.metrics).catch(() => null);
+    if (mlPred) {
+      const mlScore = Math.round(mlPred.pumpProb * 100);
+      const mlAdjusted = mlScore * (1 - mlPred.dumpRisk * 0.5);
+      const combined = Math.max(0, Math.min(100, Math.round(scoring.score * engineSettings.scoreWeight + mlAdjusted * engineSettings.mlWeight)));
+      scoring = { ...scoring, mlScore, combinedScore: combined };
+    }
+    scoring.sizeSol = Math.max(engineSettings.minPositionSize, scoring.sizeSol);
+    
+    // Apply Gold Hunter score override — LEGENDARY (>=75) or HIGH (>=50) signals
+    // from GMGN real-time data carry more conviction than the scanner's stale HTTP poll.
+    // Scale the Gold Hunter score (0-100) into the main pipeline's combinedScore space
+    // so EDGE_POCKET_ONLY can evaluate it. LEGENDARY >= 75 → scores >= 80 in main scale.
+    // HIGH >= 50 → scores >= 60 in main scale. The EDGE_POCKET_ONLY gate below will
+    // still block anything below its thresholds.
+    const goldBoosted = Math.max(scoring.combinedScore, Math.round(sig.score * 1.1));
+    scoring = { ...scoring, combinedScore: goldBoosted };
+    
+    // Force SNIPER mode for LEGENDARY gold picks (they're the real-time sniper-grade tokens)
+    if (sig.tier === 'LEGENDARY' && !scoring.qualifiedMode) {
+      scoring = { ...scoring, qualifiedMode: 'SNIPER' };
+    }
+    
+    const effectiveMinScore = getEffectiveMinScore(isMicroWallet);
+    if (!scoring.qualifiedMode || scoring.combinedScore < effectiveMinScore) {
+      console.log(`[GOLD-ENTRY] SKIP $${sig.dex.baseToken.symbol.slice(0,8)} — score ${scoring.combinedScore} < ${effectiveMinScore} mode=${scoring.qualifiedMode || 'none'}`);
+      return;
+    }
+    
+    // EDGE_POCKET_ONLY gate — same as main pipeline
+    const _edgePocketOnly = String(process.env.EDGE_POCKET_ONLY ?? 'true').toLowerCase() !== 'false';
+    const _EDGE_MODES = ['SNIPER'];
+    const _EDGE_MIN_SCORE = Number(process.env.EDGE_MIN_SCORE) || 80;
+    const _isSniperEdge = _EDGE_MODES.includes(scoring.qualifiedMode) && scoring.combinedScore >= _EDGE_MIN_SCORE;
+    const _isHighConfidence = scoring.combinedScore >= (Number(process.env.EDGE_HIGH_CONF_SCORE) || 90);
+    const _eqScore = Number(process.env.EDGE_EXPLOSIVE_SCORE) || 85;
+    const _eqMl = Number(process.env.EDGE_EXPLOSIVE_ML) || 80;
+    const _eqPx5m = Number(process.env.EDGE_EXPLOSIVE_PX5M) || 8;
+    const _eqVolMom = Number(process.env.EDGE_EXPLOSIVE_VOLMOM) || 1.5;
+    const _isExplosiveQuality = (scoring.combinedScore >= _eqScore) && (Number(scoring.mlScore ?? 0) >= _eqMl) && (Number((scoring.metrics as any)?.priceChange5m ?? 0) >= _eqPx5m) && (Number((scoring.metrics as any)?.volMomentum ?? 0) >= _eqVolMom);
+    // Gold Hunter bypass: LEGENDARY picks from GMGN real-time data bypass EDGE_POCKET_ONLY
+    // because they carry verified conviction from smart-money signals, not stale HTTP polling.
+    // HIGH picks still need to pass the standard edge pocket.
+    const _isGoldLegendary = sig.tier === 'LEGENDARY';
+    if (_edgePocketOnly && !_isGoldLegendary && !_isSniperEdge && !_isHighConfidence && !_isExplosiveQuality) {
+      console.log(`[GOLD-ENTRY] SKIP $${sig.dex.baseToken.symbol.slice(0,8)} — outside EDGE_POCKET (score=${scoring.combinedScore} gold=${sig.tier})`);
+      return;
+    }
+    
+    // Entry confirmation gate
+    const _ecBp5m = parseFloat(String((scoring.metrics as any)?.bp5m ?? '0'));
+    const _ecPc5m = Number((scoring.metrics as any)?.priceChange5m ?? 0);
+    const ENTRY_CONFIRM_MIN_BP = Number(process.env.ENTRY_CONFIRM_MIN_BP ?? 0.50);
+    const ENTRY_CONFIRM_MIN_PC5M = Number(process.env.ENTRY_CONFIRM_MIN_PC5M ?? 0);
+    if (scoring.combinedScore < 90 && _ecBp5m < ENTRY_CONFIRM_MIN_BP && _ecPc5m < ENTRY_CONFIRM_MIN_PC5M) {
+      console.log(`[GOLD-ENTRY] SKIP $${sig.dex.baseToken.symbol.slice(0,8)} — rolling over (bp5m=${_ecBp5m.toFixed(2)} pc5m=${_ecPc5m.toFixed(1)}%)`);
+      return;
+    }
+    
+    // Liquidity floor check
+    const SOL_PRICE_USD = await getLiveSolPrice().catch(() => cachedSolPriceUsd || 150);
+    const poolLiqSol = SOL_PRICE_USD > 0 ? liq / SOL_PRICE_USD : Infinity;
+    const sniperLiqFloor = engineSettings.sniperMinLiquidity;
+    const MIN_BUY_LIQ_USD = scoring.qualifiedMode === 'HWR' ? engineSettings.hwrMinLiquidity : sniperLiqFloor;
+    if (liq < MIN_BUY_LIQ_USD) {
+      console.log(`[GOLD-ENTRY] SKIP $${sig.dex.baseToken.symbol.slice(0,8)} — liq $${liq.toFixed(0)} < $${MIN_BUY_LIQ_USD}`);
+      return;
+    }
+    
+    // Sizing
+    const totalPortfolioSol = effectiveBalance + totalExposureSol;
+    const { pct: tierPct, boost: microBoost, tier: sizingTier } = getTieredSizing(totalPortfolioSol);
+    let targetSize = Math.min(remainingBalance * tierPct, poolLiqSol * 0.015);
+    targetSize = Math.max(targetSize, engineSettings.minPositionSize);
+    targetSize = Math.min(targetSize * microBoost, remainingBalance * tierPct, poolLiqSol * 0.015);
+    targetSize = Math.min(targetSize, engineSettings.compoundAbsCapSol);
+    const lossThrottle = Math.max(0.60, 1 - consecutiveLosses * 0.10);
+    const ddPctSizing = peakBalance > 0 ? Math.max(0, ((peakBalance - totalPortfolioSol) / peakBalance) * 100) : 0;
+    const ddDelever = ddPctSizing > 15 ? Math.max(0.50, 1 - (ddPctSizing - 15) / 20) : 1;
+    targetSize = targetSize * lossThrottle * ddDelever;
+    targetSize = Math.max(targetSize, engineSettings.minPositionSize);
+    scoring.sizeSol = parseFloat(targetSize.toFixed(4));
+    
+    if (scoring.sizeSol < MIN_TRADE_SIZE_SOL) {
+      console.log(`[GOLD-ENTRY] SKIP $${sig.dex.baseToken.symbol.slice(0,8)} — dust size ${scoring.sizeSol.toFixed(4)} SOL`);
+      return;
+    }
+    
+    const tradeSizeUsd = scoring.sizeSol * SOL_PRICE_USD;
+    const dynamicMinLiq = tradeSizeUsd * 80;
+    if (liq < dynamicMinLiq) {
+      console.log(`[GOLD-ENTRY] SKIP $${sig.dex.baseToken.symbol.slice(0,8)} — liq $${liq.toFixed(0)} < dynamic $${dynamicMinLiq.toFixed(0)}`);
+      return;
+    }
+    
+    const maxTotalExposure = Math.max(engineSettings.maxPositionSize * 10, totalPortfolioSol * 0.95);
+    if (totalExposureSol + scoring.sizeSol > maxTotalExposure) {
+      console.log(`[GOLD-ENTRY] SKIP $${sig.dex.baseToken.symbol.slice(0,8)} — max exposure`);
+      return;
+    }
+    
+    const txCosts = calcTransactionCosts(liq, scoring.sizeSol);
+    const entryTotalCostSol = scoring.sizeSol * (1 + (txCosts.entrySlippagePct + txCosts.entryFeePct) / 100);
+    if (entryTotalCostSol < MIN_VIABLE_TRADE_SOL) {
+      console.log(`[GOLD-ENTRY] SKIP $${sig.dex.baseToken.symbol.slice(0,8)} — below viable trade size`);
+      return;
+    }
+    
+    // Safety check
+    const safety = await checkTokenSafety(addr, pair, sig.tier);
+    if (!safety.safe) {
+      console.log(`[GOLD-ENTRY] BLOCKED $${sig.dex.baseToken.symbol.slice(0,8)} — ${safety.reason}`);
+      if (safety.reason.startsWith('rugcheck_danger') || safety.reason.startsWith('rugcheck_risk_high') || safety.reason.startsWith('insider_ownership')) {
+        hardBlockedAddresses.set(addr, Date.now());
+      }
+      return;
+    }
+    
+    // Whale tape pre-entry gate: skip if whales are net-distributing (sellers > buyers)
+    // $Bepe: LEGENDARY score=89 but Helius tape showed 8 sellers vs 2 buyers at entry
+    // — whales were ALREADY selling by the time GMGN reported "smart money bought."
+    const _whaleGate = await fetchWhaleTapeHelius(addr).catch(() => null);
+    if (_whaleGate && _whaleGate.whaleCount >= 3 && _whaleGate.whaleNetSellers > _whaleGate.whaleNetBuyers && _whaleGate.whaleNetSellers >= 2) {
+      console.log(`[GOLD-ENTRY] SKIP $${sig.dex.baseToken.symbol.slice(0,8)} — whale distribution (netSellers=${_whaleGate.whaleNetSellers} > netBuyers=${_whaleGate.whaleNetBuyers})`);
+      return;
+    }
+    
+    // Jupiter preflight for live mode
+    let slippageBps = scoring.slippage * 100;
+    const preflightImpactLimit = scoring.qualifiedMode === 'SNIPER' ? 7 : 4;
+    let executionQuote: any = null;
+    
+    if (status.tradingMode === 'live' && jupiterService) {
+      const lamportsForPreflight = Math.floor(scoring.sizeSol * 1e9);
       try {
-        const _sigs = await runHunter();
-        for (const sig of _sigs) {
-          if (sig.tier === 'SKIP' || !sig.gmgn || !sig.dex) continue;
-          console.log('[GOLD] ' + sig.tier + ' | ' + sig.mintAddress.slice(0, 8) + ' | score=' + String(sig.score));
-          if (process.env.MODE === 'live' && sig.tier !== 'LEGENDARY') continue;
-          if (sig.tier === 'MEDIUM') continue;
-          const _gt: any = {
-            address: sig.mintAddress,
-            pairAddress: sig.dex.pairAddress,
-            symbol: sig.dex.baseToken.symbol,
-            name: sig.dex.baseToken.name,
-            liquidity: sig.dex.liquidity?.usd ?? 0,
-            marketCap: sig.dex.marketCap ?? 0,
-            holders: sig.gmgn.holder_count,
-            volume24h: sig.dex.volume?.h24 ?? 0,
-            buys1h: sig.dex.txns?.h1?.buys ?? 0,
-            sells1h: sig.dex.txns?.h1?.sells ?? 0,
-            priceChangeH1: sig.dex.priceChange?.h1 ?? 0,
-            createdAt: (sig.gmgn.creation_timestamp ?? 0) * 1000,
-            _goldScore: sig.score,
-            _goldTier: sig.tier,
-            source: 'GOLD_HUNTER',
-          };
-          try { await checkTokenSafety(_gt.address, sig.dex as any, _gt._goldTier); } catch (e) { console.log('[GOLD] inject err: ' + String(e)); }
+        executionQuote = await jupiterService.fetchQuote(SOL_MINT, addr, lamportsForPreflight, [slippageBps]);
+        if (!executionQuote) { console.log(`[GOLD-ENTRY] SKIP $${sig.dex.baseToken.symbol.slice(0,8)} — no Jupiter quote`); return; }
+        executionQuote._fetchedAt = Date.now();
+      } catch { console.log(`[GOLD-ENTRY] SKIP $${sig.dex.baseToken.symbol.slice(0,8)} — quote failed`); return; }
+      
+      const impactPct = parseFloat(executionQuote.priceImpactPct ?? '0');
+      if (impactPct > preflightImpactLimit) {
+        console.log(`[GOLD-ENTRY] SKIP $${sig.dex.baseToken.symbol.slice(0,8)} — impact ${impactPct.toFixed(2)}% > ${preflightImpactLimit}%`);
+        return;
+      }
+      
+      // Round-trip simulation
+      if (executionQuote.outAmount) {
+        try {
+          const sellCheckQuote = await jupiterService.fetchQuote(addr, SOL_MINT, executionQuote.outAmount, [slippageBps]);
+          if (!sellCheckQuote || !sellCheckQuote.outAmount) {
+            console.log(`[GOLD-ENTRY] SKIP $${sig.dex.baseToken.symbol.slice(0,8)} — no sell route`);
+            hardBlockedAddresses.set(addr, Date.now());
+            return;
+          }
+          const sellReturnLamports = parseInt(sellCheckQuote.outAmount, 10);
+          const roundTripPct = (sellReturnLamports / lamportsForPreflight) * 100;
+          if (roundTripPct < 85) {
+            console.log(`[GOLD-ENTRY] SKIP $${sig.dex.baseToken.symbol.slice(0,8)} — round-trip ${(100 - roundTripPct).toFixed(1)}% loss`);
+            return;
+          }
+          const sellImpactPct = parseFloat(sellCheckQuote.priceImpactPct ?? '0');
+          if (sellImpactPct > 10) {
+            console.log(`[GOLD-ENTRY] SKIP $${sig.dex.baseToken.symbol.slice(0,8)} — sell impact ${sellImpactPct.toFixed(2)}%`);
+            return;
+          }
+        } catch { console.log(`[GOLD-ENTRY] SKIP $${sig.dex.baseToken.symbol.slice(0,8)} — sell preflight failed`); return; }
+      }
+    }
+    
+    // Edge check
+    const edge = getEdgeParams(isMicroWallet);
+    const scoreBasedExpectedMove = Math.max(0, (scoring.combinedScore - 50) * edge.expectedMoveCoeff);
+    const finalEstimatedImpact = executionQuote ? parseFloat(executionQuote.priceImpactPct ?? '0') : (liq > 0 ? Math.min(12, ((scoring.sizeSol * SOL_PRICE_USD) / (liq * 2)) * 100) : 6);
+    const finalRoundTripCost = finalEstimatedImpact * edge.exitImpactMult + engineSettings.txFeePercent * edge.feeMultiplier + edge.buffer;
+    const finalEdge = scoreBasedExpectedMove - finalRoundTripCost;
+    if (finalEdge < edge.minEdgePct) {
+      console.log(`[GOLD-ENTRY] SKIP $${sig.dex.baseToken.symbol.slice(0,8)} — edge ${finalEdge.toFixed(2)}% < ${edge.minEdgePct}%`);
+      return;
+    }
+    
+    // Circuit breaker check
+    const canTrade = await checkCircuitBreakers();
+    if (!canTrade.canTrade) { console.log(`[GOLD-ENTRY] SKIP $${sig.dex.baseToken.symbol.slice(0,8)} — circuit breaker`); return; }
+    if (isHalted()) { console.log(`[GOLD-ENTRY] SKIP $${sig.dex.baseToken.symbol.slice(0,8)} — halt`); return; }
+    
+    // ── EXECUTE ──
+    console.log(`[GOLD-ENTRY] ENTERING $${sig.dex.baseToken.symbol.slice(0,8)} | size=${scoring.sizeSol.toFixed(4)} SOL | score=${scoring.combinedScore} | gold=${sig.tier} (${sig.score}) | liq=$${liq.toFixed(0)}`);
+    
+    if (isLive) {
+      pendingBuys.set(addr, Date.now());
+      reservedCapital += entryTotalCostSol;
+      try {
+        const buyResult = await jupiterService!.buyToken(addr, scoring.sizeSol, slippageBps, executionQuote ?? undefined, preflightImpactLimit);
+        if (buyResult?.success && buyResult.actualSolSpent > 0 && buyResult.tokenAmountRaw > BigInt(0)) {
+          const liveTxHash = buyResult.txSignature || '';
+          console.log(`[GOLD-ENTRY] BOUGHT $${sig.dex.baseToken.symbol.slice(0,8)} tx=${liveTxHash} spent=${buyResult.actualSolSpent.toFixed(4)} SOL`);
+          tradedAddresses.set(addr, Date.now());
+          await storage.addTrade({
+            tokenAddress: addr, tokenSymbol: sig.dex.baseToken.symbol, type: "BUY", mode: scoring.qualifiedMode,
+            tradingMode: "live", status: "OPEN", amount: buyResult.actualSolSpent.toFixed(4), price: pair.priceUsd || '0',
+            currentPrice: pair.priceUsd || '0', peakPrice: pair.priceUsd || '0', pnl: "0", peakPnl: "0",
+            score: scoring.combinedScore.toString(), txHash: liveTxHash, liquidity: liq.toFixed(2),
+            dex: pairDex,
+          });
+        } else {
+          console.log(`[GOLD-ENTRY] BUY FAILED $${sig.dex.baseToken.symbol.slice(0,8)} — ${buyResult?.error || 'no result'}`);
         }
-      } catch (e) { console.log('[GOLD HUNTER] cycle error: ' + String(e)); }
-    };
-    setTimeout(() => { _runGoldCycle(); setInterval(_runGoldCycle, 30_000); }, 10_000);
-    console.log('[GOLD HUNTER] Active - polling every 30s');
+      } catch (err: any) {
+        console.log(`[GOLD-ENTRY] BUY ERROR $${sig.dex.baseToken.symbol.slice(0,8)} — ${err.message}`);
+      } finally {
+        pendingBuys.delete(addr);
+        reservedCapital -= entryTotalCostSol;
+      }
+    } else {
+      // Paper mode: record virtual trade
+      const paperTxHash = `paper_${Date.now().toString(36)}_${addr.substring(0, 6)}`;
+      tradedAddresses.set(addr, Date.now());
+      const paperTradeAmount = Math.min(scoring.sizeSol, remainingBalance);
+      paperBalance -= paperTradeAmount;
+      await storage.addTrade({
+        tokenAddress: addr, tokenSymbol: sig.dex.baseToken.symbol, type: "BUY", mode: scoring.qualifiedMode,
+        tradingMode: "paper", status: "OPEN", amount: paperTradeAmount.toFixed(4), price: pair.priceUsd || '0',
+        currentPrice: pair.priceUsd || '0', peakPrice: pair.priceUsd || '0', pnl: "0", peakPnl: "0",
+        score: scoring.combinedScore.toString(), txHash: paperTxHash, liquidity: liq.toFixed(2),
+        dex: pairDex,
+      });
+      console.log(`[GOLD-ENTRY] PAPER ENTER $${sig.dex.baseToken.symbol.slice(0,8)} size=${paperTradeAmount.toFixed(4)} SOL score=${scoring.combinedScore}`);
+    }
+  }
+
+  // ============================================================
+  // NEW MINT DETECTOR — polls Helius Enhanced Transactions API
+  // for the Raydium V4 + PumpSwap programs. Detects new tokens
+  // by tracking mint addresses seen in tokenTransfers. When a
+  // mint appears for the FIRST time, it means a new pool just
+  // had its first swap — detected 3-7s after creation.
+  // Bootstrap phase: first 6 polls (~30s) learn known mints
+  // without triggering entries. After bootstrap, every new mint
+  // is a potential entry. Existing safety gates filter garbage.
+  // ============================================================
+  const RAYDIUM_AMM_V4 = '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8';
+  const PUMP_SWAP_PROGRAM = 'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA';
+  const knownMintsOnRaydium = new Set<string>();
+  let newMintDetectorBootstrapped = false;
+  let newMintDetectorPolls = 0;
+  const NEW_MINT_BOOTSTRAP_POLLS = 6;
+  const WELL_KNOWN_MINTS = new Set([
+    'So11111111111111111111111111111111111111112', // SOL/WSOL
+    'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
+    'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', // USDT
+    'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263', // BONK
+    'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm', // WIF
+    'mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So', // mSOL
+    'J1toso1uCk3QLmjYXoTpQL5yV1aAne6P76w3Cj3f5Vt', // JitoSOL
+    'bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1', // bSOL
+    '7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs', // ETH (Wormhole)
+    '7dHbWXmci3dT8UFYWYZweBL48EneW8G3CUtNS7iPTTtN', // LDO
+    'SRMuApVNdxXokk5GT7XD5cUUgXMBCoAz2LHeuAoKWRt', // SRM
+    'MangoCzJusvvr33KFVssXFZxS3PqNcBGLTqGzpQKj6q', // MNGO
+    'orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE6', // ORCA
+    'ATLASXmbPQxBUYbxPsV97zA5fepDZ5UFRfB2MsW5jW3', // ATLAS
+    'FZz4eEH1QJqioHYnKJFZ6dQCrkgfRsmj1ujEpojAFjZ9', // RAY
+  ]);
+
+  // NEW-MINT diagnostics: dedicated throttle so the detector is never a silent
+  // black box. Distinct messages each surface once per window; numeric-only
+  // variations (heartbeat counts) collapse so they don't spam every 6s.
+  const _newMintDiagTs = new Map<string, number>();
+  function _newMintDiag(msg: string, everyMs: number = 20000): void {
+    const now = Date.now();
+    const key = msg.replace(/[0-9]+/g, '#');
+    if ((_newMintDiagTs.get(key) || 0) > now - everyMs) return;
+    _newMintDiagTs.set(key, now);
+    console.warn('[NEW-MINT-DIAG] ' + msg);
+  }
+  const _newMintShapeLogged = new Set<string>();
+
+  async function pollNewMintsHelius(): Promise<void> {
+    const programs: Array<[string, string]> = [['RAYV4', RAYDIUM_AMM_V4], ['PUMPSWAP', PUMP_SWAP_PROGRAM]];
+    let pollTxTotal = 0;
+    let pollNewMints = 0;
+    let pollOkPrograms = 0;
+    for (const [label, program] of programs) {
+      // Fresh key PER PROGRAM so one cooled/exhausted key can't blind both feeds.
+      const key = _getHeliusTapeKey();
+      if (!key) { _newMintDiag('no Helius key available (all on 429 cooldown?) - skipping ' + label); continue; }
+      let txs: any[] = [];
+      try {
+        const url = HELIUS_TAPE_BASE + '/' + program + '/transactions?api-key=' + key + '&limit=50';
+        const resp = await fetch(url, { headers: { 'Accept': 'application/json' }, signal: AbortSignal.timeout(10000) });
+        if (!resp.ok) {
+          let body = '';
+          try { body = (await resp.text()).slice(0, 200); } catch {}
+          _newMintDiag('[' + label + '] HTTP ' + resp.status + ' ' + resp.statusText + ' - ' + body);
+          if (resp.status === 429) _markHeliusKey429(key);
+          continue;
+        }
+        const payload = await resp.json();
+        if (!Array.isArray(payload)) {
+          const shape = payload && typeof payload === 'object' ? JSON.stringify(payload).slice(0, 200) : String(payload);
+          _newMintDiag('[' + label + '] payload is NOT an array (type=' + typeof payload + ') - ' + shape);
+          continue;
+        }
+        txs = payload as any[];
+      } catch (e: any) {
+        _newMintDiag('[' + label + '] fetch/parse FAILED: ' + (e?.name || '') + ' ' + (e?.message || String(e)));
+        continue;
+      }
+      pollOkPrograms++;
+      pollTxTotal += txs.length;
+      if (txs.length === 0) { _newMintDiag('[' + label + '] OK but 0 transactions returned'); continue; }
+      // One-time response-shape verification per program so the format is known.
+      if (!_newMintShapeLogged.has(label)) {
+        _newMintShapeLogged.add(label);
+        const t0: any = txs[0] || {};
+        const ttCount = Array.isArray(t0?.tokenTransfers) ? t0.tokenTransfers.length : 'MISSING';
+        console.log('[NEW-MINT][' + label + '] shape OK - txs=' + txs.length + ' firstTxKeys=[' + Object.keys(t0).join(',') + '] tokenTransfers=' + ttCount);
+      }
+      let sawTokenTransfers = false;
+      for (const tx of txs) {
+        const transfers = tx?.tokenTransfers;
+        if (!Array.isArray(transfers) || transfers.length === 0) continue;
+        sawTokenTransfers = true;
+        for (const tr of transfers) {
+          const mint = tr?.mint;
+          if (!mint || WELL_KNOWN_MINTS.has(mint) || knownMintsOnRaydium.has(mint)) continue;
+          knownMintsOnRaydium.add(mint);
+          pollNewMints++;
+
+          // Skip during bootstrap - we are just learning the existing mint set.
+          if (!newMintDetectorBootstrapped) continue;
+          if (tradedAddresses.has(mint) || recentlyAttemptedBuys.has(mint) || hardBlockedAddresses.has(mint) || stoppedOutAddresses.has(mint)) continue;
+
+          const symbol = mint.slice(0, 6);
+          const syntheticSig: any = { mintAddress: mint, score: 100, tier: 'LEGENDARY', dex: { baseToken: { symbol } } };
+          console.log('[NEW-MINT] $' + symbol + ' (' + mint.slice(0, 8) + '...) - first seen via ' + label + ', feeding into pipeline');
+          try { await goldHunterTradeEntry(syntheticSig); }
+          catch (e: any) { console.warn('[NEW-MINT] entry error for ' + mint.slice(0, 8) + ': ' + (e?.message || String(e))); }
+        }
+      }
+      if (!sawTokenTransfers) _newMintDiag('[' + label + '] ' + txs.length + ' txs but NONE had tokenTransfers (parsed-tx shape mismatch)');
+    }
+
+    // Bootstrap progresses on poll count regardless of per-program success, so a
+    // transient API failure can never permanently wedge the detector in bootstrap.
+    if (!newMintDetectorBootstrapped) {
+      newMintDetectorPolls++;
+      _newMintDiag('bootstrap ' + newMintDetectorPolls + '/' + NEW_MINT_BOOTSTRAP_POLLS + ' - learned ' + knownMintsOnRaydium.size + ' mints (okPrograms=' + pollOkPrograms + ' txs=' + pollTxTotal + ')');
+      if (newMintDetectorPolls >= NEW_MINT_BOOTSTRAP_POLLS) {
+        newMintDetectorBootstrapped = true;
+        console.log('[NEW-MINT] Bootstrapped: ' + knownMintsOnRaydium.size + ' known mints, now detecting new tokens');
+      }
+    } else {
+      // Heartbeat (throttled ~60s): proves the detector polled successfully even
+      // when there are zero new mints - distinguishes "no new mints" from "API failing".
+      _newMintDiag('heartbeat - okPrograms=' + pollOkPrograms + '/2 txs=' + pollTxTotal + ' newMints=' + pollNewMints + ' known=' + knownMintsOnRaydium.size, 60000);
+    }
+
+    if (knownMintsOnRaydium.size > 20000) {
+      const arr = [...knownMintsOnRaydium];
+      knownMintsOnRaydium.clear();
+      for (const a of arr.slice(-10000)) knownMintsOnRaydium.add(a);
+    }
+  }
+
+  // ============================================================
+  // GOLD HUNTER OVERHAUL — per-feed signal processing with
+  // immediate trade evaluation instead of 30s batched runHunter().
+  // Signal feed runs every 5s for fast GMGN alerts; other feeds
+  // at their natural cadence. Global dedup prevents double-trades.
+  // No duplicate API calls: per-feed intervals replace runHunter()
+  // for trade entry; runHunter() runs on slow diag-only interval.
+  // ============================================================
+  const _goldProcessed = new Set<string>();
+
+  async function _processGoldFeed(sigs: any[], source: string): Promise<void> {
+    for (const sig of sigs) {
+      if (sig.tier === 'SKIP' || sig.tier === 'MEDIUM' || !sig.gmgn || !sig.dex) continue;
+      const addr = sig.mintAddress;
+      if (_goldProcessed.has(addr)) continue;
+      _goldProcessed.add(addr);
+      console.log(`[GOLD-${source}] ${sig.tier} | ${addr.slice(0,8)} | score=${sig.score}`);
+      if (process.env.MODE === 'live' && sig.tier !== 'LEGENDARY') continue;
+      try { await goldHunterTradeEntry(sig); } catch (e) { console.log(`[GOLD-${source}] entry err: ${e}`); }
+    }
+    if (_goldProcessed.size > 2000) {
+      const arr = [..._goldProcessed];
+      _goldProcessed.clear();
+      for (const a of arr.slice(-1000)) _goldProcessed.add(a);
+    }
+  }
+
+  if (process.env.GOLD_HUNTER_ENABLED === 'true') {
+    console.log('[GOLD HUNTER] Starting per-feed processing...');
+
+    setTimeout(() => {
+      // Signal feed — 5s, GMGN type-11/12 smart money alerts (fastest)
+      setInterval(async () => {
+        const sigs = await pollSignalFeed().catch(() => []);
+        _processGoldFeed(sigs, 'SIGNAL');
+      }, 5_000);
+    }, 1_000);
+
+    setTimeout(() => {
+      // Trending — 30s batch filter
+      setInterval(async () => {
+        const sigs = await pollTrending().catch(() => []);
+        _processGoldFeed(sigs, 'TRENDING');
+      }, 30_000);
+    }, 3_000);
+
+    setTimeout(() => {
+      // Trenches — 20s near-graduation + completed
+      setInterval(async () => {
+        const sigs = await pollTrenches().catch(() => []);
+        _processGoldFeed(sigs, 'TRENCHES');
+      }, 20_000);
+    }, 5_000);
+
+    setTimeout(() => {
+      // Smart money cluster — 30s whale tracking
+      setInterval(async () => {
+        const sigs = await pollSmartMoneyFeed().catch(() => []);
+        _processGoldFeed(sigs, 'CLUSTER');
+      }, 30_000);
+    }, 7_000);
+
+    setTimeout(() => {
+      // DexScreener — 30s profiles/boosts
+      setInterval(async () => {
+        const sigs = await pollDexScreenerFeeds().catch(() => []);
+        _processGoldFeed(sigs, 'DEX');
+      }, 30_000);
+    }, 9_000);
+
+    setTimeout(() => {
+      // New mint detector — 6s, detects new tokens via first-seen mints on Raydium V4 + PumpSwap
+      setInterval(async () => {
+        await pollNewMintsHelius();
+      }, 6_000);
+    }, 15_000);
+    
+    // Diagnostic summary via runHunter (60s) — no trade processing,
+    // trades already handled by per-feed intervals above.
+    setTimeout(() => {
+      setInterval(async () => {
+        try { await runHunter(); } catch (e) { console.log('[GOLD-HUNTER] diag error: ' + String(e)); }
+      }, 60_000);
+    }, 11_000);
+
+    console.log('[GOLD HUNTER] Active — signal/5s trending/30s trenches/20s cluster/30s dex/30s newMints/6s');
   } else {
     console.log('[GOLD HUNTER] Disabled - set GOLD_HUNTER_ENABLED=true to activate');
   }

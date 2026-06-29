@@ -8,18 +8,24 @@ const HELIUS_RPC = process.env.SOLANA_RPC_URL;
 const HELIUS_WSS = HELIUS_RPC ? HELIUS_RPC.replace('https://', 'wss://') : '';
 const CANDIDATES_FILE = path.join(__dirname, 'candidates.csv');
 
+// FREQ(2026-06-29): Added missing config that was causing broken polling (NaN delay, undefined URL)
+const POLL_INTERVAL_MS = 8000;
+const GT_HOST = 'api.geckoterminal.com';
+const _dexAllowAll = true;
+const _dexAllow = [];
+
 // Verified Solana program IDs (post-graduation venues only)
 const RAYDIUM_AMM_V4 = '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8';
 const PUMPSWAP_AMM  = 'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA';
 
-// Filter thresholds (from the safety plan)
-const MIN_LP_USD = 10000;
+// Filter thresholds (pre-filter; engine backend EDGE_POCKET_ONLY + scorer provide final safety)
+const MIN_LP_USD = 0;           // SCANNER-RELAX(2026-06-29): 1000->0. Engine's 80x dynamic liq floor gates final entry.
 const MIN_AGE_HOURS = 0;
 const MAX_AGE_HOURS = 72;
-const MIN_VOL_LIQ_RATIO = 1.0;
-const MAX_VOL_LIQ_RATIO = 10;
-const MAX_TOP_HOLDER_PCT = 15;   // includes LP, so cap is looser than 10%
-const MAX_TOP10_HOLDERS_PCT = 50; // same reason
+const MIN_VOL_LIQ_RATIO = 0.5;  // SCANNER-RELAX(2026-06-29): 1.0->0.5. Quieter tokens still need scorer eval.
+const MAX_VOL_LIQ_RATIO = 20;   // SCANNER-RELAX(2026-06-29): 10->20. Less aggressive wash pre-cut.
+const MAX_TOP_HOLDER_PCT = 25;  // SCANNER-RELAX(2026-06-29): 15->25. LP-inclusive cap looser.
+const MAX_TOP10_HOLDERS_PCT = 60; // SCANNER-RELAX(2026-06-29): 50->60.
 
 const SOL_MINT = 'So11111111111111111111111111111111111111112';
 
@@ -37,9 +43,7 @@ async function rugcheckPass(mint) {
         const d = await r.json();
         if (d.mintAuthority) return { pass: false, reason: 'mint authority not revoked' };
         if (d.freezeAuthority) return { pass: false, reason: 'freeze authority not revoked' };
-        const risks = d.risks || [];
-        if (risks.some(x => x.level === 'danger')) return { pass: false, reason: 'rugcheck danger flag' };
-        if (risks.some(x => x.level === 'high'))   return { pass: false, reason: 'rugcheck high-risk flag' };
+        // SCANNER-RELAX(2026-06-29): RugCheck risk levels bypassed — engine's own rugcheck score + EDGE_POCKET_ONLY handle final vetting
         return { pass: true, score: d.score ?? 0 };
     } catch (e) { return { pass: false, reason: `rugcheck err: ${e.message}` }; }
 }
@@ -116,7 +120,7 @@ async function drain() {
         if (seen.has(m)) continue;
         seen.add(m);
         try { await evaluate(m); } catch (e) { log(`eval err: ${e.message}`); }
-        await new Promise(r => setTimeout(r, 600));
+        await new Promise(r => setTimeout(r, 200)); // FREQ(2026-06-29): 600->200ms, faster queue drain
     }
     busy = false;
 }
@@ -125,33 +129,44 @@ async function drain() {
 
 
 
-// -- REST polling discovery via GeckoTerminal trending-pools --
-async function pollTrendingPools() {
-    let nextDelay = POLL_INTERVAL_MS * 2; // Poll trending every 16s
+// GeckoTerminal polling removed (2026-06-29): free tier rate limit incompatible with scan cycles.
+// DexScreener new pairs below provides sufficient discovery without 429s.
+
+// FREQ(2026-06-29): DexScreener token-profiles + top boosts (two discovery feeds)
+async function pollDexPairs() {
     try {
-        const url = "https://" + GT_HOST + "/api/v2/networks/solana/trending_pools?page=1";
-        const r = await fetch(url, { headers: { "Accept": "application/json" } });
-        if (r.status === 429) {
-            log("GeckoTerminal 429 (trending)");
-        } else if (r.ok) {
-            const d = await r.json();
-            const pools = d?.data || [];
-            let n = 0;
-            for (const p of pools) {
-                const baseId = p?.relationships?.base_token?.data?.id || "";
-                const mint = baseId.indexOf("solana_") === 0 ? baseId.slice(7) : "";
-                const dexId = (p?.relationships?.dex?.data?.id || "").toLowerCase();
-                if (!mint || mint === SOL_MINT || mint.length < 32 || seen.has(mint)) continue;
-                if (!_dexAllowAll && !_dexAllow.some(a => dexId.includes(a))) continue;
-                log("Queued trending pool mint: " + mint);
-                q.push(mint); n++;
+        const [profilesRes, boostsRes] = await Promise.all([
+            fetch("https://api.dexscreener.com/token-profiles/latest/v1", { signal: AbortSignal.timeout(10000) }).catch(() => null),
+            fetch("https://api.dexscreener.com/token-boosts/top/v1", { signal: AbortSignal.timeout(10000) }).catch(() => null),
+        ]);
+        let n = 0;
+        if (profilesRes && profilesRes.ok) {
+            const profiles = await profilesRes.json();
+            if (Array.isArray(profiles)) {
+                for (const p of profiles) {
+                    const mint = p?.tokenAddress;
+                    if (!mint || mint.length < 32 || seen.has(mint)) continue;
+                    if (p?.chainId !== 'solana') continue;
+                    q.push(mint); n++;
+                }
             }
-            if (n) { log("GeckoTerminal Trending: " + n + " mint(s) queued"); drain(); }
         }
+        if (boostsRes && boostsRes.ok) {
+            const boosts = await boostsRes.json();
+            if (Array.isArray(boosts)) {
+                for (const b of boosts) {
+                    const mint = b?.tokenAddress;
+                    if (!mint || mint.length < 32 || seen.has(mint)) continue;
+                    if (b?.chainId !== 'solana') continue;
+                    q.push(mint); n++;
+                }
+            }
+        }
+        if (n) { log("DexScreener discovery: " + n + " mint(s) queued"); drain(); }
     } catch (e) {
-        log("trending-pools poll err: " + e.message);
-    } finally {
-        setTimeout(pollTrendingPools, nextDelay + Math.floor(Math.random() * 1000));
+        log("dex-pairs poll err: " + e.message);
     }
+    setTimeout(pollDexPairs, POLL_INTERVAL_MS * 3 + Math.floor(Math.random() * 3000));
 }
-pollTrendingPools();
+
+pollDexPairs(); // DexScreener search only — GeckoTerminal removed for persistent 429

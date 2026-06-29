@@ -155,11 +155,11 @@ const CFG = {
   // GMGN chain
   CHAIN: 'sol' as const,
 
-  // === LAYER 3: Quality Thresholds ===
-  MIN_LIQUIDITY_USD:    15_000,   // AI-TUNED for high quantity God-Tier   // 369x ratio at 50K–100K
-  MIN_HOLDER_COUNT:     300,      // AI-TUNED for high quantity God-Tier    // 65.90% moon rate
+  // === LAYER 3: Quality Thresholds (widened net — score still filters) ===
+  MIN_LIQUIDITY_USD:    10_000,   // FREQ(2026-06-29): 15K->10K. Let score handle borderline liq.
+  MIN_HOLDER_COUNT:     200,      // FREQ(2026-06-29): 300->200. More tokens enter scoring; low holders get negative score.
   MAX_HOLDER_COUNT:     5_000,    // sweet spot top
-  MIN_MARKET_CAP:       100_000,  // 78.32% moon rate
+  MIN_MARKET_CAP:       50_000,   // FREQ(2026-06-29): 100K->50K. Catch early runners before they hit 100K.
   MAX_MARKET_CAP:     1_000_000,
 
   // === LAYER 4: Timing ===
@@ -317,6 +317,12 @@ export function goldScore(
   const athMc = g.dev.ath_token_info?.ath_mc ?? 0;
   if (athMc > 5_000_000) { score += 5; signals.push('Proven creator >$5M ATH (+5)'); }
 
+  // Dev wallet funding age — fresh funding = higher rug risk
+  const fundFromMs = g.dev.fund_from_ts ? g.dev.fund_from_ts * 1000 : null;
+  const funding = evaluateDevFundingAge(fundFromMs, Date.now());
+  score += funding.points;
+  if (funding.signal) signals.push(`${funding.signal} (${funding.points >= 0 ? '+' : ''}${funding.points})`);
+
   // ── LAYER 3: Quality thresholds (max +35 pts) ──────────────────────────────
   const holders = g.holder_count ?? 0;
   if (holders >= 1000 && holders <= 5000) {
@@ -454,11 +460,46 @@ export function goldScore(
 // SCORE → TIER
 // ─────────────────────────────────────────────────────────────────────────────
 
-function scoreTier(score: number): GoldSignal['tier'] {
+export function scoreTier(score: number): GoldSignal['tier'] {
   if (score >= CFG.SCORE_LEGENDARY) return 'LEGENDARY';
   if (score >= CFG.SCORE_HIGH)      return 'HIGH';
   if (score >= CFG.SCORE_MEDIUM)    return 'MEDIUM';
   return 'SKIP';
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DEV FUNDING AGE CHECK
+// ─────────────────────────────────────────────────────────────────────────────
+
+export function evaluateDevFundingAge(fundFromTs: number | null, now: number): { fresh: boolean; points: number; signal?: string } {
+  if (fundFromTs == null || fundFromTs === 0) {
+    return { fresh: false, points: 0, signal: 'unknown_dev_wallet_age' };
+  }
+  const ageMs = now - fundFromTs;
+  const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+  if (ageMs < ONE_DAY_MS) {
+    return { fresh: true, points: -15, signal: 'very_fresh_dev_wallet' };
+  }
+  if (ageMs < 7 * ONE_DAY_MS) {
+    return { fresh: true, points: -8, signal: 'fresh_dev_wallet' };
+  }
+  return { fresh: false, points: 0 };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VOLUME SPIKE AUTHENTICITY CHECK
+// ─────────────────────────────────────────────────────────────────────────────
+
+export function evaluateVolumeSpikeAuthenticity(vol5m: number, vol1h: number, vol24h: number): { authentic: boolean; points: number; signal?: string } {
+  if (vol1h === 0 || vol24h === 0) {
+    return { authentic: true, points: 0, signal: 'insufficient_volume_data' };
+  }
+  const pctOf1h = vol5m / vol1h;
+  const pctOf24h = vol1h / vol24h;
+  if (pctOf1h > 0.80 && pctOf24h < 0.05) {
+    return { authentic: false, points: -10, signal: 'isolated_volume_spike' };
+  }
+  return { authentic: true, points: 0 };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -552,11 +593,10 @@ export async function pollSignalFeed(): Promise<GoldSignal[]> {
     data?: { holder_count?: number; liquidity?: number };
   };
   const feed = await gmgnList<SignalEvent>(
-    `market signal --chain ${CFG.CHAIN} --groups ${shellQuoteJsonArg('[{"signal_type":[12],"mc_min":50000,"mc_max":5000000}]')}`
+    `market signal --chain ${CFG.CHAIN} --groups ${shellQuoteJsonArg('[{"signal_type":[11,12],"mc_min":20000,"mc_max":10000000}]')}`
   );
 
-  // AI-FIX(2026-06-28f): gmgnList normalizes the bare-array payload gmgn-cli --raw returns.
-  console.log(`[GMGN-DEBUG] signal poll: ${feed.length} type-12 smart-money signal(s) parsed`);
+  console.log(`[GMGN-DEBUG] signal poll: ${feed.length} type-11/12 signal(s) parsed`);
   if (!feed.length) return results;
 
   const now = Date.now();
@@ -564,9 +604,9 @@ export async function pollSignalFeed(): Promise<GoldSignal[]> {
   for (const event of feed) {
     const mint = event.token_address;
 
-    // Deduplicate: skip if seen < 5 min ago
+    // Deduplicate: skip if seen < 2 min ago (FREQ: 5min->2min for fresher signals)
     const lastSeen = processedSignalMints.get(mint) ?? 0;
-    if (now - lastSeen < 5 * 60 * 1000) continue;
+    if (now - lastSeen < 2 * 60 * 1000) continue;
     processedSignalMints.set(mint, now);
 
     // Quick pre-filter from signal data
@@ -607,7 +647,7 @@ export async function pollSmartMoneyFeed(): Promise<GoldSignal[]> {
   const results: GoldSignal[] = [];
 
   const feed = await gmgnList<SmartMoneyTrade>(
-    `track smartmoney --chain ${CFG.CHAIN} --side buy --limit 300`
+    `track smartmoney --chain ${CFG.CHAIN} --side buy --limit 500`
   );
 
   if (!feed.length) return results;
@@ -642,7 +682,7 @@ export async function pollSmartMoneyFeed(): Promise<GoldSignal[]> {
     // FIRE: 3+ distinct smart money wallets within 30 min
     if (
       c.makers.size >= CFG.CLUSTER_MIN_WALLETS &&
-      now - c.lastAlerted > 10 * 60 * 1000 // don't re-alert same token < 10 min
+      now - c.lastAlerted > 5 * 60 * 1000 // FREQ(2026-06-29): 10min->5min re-alert
     ) {
       c.lastAlerted = now;
       const timeWindow = Math.max(...c.timestamps) - Math.min(...c.timestamps);
@@ -698,18 +738,18 @@ export async function pollTrending(): Promise<GoldSignal[]> {
     ` --max-insider-rate ${CFG.MAX_INSIDER_RATE}` +
     ` --max-bundler-rate ${CFG.MAX_BUNDLER_RATE}` +
     ` --max-entrapment-ratio ${CFG.MAX_ENTRAPMENT_RATE}` +
-    ` --order-by smart_degen_count --limit 200`
+    ` --order-by smart_degen_count --limit 500`
   );
 
   if (!data.length) return results;
 
-  // Process in parallel (max 5 at a time)
+  // Process in parallel (max 10 at a time — FREQ: 5->10 for higher throughput)
   const freshTokens = data.filter(t => !trendingProcessed.has(t.address));
   for (const token of freshTokens) trendingProcessed.add(token.address);
 
-  // Batch process 5 at a time
-  for (let i = 0; i < freshTokens.length; i += 5) {
-    const batch = freshTokens.slice(i, i + 5);
+  // Batch process 10 at a time
+  for (let i = 0; i < freshTokens.length; i += 10) {
+    const batch = freshTokens.slice(i, i + 10);
     const batchResults = await Promise.all(
       batch.map(t => scoreToken(t.address, 'TRENDING'))
     );
@@ -753,7 +793,7 @@ export async function pollTrenches(): Promise<GoldSignal[]> {
     ` --max-bundler-rate ${CFG.MAX_BUNDLER_RATE}` +
     ` --min-holder-count 300` +
     ` --max-top-holder-rate 0.30` +
-    ` --sort-by smart_degen_count --limit 200`
+    ` --sort-by smart_degen_count --limit 500`
   );
 
   if (nearComp.length) {
@@ -789,7 +829,7 @@ export async function pollTrenches(): Promise<GoldSignal[]> {
     ` --min-holder-count ${CFG.MIN_HOLDER_COUNT}` +
     ` --max-holder-count ${CFG.MAX_HOLDER_COUNT}` +
     ` --min-liquidity ${CFG.MIN_LIQUIDITY_USD}` +
-    ` --sort-by smart_degen_count --limit 30`
+    ` --sort-by smart_degen_count --limit 100`
   );
 
   if (completed.length) {
@@ -797,7 +837,7 @@ export async function pollTrenches(): Promise<GoldSignal[]> {
     for (const token of freshGrads) trenchesProcessed.add(token.address);
 
     const batchResults = await Promise.all(
-      freshGrads.slice(0, 10).map(t => scoreToken(t.address, 'TRENCHES'))
+      freshGrads.slice(0, 20).map(t => scoreToken(t.address, 'TRENCHES'))
     );
 
     for (const sig of batchResults) {
@@ -887,7 +927,7 @@ export async function pollDexScreenerFeeds(): Promise<GoldSignal[]> {
   // Boosts — paid promotion cross-referenced with quality
   for (const boost of (boosts as Array<DexFeedItem & { totalAmount?: number }>)) {
     if (boost.chainId !== 'solana') continue;
-    if ((boost.totalAmount ?? 0) < 500) continue; // Only significant spend
+    if ((boost.totalAmount ?? 0) < 200) continue; // FREQ(2026-06-29): 500->200. More boost candidates; score filters quality.
     if (dexProcessed.has(boost.tokenAddress + '_boost')) continue;
     dexProcessed.add(boost.tokenAddress + '_boost');
 

@@ -11,6 +11,12 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     isolate: true,
+    exclude: [
+      'test/failsafe.test.cjs',   // uses node:test, not vitest
+      'routes.test.ts',           // requires postgres DB
+      'node_modules/**',
+      'dist/**',
+    ],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],
