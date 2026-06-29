@@ -1684,6 +1684,9 @@ async function fetchTokenLargestAccountsRaw(tokenAddress: string): Promise<Array
   const maxTries = Math.min(pool.length, 3); // rotate through up to 3 keys before giving up
   for (let t = 0; t < maxTries; t++) {
     const rpc = pool[(_whaleRpcIdx++) % pool.length];
+    const _rk = _heliusKeyFromEndpoint(rpc);
+    if (_rk && (_heliusKeyCooldown.get(_rk) || 0) > Date.now()) continue;
+    if (!_heliusRateGate()) continue;
     try {
       const resp = await fetch(rpc, {
         method: "POST",
@@ -1760,14 +1763,28 @@ async function fetchWhaleAccumulationFree(tokenAddress: string): Promise<SmartMo
 // exactly like the Birdeye tape. Default-on; HELIUS_WHALE_TAPE=false disables.
 // Tunables: HELIUS_TAPE_LIMIT(100) HELIUS_TAPE_WHALE_N(10) HELIUS_TAPE_BUNDLE_SLOTS(3)
 //           HELIUS_TAPE_TTL_MS(60000) HELIUS_TAPE_TIMEOUT_MS(8000)
-// ════════════════════════════════════════════════════�����═══════════
+// ════════════════════════════════════════════════════���������═══════════
 const HELIUS_TAPE_BASE = process.env.HELIUS_TAPE_BASE || "https://api.helius.xyz/v0/addresses";
 const HELIUS_TAPE_TTL_MS = Number(process.env.HELIUS_TAPE_TTL_MS) || 60_000;
 const HELIUS_TAPE_TIMEOUT_MS = Number(process.env.HELIUS_TAPE_TIMEOUT_MS) || 8_000;
 const HELIUS_TAPE_LIMIT = Number(process.env.HELIUS_TAPE_LIMIT) || 100;
 const heliusTapeCache = new Map<string, { data: SmartMoneySignal; ts: number }>();
 let _heliusTapeKeys: string[] | null = null;
-let _heliusTapeIdx = 0; let _heliusDiagTs = 0; function _heliusDiag(m: string){ const n = Date.now(); if (n - _heliusDiagTs > 15000) { _heliusDiagTs = n; console.warn("[HELIUS-TAPE-DIAG] " + m); } } const _heliusKeyCooldown = new Map<string, number>(); function _markHeliusKey429(k: string){ const ms = Number(process.env.HELIUS_KEY_COOLDOWN_MS) || 60000; _heliusKeyCooldown.set(k, Date.now() + ms); _heliusDiag("key cooled " + (ms/1000) + "s after 429 (key ..." + k.slice(-4) + ")"); } const _heliusNeg = new Map<string, number>(); const _HELIUS_NEG_TTL = Number(process.env.HELIUS_TAPE_NEG_TTL_MS) || 30000; function _heliusNegHit(t: string){ const ts = _heliusNeg.get(t); return ts !== undefined && Date.now() < ts + _HELIUS_NEG_TTL; } function _heliusNegSet(t: string){ _heliusNeg.set(t, Date.now()); }
+let _heliusTapeIdx = 0; let _heliusDiagTs = 0; function _heliusDiag(m: string){ const n = Date.now(); if (n - _heliusDiagTs > 15000) { _heliusDiagTs = n; console.warn("[HELIUS-TAPE-DIAG] " + m); } } const _heliusKeyCooldown = new Map<string, number>(); const _heliusKey429Streak = new Map<string, number>(); function _markHeliusKey429(k: string, body?: string){ const base = Number(process.env.HELIUS_KEY_COOLDOWN_MS) || 60000; const cap = Number(process.env.HELIUS_KEY_COOLDOWN_MAX_MS) || 1800000; const exhausted = !!body && /max usage|quota|credit|monthly|daily limit/i.test(body); let ms: number; if (exhausted) { ms = Number(process.env.HELIUS_KEY_EXHAUSTED_MS) || 21600000; _heliusKey429Streak.set(k, 0); } else { const streak = (_heliusKey429Streak.get(k) || 0) + 1; _heliusKey429Streak.set(k, streak); ms = Math.min(base * Math.pow(2, streak - 1), cap); } _heliusKeyCooldown.set(k, Date.now() + ms); _heliusDiag("key cooled " + Math.round(ms/1000) + "s after 429 (" + (exhausted ? "QUOTA-EXHAUSTED" : "rate-limit") + ", key ..." + k.slice(-4) + ")"); } function _markHeliusKeyOk(k: string){ if (_heliusKey429Streak.get(k)) _heliusKey429Streak.set(k, 0); } // ── GLOBAL HELIUS RATE LIMITER (shared across all consumers: tape, new-mint, RPC pool) ──
+const _heliusGlobalCallLog: number[] = [];
+const HELIUS_GLOBAL_RPM = Number(process.env.HELIUS_GLOBAL_RPM) || 100;
+function _heliusRateGate(): boolean {
+  const now = Date.now();
+  while (_heliusGlobalCallLog.length > 0 && _heliusGlobalCallLog[0] < now - 60_000) _heliusGlobalCallLog.shift();
+  if (_heliusGlobalCallLog.length >= HELIUS_GLOBAL_RPM) return false;
+  _heliusGlobalCallLog.push(now);
+  return true;
+}
+function _heliusKeyFromEndpoint(endpoint: string): string | null {
+  const m = endpoint.match(/api-key=([a-fA-F0-9]+)/); if (!m) return null;
+  return m[1];
+}
+const _heliusNeg = new Map<string, number>(); const _HELIUS_NEG_TTL = Number(process.env.HELIUS_TAPE_NEG_TTL_MS) || 30000; function _heliusNegHit(t: string){ const ts = _heliusNeg.get(t); return ts !== undefined && Date.now() < ts + _HELIUS_NEG_TTL; } function _heliusNegSet(t: string){ _heliusNeg.set(t, Date.now()); }
 function _loadHeliusTapeKeys(): string[] {
   if (!_heliusTapeKeys) _heliusTapeKeys = (process.env.HELIUS_API_KEYS ?? process.env.HELIUS_KEYS ?? "").split(",").map(k => k.trim()).filter(k => k.length > 0);
   return _heliusTapeKeys;
@@ -1778,7 +1795,7 @@ function heliusTapeEnabled(): boolean {
 function _getHeliusTapeKey(): string | null {
   const keys = _loadHeliusTapeKeys();
   if (keys.length === 0) return null;
-  const _now = Date.now(); for (let _i = 0; _i < keys.length; _i++) { const _k = keys[(_heliusTapeIdx++) % keys.length]; if ((_heliusKeyCooldown.get(_k) || 0) <= _now) return _k; } return null;
+  const _now = Date.now(); for (let _i = 0; _i < keys.length; _i++) { const _k = keys[(_heliusTapeIdx++) % keys.length]; if ((_heliusKeyCooldown.get(_k) || 0) <= _now) return _k; } _heliusDiag("all " + keys.length + " keys on cooldown"); return null;
 }
 
 async function fetchWhaleTapeHelius(tokenAddress: string, bypassCache: boolean = false): Promise<SmartMoneySignal> {
@@ -1792,8 +1809,9 @@ async function fetchWhaleTapeHelius(tokenAddress: string, bypassCache: boolean =
   let txs: any[] = [];
   try {
     const url = `${HELIUS_TAPE_BASE}/${tokenAddress}/transactions?api-key=${key}&type=SWAP&limit=${HELIUS_TAPE_LIMIT}`;
+    if (!_heliusRateGate()) { _heliusDiag("global RPM budget exhausted (" + HELIUS_GLOBAL_RPM + "/min)"); return empty; }
     const resp = await fetch(url, { headers: { "Accept": "application/json" }, signal: AbortSignal.timeout(HELIUS_TAPE_TIMEOUT_MS) });
-    if (!resp.ok) { _heliusDiag("HTTP " + resp.status + " for " + tokenAddress.slice(0,6)); if (resp.status === 429 && key) _markHeliusKey429(key); _heliusNegSet(tokenAddress); return empty; }
+    if (!resp.ok) { let _b = ''; if (resp.status === 429) { try { _b = (await resp.text()).slice(0,200); } catch {} } _heliusDiag("HTTP " + resp.status + " for " + tokenAddress.slice(0,6)); if (resp.status === 429 && key) _markHeliusKey429(key, _b); _heliusNegSet(tokenAddress); return empty; } _markHeliusKeyOk(key);
     txs = await resp.json();
     if (!Array.isArray(txs) || txs.length === 0) { _heliusDiag("empty SWAP payload for " + tokenAddress.slice(0,6) + " (array=" + Array.isArray(txs) + ")"); _heliusNegSet(tokenAddress); return empty; }
   } catch (e: any) {
@@ -2931,7 +2949,7 @@ async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair, gol
       }
     }
     if (safe) {
-      const heliusKey = process.env.HELIUS_KEYS?.split(",")[0] || "";
+      const heliusKey = _getHeliusTapeKey() || process.env.HELIUS_API_KEYS?.split(",")[0] || process.env.HELIUS_KEYS?.split(",")[0] || "";
       const advResult = await checkAdvancedFilters(tokenAddress, pair, heliusKey);
       if (!advResult.safe) {
         safe = false;
@@ -4552,12 +4570,28 @@ async function checkOpenPositions() {
                 })
                 .finally(() => { cleanupSanityState(); sellingInProgress.delete(capturedTrade.id); });
             } else if (trade.tradingMode !== "live") {
-              // Paper mode: close synchronously.
-              paperBalance += sizeSol * (1 + rugPnlPct / 100);
-              dailyPnlSol   += sizeSol * (rugPnlPct / 100);
-              if (paperBalance > peakBalance) peakBalance = paperBalance;
-              await storage.closeTrade(trade.id, currentPrice.toString(), rugPnlPct.toFixed(2), "PRICE_SANITY_FORCE_CLOSE");
-              cleanupSanityState();
+              // Paper mode: a single-tick ≥99% drop is almost always a TRANSIENT DexScreener
+              // feed glitch, not a real rug. The old code booked the glitched near-zero price as
+              // a realized −99% loss, fabricating phantom catastrophes (e.g. $DNnKoZ: peak +58%,
+              // booked −99%). Two guards prevent that:
+              //   1) Require PAPER_RUG_CONFIRM_CYCLES of *sustained* dead feed before closing.
+              //      Transient glitches self-correct in a few seconds, which resets rejCount via
+              //      the successful-read path below, so they now never reach this close at all.
+              //   2) When we do close, book the LAST VALID observed price — the honest price the
+              //      bot could actually have transacted at — never the glitched near-zero tick.
+              //      (Mirrors the upward PRICE_SANITY_STUCK_CLOSE path.)
+              const PAPER_RUG_CONFIRM_CYCLES = 30; // 30s of sustained dead feed = treat as real
+              if (rejCount >= PAPER_RUG_CONFIRM_CYCLES) {
+                const lastValidPrice = parseFloat((trade as any).currentPrice || trade.price || "0");
+                const lastValidPnlPct = entryPrice > 0 && lastValidPrice > 0
+                  ? ((lastValidPrice - entryPrice) / entryPrice) * 100
+                  : rugPnlPct;
+                paperBalance += sizeSol * (1 + lastValidPnlPct / 100);
+                dailyPnlSol   += sizeSol * (lastValidPnlPct / 100);
+                if (paperBalance > peakBalance) peakBalance = paperBalance;
+                await storage.closeTrade(trade.id, lastValidPrice.toString(), lastValidPnlPct.toFixed(2), "PRICE_SANITY_FORCE_CLOSE");
+                cleanupSanityState();
+              }
             }
           }
           continue; // skip to next trade — do NOT update pnlPct, peakPrices, paperBalance, or dailyPnlSol
@@ -4598,12 +4632,12 @@ async function checkOpenPositions() {
         const peakPnl = ((peak - entryPrice) / entryPrice) * 100;
         // -- DYNAMIC TRAIL + BREAKEVEN LOCK --------------------------
         if (process.env.DYNAMIC_TRAIL_ENABLED !== 'false') {
-          const _BE_TRIG  = parseFloat(process.env.BREAKEVEN_TRIGGER_PCT ?? '1.0');
-          const _BE_FLOOR = parseFloat(process.env.BREAKEVEN_FLOOR_PCT   ?? '-0.2');
+          const _rtPct = calcTransactionCosts(pair?.liquidity?.usd ?? 0, parseFloat(trade.amount || '0')).totalRoundTripPct; const _BE_TRIG  = Math.max(parseFloat(process.env.BREAKEVEN_TRIGGER_PCT ?? '1.0'), _rtPct + 0.5);
+          const _BE_FLOOR = Math.max(parseFloat(process.env.BREAKEVEN_FLOOR_PCT   ?? '-0.2'), _rtPct - 1.0);
           if (!(trade as any)._breakevenLocked && peakPnl >= _BE_TRIG) {
             (trade as any)._breakevenLocked  = true;
             (trade as any)._dynamicStopFloor = _BE_FLOOR;
-            console.log('[PROFIT-LOCK] ' + String(trade.tokenSymbol) + ' floor=' + _BE_FLOOR.toFixed(1) + 'pct (peak=' + peakPnl.toFixed(2) + 'pct)');
+            console.log('[PROFIT-LOCK] ' + String(trade.tokenSymbol) + ' floor=' + _BE_FLOOR.toFixed(1) + 'pct trig=' + _BE_TRIG.toFixed(1) + 'pct rt=' + _rtPct.toFixed(1) + 'pct (peak=' + peakPnl.toFixed(2) + 'pct)');
           }
           const _trailPct   = getDynamicTrailPct(peakPnl);
           const _trailFloor = peakPnl - _trailPct;
@@ -6243,6 +6277,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       // Fresh key PER PROGRAM so one cooled/exhausted key can't blind both feeds.
       const key = _getHeliusTapeKey();
       if (!key) { _newMintDiag('no Helius key available (all on 429 cooldown?) - skipping ' + label); continue; }
+      if (!_heliusRateGate()) { _newMintDiag('[' + label + '] global RPM budget exhausted (' + HELIUS_GLOBAL_RPM + '/min) - skipping'); continue; }
       let txs: any[] = [];
       try {
         const url = HELIUS_TAPE_BASE + '/' + program + '/transactions?api-key=' + key + '&limit=50';
@@ -6251,7 +6286,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           let body = '';
           try { body = (await resp.text()).slice(0, 200); } catch {}
           _newMintDiag('[' + label + '] HTTP ' + resp.status + ' ' + resp.statusText + ' - ' + body);
-          if (resp.status === 429) _markHeliusKey429(key);
+          if (resp.status === 429) _markHeliusKey429(key, body);
           continue;
         }
         const payload = await resp.json();
@@ -6265,7 +6300,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         _newMintDiag('[' + label + '] fetch/parse FAILED: ' + (e?.name || '') + ' ' + (e?.message || String(e)));
         continue;
       }
-      pollOkPrograms++;
+      pollOkPrograms++; _markHeliusKeyOk(key);
       pollTxTotal += txs.length;
       if (txs.length === 0) { _newMintDiag('[' + label + '] OK but 0 transactions returned'); continue; }
       // One-time response-shape verification per program so the format is known.
@@ -6398,10 +6433,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }, 9_000);
 
     setTimeout(() => {
-      // New mint detector — 6s, detects new tokens via first-seen mints on Raydium V4 + PumpSwap
+      // New mint detector - 12s (FREQ 2026-06-30: 6s->12s to halve Helius burn) — 6s, detects new tokens via first-seen mints on Raydium V4 + PumpSwap
       setInterval(async () => {
         await pollNewMintsHelius();
-      }, 6_000);
+      }, 12_000);
     }, 15_000);
     
     // Diagnostic summary via runHunter (60s) — no trade processing,
