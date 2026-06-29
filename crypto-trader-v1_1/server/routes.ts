@@ -295,8 +295,8 @@ let engineSettings = {
   stopLoss: -5, // RESTORED to your engineered -40% thesis. Bleed on dead days should be fixed by a REGIME GATE (only trade when runners are appearing), NOT by tightening the stop — a tighter stop would kill moonshot survival.
 
   // -- Conviction Gates --
-  minScoreToTrade: 90, // AI-FIX(2026-06-28): 70 -> 80. Shadow analysis: the 70-79 band was the WORST (-3.90%/trade); every band >=80 was positive. Floor lifted to the proven-positive line so the generic gate stops admitting the worst segment. Do not lower without fresh shadow data.
-  microMinScoreToTrade: 90, // AI-TUNE(2026-06-27): 70 -> 65. Shadow ledger +3.65%/trade over n=45 (win 64.4%, growth +76.79%); dense momentum band at 65-69 (rej=[], strong mlScore) was being skipped by 1-9 pts. Whale-distribution exit (proved on KNICKS +7%), post-loss cooldown, and price-drift gate now protect entries, so admitting the 65-69 band is +EV. FLOOR at 65 — do not go lower; keep collecting shadow data.
+  minScoreToTrade: Number(process.env.MIN_SCORE) || 80, // PLAYBOOK(2026-06-29): 90 -> 80 (env MIN_SCORE). The 90 value was structurally unreachable — in normal regimes the scorer tops out ~79-86, so EVERY candidate (incl. ML-95 names) died at the gate => zero trades, zero learning. 80 IS this setting's own documented intent ("70 -> 80; every band >=80 positive; 70-79 worst at -3.90%/trade") and matches EDGE_MIN_SCORE=80. Hard safety vetoes (LP-unlock/freeze/honeypot/rugcheck) and EDGE_POCKET are untouched.
+  microMinScoreToTrade: Number(process.env.MICRO_MIN_SCORE) || 80, // PLAYBOOK(2026-06-29): 90 -> 80 (env MICRO_MIN_SCORE). The 90 value contradicted this setting's own documented floor (65, +3.65%/trade n=45) and produced zero micro-wallet trades all session. 80 aligns the conviction gate with EDGE_POCKET's proven SNIPER+score>=80 pocket and admits the regular gold SNIPER signals (e.g. HORNS 86, ANSOM 85) while still excluding the net-negative 70-79 band. Set MICRO_MIN_SCORE=65 to test the wider documented floor, or 90 to restore the no-trade lockout.
   
   // -- SNIPER Mode Calibration --
   sniperMinScore: 85, 
@@ -1760,7 +1760,7 @@ async function fetchWhaleAccumulationFree(tokenAddress: string): Promise<SmartMo
 // exactly like the Birdeye tape. Default-on; HELIUS_WHALE_TAPE=false disables.
 // Tunables: HELIUS_TAPE_LIMIT(100) HELIUS_TAPE_WHALE_N(10) HELIUS_TAPE_BUNDLE_SLOTS(3)
 //           HELIUS_TAPE_TTL_MS(60000) HELIUS_TAPE_TIMEOUT_MS(8000)
-// ════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════�����═══════════
 const HELIUS_TAPE_BASE = process.env.HELIUS_TAPE_BASE || "https://api.helius.xyz/v0/addresses";
 const HELIUS_TAPE_TTL_MS = Number(process.env.HELIUS_TAPE_TTL_MS) || 60_000;
 const HELIUS_TAPE_TIMEOUT_MS = Number(process.env.HELIUS_TAPE_TIMEOUT_MS) || 8_000;
@@ -4608,7 +4608,18 @@ async function checkOpenPositions() {
           const _trailPct   = getDynamicTrailPct(peakPnl);
           const _trailFloor = peakPnl - _trailPct;
           const _stopFloor  = (trade as any)._dynamicStopFloor ?? -Infinity;
-          const _effStop    = Math.max(_trailFloor, _stopFloor);
+          // PLAYBOOK(2026-06-29) EXIT-BUGFIX: the dynamic peak-trail must NOT arm until the position
+          // reaches the activation threshold (+12%). Previously _effStop = max(_trailFloor, _stopFloor)
+          // armed at peakPnl=0 (getDynamicTrailPct(0)=0.8 -> floor -0.8%), so EVERY position that opened
+          // red was instantly force-exited and MISLABELED 'DYNAMIC_TRAIL' (e.g. $6mv4Dw -4.72%, $HpdpSn
+          // -8.31%, both never green). That hair-trigger short-circuited the engineered cascade below
+          // (STOP_LOSS -20 / laddered TRAIL_STOP @ +12% / NEVER_GREEN_CUT / TIME_EXIT 300s) and made the
+          // +12% moonshot activation unreachable. Now: below activation only the breakeven-LOCKED floor
+          // applies (protects a gain that actually crossed BREAKEVEN_TRIGGER_PCT); the peak-trail arms
+          // only once peakPnl >= activation, and the engineered laddered TRAIL_STOP owns trailing from
+          // there. Disable this whole block via DYNAMIC_TRAIL_ENABLED=false.
+          const _trailArmed = peakPnl >= engineSettings.trailingStopActivation;
+          const _effStop    = _trailArmed ? Math.max(_trailFloor, _stopFloor) : _stopFloor;
           if (pnlPct < _effStop) {
             const _dReason = (trade as any)._breakevenLocked ? 'BREAKEVEN_LOCK_HIT' : 'DYNAMIC_TRAIL';
             console.log('[EXIT][' + _dReason + '] ' + String(trade.tokenSymbol) + ' pnl=' + pnlPct.toFixed(2) + 'pct trail=' + _trailPct.toFixed(1) + 'pct peak=' + peakPnl.toFixed(2) + 'pct');
@@ -4822,6 +4833,16 @@ async function checkOpenPositions() {
           // ---- TIER 2: profit capture ----
           else if (pnlPct >= engineSettings.hardTakeProfit) { shouldClose = true; reason = `HARD_TAKE_PROFIT (+${pnlPct.toFixed(2)}% >= ${engineSettings.hardTakeProfit}% ceiling)`; }
           else if (peakPnl >= activation && (drawdownFromPeak >= engineSettings.trailingStopDistance || (trailingFloor > 0 && pnlPct <= trailingFloor))) { shouldClose = true; reason = `TRAIL_STOP (peak +${peakPnl.toFixed(1)}%, now +${pnlPct.toFixed(1)}%, locked floor +${trailingFloor.toFixed(1)}%, fell ${drawdownFromPeak.toFixed(1)}%)`; } // AI-TUNE(2026-06-28 LOCK-GAINS): added the floor-trigger `pnlPct <= trailingFloor`. The old condition ONLY fired on a 25-PRICE-POINT drawdown from peak, which for a +25% peak lands BELOW entry (peak*0.75 = -5.7% pnl) — useless for moderate runners. Now once armed (peak>=12%), the position is SOLD the moment pnl falls back to the laddered floor (e.g. peak+25% -> floor +12.5%), so $VORF-type peaks are crystallized near the floor instead of given back. trailWasArmed in FIX H now matches, so the recorded pnl is the real fill, not inflated.
+          // PLAYBOOK(2026-06-29 GIVEBACK-FLOOR): enforce the laddered floor for meaningful peaks
+          // that never reached the +12% moonshot activation. The floor was already COMPUTED for the
+          // peak>3 / peak>8 tiers but only ENFORCED inside TRAIL_STOP (peak>=activation), so a position
+          // that ran to +5..12% and faded had NO protective stop below activation and could round-trip
+          // the entire gain ($2eEh7U: peak +9.2% -> booked -6.47%, price recovered to +7% after exit).
+          // Loose by design (locks only after giving back ~60-80% of peak) so genuine moonshot
+          // consolidations still breathe, and it never touches never-green trades (peak below the gate).
+          // Honest accounting: we actually sell at ~floor, and FIX H still records the raw fill on a gap.
+          // Tunable via GIVEBACK_FLOOR_MIN_PEAK_PCT (default 5); set very high to disable.
+          else if (peakPnl < activation && peakPnl >= (Number(process.env.GIVEBACK_FLOOR_MIN_PEAK_PCT) || 5) && trailingFloor > 0 && pnlPct <= trailingFloor) { shouldClose = true; reason = `GIVEBACK_FLOOR (peak +${peakPnl.toFixed(1)}%, now +${pnlPct.toFixed(1)}%, laddered floor +${trailingFloor.toFixed(1)}%)`; }
           // MOONSHOT: Disabled PNL_STAGNANT and PROFIT_DECLINE. Moonshots consolidate and pull back. We must hold.
           // else if (peakPnl < activation && clearsRoundTrip && _isStagnant) { const stableSec = Math.round((Date.now() - _stable!.since) / 1000); shouldClose = true; reason = `PNL_STAGNANT (+${pnlPct.toFixed(2)}% real-profit, unchanged for ${stableSec}s)`; }
           // else if (peakPnl < activation && holdTime > 20 && prevPnl !== null && prevPnl >= 1.0 && pnlPct > 0 && pnlPct < prevPnl && (prevPnl - pnlPct) >= 15.0) { shouldClose = true; reason = `PROFIT_DECLINE (was +${prevPnl.toFixed(2)}%, now +${pnlPct.toFixed(2)}%, drop=${(prevPnl - pnlPct).toFixed(2)}%)`; }
@@ -5542,7 +5563,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (!updates || typeof updates !== "object") return res.status(400).json({ message: "Invalid settings payload" });
       const validKeys = Object.keys(engineSettings) as (keyof typeof engineSettings)[];
       let restartIntervals = false;
-      const minValues: Record<string, number> = { scanIntervalMs: 4000, priceCheckIntervalMs: 1000, reentryDelayMs: 0, slReentryDelayMs: 0, lossCooldownMs: 0, maxHoldSeconds: 10, maxOpenPositions: 1, maxTradesPerCycle: 1, minScoreToTrade: 90, microMinScoreToTrade: 90, startingBalance: 0.1, minPositionSize: 0.005, maxPositionSize: 0.015, txFeePercent: 0, rugcheckMinScore: 0, maxVolLiqRatioNewToken: 1, maxDiscoveryAgeSeconds: 86400, dynamicHoldMaxSeconds: 60, txCostsEnabled: 0, safetyChecksEnabled: 0, dynamicHoldEnabled: 0, compoundBoostEnabled: 0, compoundRefSol: 0.1, compoundPower: 0.5, compoundMaxMultiplier: 1.0, compoundAbsCapSol: 0.1, minEdgePct: 0, edgeBuffer: 0, microMinEdgePct: 5.0, microEdgeBuffer: 0 };
+      const minValues: Record<string, number> = { scanIntervalMs: 4000, priceCheckIntervalMs: 1000, reentryDelayMs: 0, slReentryDelayMs: 0, lossCooldownMs: 0, maxHoldSeconds: 10, maxOpenPositions: 1, maxTradesPerCycle: 1, minScoreToTrade: 50, microMinScoreToTrade: 50, startingBalance: 0.1, minPositionSize: 0.005, maxPositionSize: 0.015, txFeePercent: 0, rugcheckMinScore: 0, maxVolLiqRatioNewToken: 1, maxDiscoveryAgeSeconds: 86400, dynamicHoldMaxSeconds: 60, txCostsEnabled: 0, safetyChecksEnabled: 0, dynamicHoldEnabled: 0, compoundBoostEnabled: 0, compoundRefSol: 0.1, compoundPower: 0.5, compoundMaxMultiplier: 1.0, compoundAbsCapSol: 0.1, minEdgePct: 0, edgeBuffer: 0, microMinEdgePct: 5.0, microEdgeBuffer: 0 };
       const maxValues: Record<string, number> = { mlWeight: 1, scoreWeight: 1, partialTpRatio: 1, dailyLossLimitPct: 100, maxDrawdownPct: 100, txFeePercent: 5, rugcheckMinScore: 1000, maxVolLiqRatioNewToken: 50, maxDiscoveryAgeSeconds: 86400, dynamicHoldMaxSeconds: 14400, txCostsEnabled: 1, safetyChecksEnabled: 1, dynamicHoldEnabled: 1, compoundBoostEnabled: 1, compoundRefSol: 100.0, compoundPower: 5.0, compoundMaxMultiplier: 10.0, compoundAbsCapSol: 10.0, minEdgePct: 20, edgeBuffer: 10, microMinEdgePct: 5.0, microEdgeBuffer: 10 };
       for (const key of validKeys) {
         if (key in updates) {
