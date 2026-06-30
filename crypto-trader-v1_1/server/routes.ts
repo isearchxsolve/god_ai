@@ -6269,7 +6269,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   }
 
   async function pollNewMintsHelius(): Promise<void> {
-    const programs: Array<[string, string]> = [['RAYV4', RAYDIUM_AMM_V4], ['PUMPSWAP', PUMP_SWAP_PROGRAM]];
+    const programs: Array<[string, string]> = [['RAYV4', RAYDIUM_AMM_V4]]; // FREQ 2026-06-30: dropped PUMPSWAP (tokenTransfers shape mismatch = wasted quota)
     let pollTxTotal = 0;
     let pollNewMints = 0;
     let pollOkPrograms = 0;
@@ -6433,10 +6433,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }, 9_000);
 
     setTimeout(() => {
-      // New mint detector - 12s (FREQ 2026-06-30: 6s->12s to halve Helius burn) — 6s, detects new tokens via first-seen mints on Raydium V4 + PumpSwap
+      // New mint detector - 20s (FREQ 2026-06-30: 6s->12s->20s to reduce Helius burn ~70% total. PUMPSWAP dropped, RAYV4 only.)
       setInterval(async () => {
         await pollNewMintsHelius();
-      }, 12_000);
+      }, 20_000);
     }, 15_000);
     
     // Diagnostic summary via runHunter (60s) — no trade processing,
@@ -6447,7 +6447,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       }, 60_000);
     }, 11_000);
 
-    console.log('[GOLD HUNTER] Active — signal/5s trending/30s trenches/20s cluster/30s dex/30s newMints/6s');
+    console.log('[GOLD HUNTER] Active — signal/5s trending/30s trenches/20s cluster/30s dex/30s newMints/20s');
   } else {
     console.log('[GOLD HUNTER] Disabled - set GOLD_HUNTER_ENABLED=true to activate');
   }

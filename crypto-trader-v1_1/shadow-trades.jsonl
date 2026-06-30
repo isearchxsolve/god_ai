@@ -130,3 +130,4 @@
 {"id":5,"ts":1782651549071,"token":"USA250","mode":"MG","score":85,"sizeSol":0.012,"paperPnlPct":-0.5904939573486727,"shadowPnlPct":-0.3423877686537933,"gapPct":-0.24810618869487944,"exitReason":"MID_HOLD_RISK (freeze=false, lpUnlocked=true, singleHolder=false)"}
 {"id":1,"ts":1782675599906,"token":"USA250","mode":"MG","score":88,"sizeSol":0.012,"paperPnlPct":-3.245770750988137,"shadowPnlPct":-3.0141212193132825,"gapPct":-0.23164953167485436,"exitReason":"DYNAMIC_TRAIL"}
 {"id":2,"ts":1782676090583,"token":"Awds","mode":"MG","score":89,"sizeSol":0.012,"paperPnlPct":-3.2457707509881435,"shadowPnlPct":-2.997627704649582,"gapPct":-0.24814304633856166,"exitReason":"DYNAMIC_TRAIL"}
+{"id":1,"ts":1782754430394,"token":"Hero Dog","mode":"SNIPER","score":87,"sizeSol":0.005,"paperPnlPct":-6.964930579958086,"shadowPnlPct":-9.361101743434617,"gapPct":2.396171163476531,"exitReason":"BREAKEVEN_LOCK_HIT"}
