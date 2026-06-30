@@ -959,6 +959,7 @@ const lifecycleLastLogMs = new Map<number, number>(); // trade.id → last LIFEC
 const trailActivatedLogged = new Set<number>();        // trade.id → TRAIL:ACTIVATED already emitted
 const LIFECYCLE_HOLD_INTERVAL_MS = 30_000;
 const costGateLastLogMs = new Map<number, number>(); // DIAG-COSTGATE throttle: trade.id -> last log ms (one line / 30s)             // heartbeat every 30s per trade
+const profitLockLastLogMs = new Map<number, number>(); // DIAG-PROFITLOCK throttle: trade.id -> last log ms (one line / 5s)
 // FIX LIQ_CO: warn-once guard so the "entry liquidity missing" message is logged
 // exactly once per trade instead of every priceCheckIntervalMs (1000ms) forever.
 const liqCoWarnedTrades = new Set<number>();
@@ -4637,7 +4638,11 @@ async function checkOpenPositions() {
           if (!(trade as any)._breakevenLocked && peakPnl >= _BE_TRIG) {
             (trade as any)._breakevenLocked  = true;
             (trade as any)._dynamicStopFloor = _BE_FLOOR;
-            console.log('[PROFIT-LOCK] ' + String(trade.tokenSymbol) + ' floor=' + _BE_FLOOR.toFixed(1) + 'pct trig=' + _BE_TRIG.toFixed(1) + 'pct rt=' + _rtPct.toFixed(1) + 'pct (peak=' + peakPnl.toFixed(2) + 'pct)');
+            const _plNow = Date.now();
+            if (_plNow - (profitLockLastLogMs.get(trade.id) ?? 0) >= 5000) {
+              profitLockLastLogMs.set(trade.id, _plNow);
+              console.log('[PROFIT-LOCK] ' + String(trade.tokenSymbol) + ' floor=' + _BE_FLOOR.toFixed(1) + 'pct trig=' + _BE_TRIG.toFixed(1) + 'pct rt=' + _rtPct.toFixed(1) + 'pct (peak=' + peakPnl.toFixed(2) + 'pct)');
+            }
           }
           const _trailPct   = getDynamicTrailPct(peakPnl);
           const _trailFloor = peakPnl - _trailPct;
@@ -6308,7 +6313,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         _newMintShapeLogged.add(label);
         const t0: any = txs[0] || {};
         const ttCount = Array.isArray(t0?.tokenTransfers) ? t0.tokenTransfers.length : 'MISSING';
-        console.log('[NEW-MINT][' + label + '] shape OK - txs=' + txs.length + ' firstTxKeys=[' + Object.keys(t0).join(',') + '] tokenTransfers=' + ttCount);
+        const ttTotal = txs.reduce((sum: number, t: any) => sum + (Array.isArray(t?.tokenTransfers) ? t.tokenTransfers.length : 0), 0);
+        const ttTxs = txs.filter((t: any) => Array.isArray(t?.tokenTransfers) && t.tokenTransfers.length > 0).length;
+        console.log('[NEW-MINT][' + label + '] shape OK - txs=' + txs.length + ' firstTxKeys=[' + Object.keys(t0).join(',') + '] firstTxTokenTransfers=' + ttCount + ' tokenTransfersTotal=' + ttTotal + ' txsWithTokenTransfers=' + ttTxs);
       }
       let sawTokenTransfers = false;
       for (const tx of txs) {
@@ -6349,7 +6356,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     } else {
       // Heartbeat (throttled ~60s): proves the detector polled successfully even
       // when there are zero new mints - distinguishes "no new mints" from "API failing".
-      _newMintDiag('heartbeat - okPrograms=' + pollOkPrograms + '/2 txs=' + pollTxTotal + ' newMints=' + pollNewMints + ' known=' + knownMintsOnRaydium.size, 60000);
+      _newMintDiag('heartbeat - okPrograms=' + pollOkPrograms + '/' + programs.length + ' txs=' + pollTxTotal + ' newMints=' + pollNewMints + ' known=' + knownMintsOnRaydium.size, 60000);
     }
 
     // Confirmation funnel: promote aged, surviving watchlist mints.
