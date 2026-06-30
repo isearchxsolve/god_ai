@@ -1021,3 +1021,5 @@ export async function runHunter(): Promise<GoldSignal[]> {
 
   return allResults;
 }
+
+

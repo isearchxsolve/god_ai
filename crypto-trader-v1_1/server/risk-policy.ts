@@ -40,6 +40,8 @@ export interface PreBuyRiskPolicyInput {
   reservedCapitalSol: number;
   liveSlippagePct: number;
   minFeeBufferSol: number;
+  /** Max total entry cost (slippage + fees) as % of trade size. Default 15%. */
+  maxEntryCostPct?: number;
 }
 
 export interface PreBuyRiskPolicyDecision {
@@ -190,6 +192,19 @@ export function evaluatePreBuyRiskPolicy(
     return {
       allowed: false,
       reason: "TRADE_TOO_SMALL_AFTER_FEES",
+      maxTotalExposureSol,
+      entryTotalCostSol,
+      safeBalanceSol: null,
+      maxPossibleSpendSol: null,
+    };
+  }
+
+  const totalEntryCostPct = input.entrySlippagePct + input.entryFeePct;
+  const maxEntryCostPct = input.maxEntryCostPct ?? 15;
+  if (totalEntryCostPct > maxEntryCostPct) {
+    return {
+      allowed: false,
+      reason: `ENTRY_COST_TOO_HIGH(${totalEntryCostPct.toFixed(1)}%>${maxEntryCostPct}%)`,
       maxTotalExposureSol,
       entryTotalCostSol,
       safeBalanceSol: null,

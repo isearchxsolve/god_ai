@@ -13,6 +13,7 @@ export default defineConfig({
     isolate: true,
     exclude: [
       'test/failsafe.test.cjs',   // uses node:test, not vitest
+      'tests/newMintGate.test.ts', // uses node:assert + custom runner, not vitest
       'routes.test.ts',           // requires postgres DB
       'node_modules/**',
       'dist/**',

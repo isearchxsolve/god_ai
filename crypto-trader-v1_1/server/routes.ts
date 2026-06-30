@@ -163,6 +163,140 @@ function getEdgeParams(isMicroWallet: boolean): EdgeParams {
   };
 }
 
+// ENHANCED EDGE FILTER — comprehensive real-time validation before any trade
+export async function executeEnhancedEdgeFilter(
+  signal: any,
+  dexPair: any,
+  isMicroWallet: boolean,
+  jup: JupiterService | null,
+): Promise<{ allowed: boolean; reason: string; edgeScore: number }> {
+  const now = Date.now();
+  const ctx: any = {
+    edgeScore: 0,
+    checks: [] as string[],
+    rawEdge: 0,
+  };
+
+  if (!dexPair) {
+    return { allowed: false, reason: "NO_DEX_PAIR", edgeScore: 0 };
+  }
+
+  const ageSec = signal.gmgn?.creation_timestamp ? (now / 1000 - signal.gmgn.creation_timestamp) : 99999;
+  const liq = dexPair.liquidity?.usd || 0;
+  const volume5m = dexPair.volume?.m5 || 0;
+  const priceChange5m = dexPair.priceChange?.m5 || 0;
+  const marketCap = dexPair.marketCap || dexPair.fdv || 0;
+
+  const pairToken = signal.gmgn?.bonding_currency === 'usdc' ? 'USDC' : 'SOL';
+  ctx.edgeScore += (signal.score || 0) * 0.4;
+  ctx.checks.push(`goldScore_contrib(${signal.score})`);
+
+  if (liq >= 100000) {
+    const liqPct = Math.min((liq - 100000) / (1000000 - 100000), 1) * 100;
+    ctx.edgeScore += liqPct * 0.35;
+    ctx.checks.push(`liquidity_usd_${liq.toFixed(0)}`);
+  } else if (liq >= 50000) {
+    const liqPct = Math.min((liq - 50000) / 50000, 1) * 50;
+    ctx.edgeScore += liqPct;
+    ctx.checks.push(`liquidity_mid_${liq.toFixed(0)}`);
+  }
+
+  if (priceChange5m > 15) {
+    const movePct = Math.min(priceChange5m, 100);
+    ctx.edgeScore += movePct * 0.15;
+    ctx.checks.push(`price_move_${priceChange5m.toFixed(1)}%`);
+  }
+
+  const advParams = getEdgeParams(isMicroWallet);
+  const rawEdge = priceChange5m;
+  const edgePct = isFinite(rawEdge) ? rawEdge : 0;
+  ctx.rawEdge = edgePct;
+
+  if (edgePct >= advParams.minEdgePct) {
+    const bufferSafety = edgePct >= (advParams.minEdgePct + advParams.buffer) ? 1.0 : (edgePct - advParams.minEdgePct) / advParams.buffer;
+    ctx.edgeScore += edgePct * bufferSafety * 0.20;
+    ctx.checks.push(`edge_raw_${edgePct.toFixed(2)}buf_${bufferSafety.toFixed(2)}`);
+  }
+
+  const liquidityRatio = marketCap > 0 ? liq / marketCap : 0;
+  if (liquidityRatio >= 0.05) {
+    const liqScore = Math.min(liquidityRatio * 15, 15);
+    ctx.edgeScore += liqScore * 0.10;
+    ctx.checks.push(`liq_cap_ratio_${(liquidityRatio * 100).toFixed(2)}%`);
+  }
+
+  const volumeRatio = liq > 0 ? volume5m / liq : 0;
+  if (volumeRatio >= 3.0) {
+    const volScore = Math.min(volumeRatio - 3.0, 2) * 5;
+    ctx.edgeScore += volScore * 0.10;
+    ctx.checks.push(`vol_ratio_${volumeRatio.toFixed(1)}x`);
+  }
+
+  if (ageSec < 600) {
+    const ageScore = Math.max(0, 20 - ageSec / 30);
+    ctx.edgeScore += ageScore * 0.05;
+    ctx.checks.push(`age_young_${ageSec}s`);
+  }
+
+  ctx.edgeScore = Math.max(0, Math.min(100, ctx.edgeScore));
+
+  const hardBlockReasons: string[] = [];
+
+  if (edgePct < advParams.minEdgePct - (isMicroWallet ? 0 : 2)) {
+    hardBlockReasons.push(`EDGE_BELOW_MIN_${(advParams.minEdgePct - (isMicroWallet ? 0 : 2)).toFixed(2)}`);
+  }
+
+  if (liq < (isMicroWallet ? 5000 : 15000)) {
+    hardBlockReasons.push(`LIQUIDITY_TOO_LOW_${liq}`);
+  }
+
+  if (volumeRatio < 0.5) {
+    hardBlockReasons.push(`VOLUME_TOO_THIN_${volumeRatio.toFixed(2)}`);
+  }
+
+  if (liquidityRatio < 0.02) {
+    hardBlockReasons.push(`LIQ_CAP_RATIO_TOO_LOW_${(liquidityRatio * 100).toFixed(2)}%`);
+  }
+
+  const passSignals: string[] = [];
+  for (const s of ctx.checks) {
+    if (!s.includes('buf_0') && !s.includes('p_0_0') && !s.includes('00') && !s.includes('000')) {
+      passSignals.push(s);
+    }
+  }
+
+  const MIN_EDGE_PCT = isMicroWallet ? 5.0 : 15.0;
+  const minimumViableScore = MIN_EDGE_PCT;
+
+  if (hardBlockReasons.length > 0 || ctx.edgeScore < minimumViableScore) {
+    const detailedReason = hardBlockReasons.length > 0
+      ? hardBlockReasons.join(';')
+      : `EDGE_SCORE_TOE_LOW(${ctx.edgeScore.toFixed(1)}<${minimumViableScore})`;
+
+    return {
+      allowed: false,
+      reason: detailedReason,
+      edgeScore: ctx.edgeScore,
+    };
+  }
+
+  const boostFactor = isMicroWallet ? 1.0 : (ctx.edgeScore >= 75 ? 1.15 : ctx.edgeScore >= 90 ? 1.25 : 1.0);
+  const finalEdgeScore = ctx.edgeScore * boostFactor;
+
+  console.log(
+    `[ENHANCED-EDGE] $${signal.gmgn?.symbol || 'UNKNOWN'} | ` +
+    `score:${signal.score} edge:${edgePct.toFixed(2)}% | ` +
+    `checks:${passSignals.join(',')} | ` +
+    `finalEdge:${finalEdgeScore.toFixed(1)}${boostFactor !== 1.0 ? ` +${(boostFactor - 1) * 100}% boost` : ''}`
+  );
+
+  return {
+    allowed: true,
+    reason: `ENHANCED_EDGE_PASS(edge=${edgePct.toFixed(2)}%,score_${finalEdgeScore.toFixed(1)})`,
+    edgeScore: finalEdgeScore,
+  };
+}
+
 function requireAdmin(req: any, res: any): boolean {
   // Read at REQUEST time, not module-load time. dotenv.config() in index.ts runs after
   // routes.ts top-level evaluates (esbuild hoists the ./routes import above the config
@@ -3396,7 +3530,7 @@ async function runScanCycle() {
           continue; 
       }
 
-      const solPriceForLiq = cachedSolPriceUsd || 150;
+      const solPriceForLiq = cachedSolPriceUsd;
       const tradeSizeUsd = scoring.sizeSol * solPriceForLiq;
       const dynamicMinLiq = tradeSizeUsd * 80;
       if (liq < dynamicMinLiq) {
@@ -4801,7 +4935,7 @@ async function checkOpenPositions() {
         const costAwareStopPrice = tradeStopPrices.get(trade.id) ?? 0;
         const stopLossPct = costAwareStopPrice > 0 && entryPrice > 0 ? ((costAwareStopPrice - entryPrice) / entryPrice) * 100 : engineSettings.stopLoss;
         const rawHalfStop = stopLossPct / 2;
-        const halfStopPct = trade.mode === "HWR" ? Math.min(rawHalfStop, -4.0) : trade.mode === "MG" ? Math.min(rawHalfStop, -3.5) : rawHalfStop;
+        const halfStopPct = trade.mode === "HWR" ? Math.min(rawHalfStop, -4.0) : trade.mode === "MG" ? Math.min(rawHalfStop, -3.5) : rawHalfStop; // NOTE(2026-06-30): halfStopPct is UNUSED (no scale-out wired); do not assume it gates exits.
         const activation = engineSettings.trailingStopActivation;
         // accounting floor for armed-trail exits (consumed downstream by FIX H). Ladder unchanged.
         const trailingFloor = peakPnl > 30 ? peakPnl * 0.60 : peakPnl > 15 ? peakPnl * 0.50 : peakPnl > 8 ? peakPnl * 0.40 : peakPnl > 3 ? peakPnl * 0.20 : 0;
@@ -4890,6 +5024,8 @@ async function checkOpenPositions() {
           // calibration. Cut at -5% after 18s, BEFORE the cost-widened STOP_LOSS lets low-liq losers bleed
           // to -11.5% avg. peakPnl<=1% guarantees this never touches a profitable run.
           else if (peakPnl <= NEVER_GREEN_PEAK_PCT && holdTime > NEVER_GREEN_MIN_HOLD_SEC && pnlPct <= NEVER_GREEN_CUT_PCT) { shouldClose = true; reason = `NEVER_GREEN_CUT (peak ${peakPnl.toFixed(2)}%, pnl ${pnlPct.toFixed(2)}%, held ${Math.round(holdTime)}s)`; }
+          // FIX(cost-aware-stop, 2026-06-30): stopLossPct (computed ~line 4936 from tradeStopPrices via calcCostAwareStopPrice) was DEAD -- never referenced in any exit branch. Gated wire-in, DEFAULT OFF. WARNING: with engineSettings.stopLoss=-5 the cost-aware stop is ~-5%, far TIGHTER than the -20 hard stop; A/B test before enabling. Hard -20 stop still owns deeper gaps; armed runners (peak>=activation) keep the laddered trail.
+          else if (process.env.COST_AWARE_STOP_ENABLED === 'true' && peakPnl < activation && stopLossPct < 0 && pnlPct <= stopLossPct) { shouldClose = true; reason = `COST_AWARE_STOP (pnl ${pnlPct.toFixed(2)}% <= cost-aware ${stopLossPct.toFixed(2)}%, peak ${peakPnl.toFixed(1)}%)`; }
           // ---- TIER 4: momentum / structure fades (only meaningful while in some profit) ----
           // MOONSHOT: Restored mundane-coin momentum fades to clear stagnant slots.
           else if (pnlPct > 10 && bp5m < 0.43 && pc5m < -3) { shouldClose = true; reason = `EARLY_EXIT_WEAK_BP (bp=${bp5m.toFixed(2)}, d5m=${pc5m.toFixed(1)}%)`; }
@@ -4898,10 +5034,10 @@ async function checkOpenPositions() {
           else if (pnlPct > 5 && volLiqRatio > 7) { shouldClose = true; reason = `LIQUIDITY_EXHAUSTION (${volLiqRatio.toFixed(2)}x)`; }
           else if (holdTime > 180 && pnlPct > 1 && expVol5m > 100 && vol5m < expVol5m * 0.15) { shouldClose = true; reason = `VOL_COLLAPSE (5m vol ${vol5m.toFixed(0)} < 15% of expected ${expVol5m.toFixed(0)})`; }
           // MOONSHOT: Dip Recovery Architecture
-          // 1. Stagnant Green Kill: If a token is slightly green (0 to 20%) for 25 minutes without mooning, purge it.
+          // 1. Stagnant Green Kill: If a token is slightly green (0 to 20%) for 25 minutes without mooning, purge it. NOTE(2026-06-30, multi-tick verified): only reaches ARMED positions (peak>=activation); never-armed greens are cut earlier by TIME_EXIT@cap.
           // 2. Dip Recovery: If it is in a loss (down to -45%), give it up to 30 minutes to bounce back before purging.
           else if (holdTime > 1500 && pnlPct >= 0 && pnlPct < 20) { shouldClose = true; reason = `STAGNANT_GREEN_KILL (Held 25m but PNL is only ${pnlPct.toFixed(1)}%)`; } // AI-TUNE(2026-06-28 COST-GATE): 600s(10m) -> 1500s(25m). ROOT CAUSE: modeled round-trip cost floor is ~8% (3.76% x2), but the 10m stagnant-kill flattened any winner stuck between 0% and +8% before it could clear cost. PROOF: $SPCX peaked +3.91% -> killed at +2.25% gross / +0.19% net after exit cost. 25m lets a sub-8% green position mature past the cost floor instead of booking a forced scratch; DIP_RECOVERY_FAILED(30m) and ABSOLUTE_MAX_HOLD still cap the tail.
-          else if (holdTime > (Number(process.env.MAX_HOLD_SECONDS_OVERRIDE) || 300) && peakPnl < activation) { shouldClose = true; reason = `TIME_EXIT (held ${Math.round(holdTime)}s > cap, never armed trail; peak ${peakPnl.toFixed(1)}%, pnl ${pnlPct.toFixed(2)}%)`; } // PLAYBOOK(2026-06-29): standard memecoin time-stop at 300s. Only cuts positions that NEVER armed the moonshot trail (peak < activation=12%); armed runners keep running under the laddered floor. Disable/extend via MAX_HOLD_SECONDS_OVERRIDE (e.g. =1800 to restore old behavior).
+          else if (holdTime > (Number(process.env.MAX_HOLD_SECONDS_OVERRIDE) || 300) && peakPnl < activation && !((process.env.DIP_RECOVERY_ENABLED === 'true') && pnlPct < 0)) { shouldClose = true; reason = `TIME_EXIT (held ${Math.round(holdTime)}s > cap, never armed trail; peak ${peakPnl.toFixed(1)}%, pnl ${pnlPct.toFixed(2)}%)`; } // PLAYBOOK(2026-06-29): standard memecoin time-stop at 300s. Only cuts positions that NEVER armed the moonshot trail (peak < activation=12%); armed runners keep running under the laddered floor. Disable/extend via MAX_HOLD_SECONDS_OVERRIDE (e.g. =1800 to restore old behavior).
           else if (holdTime > 1800 && pnlPct < 0) { shouldClose = true; reason = `DIP_RECOVERY_FAILED (Held 30m, failed to bounce from ${pnlPct.toFixed(1)}% loss)`; }
           else if (holdTime > engineSettings.dynamicHoldMaxSeconds) { shouldClose = true; reason = `ABSOLUTE_MAX_HOLD(${Math.round(holdTime)}s > ${engineSettings.dynamicHoldMaxSeconds}s cap, pnl ${pnlPct.toFixed(2)}%)`; }
         }
@@ -5996,7 +6132,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     scoring = { ...scoring, qualifiedMode: gateResult.mode ?? scoring.qualifiedMode, combinedScore: gateResult.newCombinedScore };
     
     // Liquidity floor check
-    const SOL_PRICE_USD = await getLiveSolPrice().catch(() => cachedSolPriceUsd || 150);
+    const SOL_PRICE_USD = await getLiveSolPrice().catch(() => cachedSolPriceUsd);
     const poolLiqSol = SOL_PRICE_USD > 0 ? liq / SOL_PRICE_USD : Infinity;
     const sniperLiqFloor = engineSettings.sniperMinLiquidity;
     const MIN_BUY_LIQ_USD = scoring.qualifiedMode === 'HWR' ? engineSettings.hwrMinLiquidity : sniperLiqFloor;

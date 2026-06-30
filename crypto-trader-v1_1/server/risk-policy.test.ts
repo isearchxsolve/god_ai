@@ -474,6 +474,91 @@ describe("risk-policy", () => {
     });
   });
 
+  describe("Pre-Buy Risk Policy - Entry Cost Guard", () => {
+    it("blocks trade when entry slippage + fee exceed default 15% max", () => {
+      const result = evaluatePreBuyRiskPolicy({
+        totalPortfolioSol: 1,
+        totalExposureSol: 0,
+        candidateSizeSol: 0.01,
+        maxPositionSizeSol: 0.015,
+        entrySlippagePct: 12,
+        entryFeePct: 4,
+        minViableTradeSol: 0.001,
+        isLiveBuy: false,
+        walletBalanceSol: null,
+        reservedCapitalSol: 0,
+        liveSlippagePct: 12,
+        minFeeBufferSol: 0.004,
+      });
+
+      expect(result.allowed).toBe(false);
+      expect(result.reason).toBe("ENTRY_COST_TOO_HIGH(16.0%>15%)");
+    });
+
+    it("allows trade when entry cost is within default 15% max", () => {
+      const result = evaluatePreBuyRiskPolicy({
+        totalPortfolioSol: 1,
+        totalExposureSol: 0,
+        candidateSizeSol: 0.01,
+        maxPositionSizeSol: 0.015,
+        entrySlippagePct: 10,
+        entryFeePct: 4,
+        minViableTradeSol: 0.001,
+        isLiveBuy: false,
+        walletBalanceSol: null,
+        reservedCapitalSol: 0,
+        liveSlippagePct: 10,
+        minFeeBufferSol: 0.004,
+      });
+
+      // 10 + 4 = 14% <= 15% — passes default
+      expect(result.allowed).toBe(true);
+    });
+
+    it("respects custom maxEntryCostPct override", () => {
+      const result = evaluatePreBuyRiskPolicy({
+        totalPortfolioSol: 1,
+        totalExposureSol: 0,
+        candidateSizeSol: 0.01,
+        maxPositionSizeSol: 0.015,
+        entrySlippagePct: 8,
+        entryFeePct: 3,
+        minViableTradeSol: 0.001,
+        isLiveBuy: false,
+        walletBalanceSol: null,
+        reservedCapitalSol: 0,
+        liveSlippagePct: 8,
+        minFeeBufferSol: 0.004,
+        maxEntryCostPct: 10,
+      });
+
+      // 8 + 3 = 11% > 10% — blocked by custom threshold
+      expect(result.allowed).toBe(false);
+      expect(result.reason).toBe("ENTRY_COST_TOO_HIGH(11.0%>10%)");
+    });
+
+    it("passes when entry cost exactly equals maxEntryCostPct", () => {
+      const result = evaluatePreBuyRiskPolicy({
+        totalPortfolioSol: 1,
+        totalExposureSol: 0,
+        candidateSizeSol: 0.01,
+        maxPositionSizeSol: 0.015,
+        entrySlippagePct: 9,
+        entryFeePct: 6,
+        minViableTradeSol: 0.001,
+        isLiveBuy: false,
+        walletBalanceSol: null,
+        reservedCapitalSol: 0,
+        liveSlippagePct: 9,
+        minFeeBufferSol: 0.004,
+        maxEntryCostPct: 15,
+      });
+
+      // 9 + 6 = 15% exactly — equal to max, passes
+      expect(result.allowed).toBe(true);
+    });
+  });
+
   describe("Momentum Circuit Breaker", () => {
     const now = 1_700_000_000_000;
     const TEN_MINUTES = 10 * 60 * 1000;
