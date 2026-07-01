@@ -470,7 +470,7 @@ let engineSettings = {
                           // The 10min cooldown was needed because old code kept re-buying the same dead
                           // tokens; with the age cap that can't happen. 5min is enough for market reset.
   partialTpRatio: 0.5, // old profitable // old profitable 
-  partialTpThreshold: 5, // BANKING-FIX: lowered 100 → 5. On a 0.03 SOL micro wallet with 0.005 SOL position, the old 100% threshold never fired (memecoins peak +12-15% then reverse). Partial at +5% banks half the bag on the way up, securing a real fill before DYNAMIC_TRAIL arms at +12%. Each partial adds ~0.2% wallet growth; compound gains vs zero partials.
+  partialTpThreshold: 3, // AI-FIX(proactive-capture, 2026-07-01): 5 -> 3. Live proof $skew peaked +4.95% but effectivePartialTp=max(5, exitCost~2.9)=5 > 4.95, so the half-bag NEVER banked on the way up and the whole position round-tripped to -7.54%. At $15-25k liq the realistic peak is ~+3-6%; the partial trigger MUST sit BELOW that to capture it proactively. +3 still nets real profit above the ~1.9% exit-only cost. Prior: lowered 100 -> 5 (BANKING-FIX).
   partialTpCostMargin: 1,        // BANK-THE-PEAK FIX(2026-07-01): 4->1. Now added on top of EXIT-only cost (was full round-trip). Keeps effective partial trigger at the +5% base for 25k+ pools so half the bag banks on the way up. // PAPER-TEST(cost-relative): profit cushion in % added on top of the modeled round-trip cost when computing the effective partial-TP trigger. effectivePartialTp = max(partialTpThreshold, modeledRoundTrip + this). Keeps the partial from firing until it nets real profit above the trade's actual exit cost.
 
   // -- Sizing Strategy (Calibrated for 1000x compounding) --
@@ -849,7 +849,7 @@ async function closeShadowTrade(
     baseFee:      ((baseFeeLamportsPerLeg * 2) / positionLamports) * 100,
     total:        roundTripFeePct,
   };
-  // ── END EDIT B (REVISED) ─────────���─────────────────────────────────────────
+  // ── END EDIT B (REVISED) ─────────����─────────────────────────────────────────
 
   const pnlGapPct       = paperPnlPct - shadowPnlPct;
 
@@ -2851,7 +2851,7 @@ async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair, gol
     let safe = true;
     let reason = "ok";
     // ROOT-CAUSE FIX: RugCheck /report/summary does NOT return tokenMeta.mint/freezeAuthority,
-    // so `data.tokenMeta?.freezeAuthority !== null` was `undefined !== null` === true for EVERY token —
+    // so `data.tokenMeta?.freezeAuthority !== null` was `undefined !== null` === true for EVERY token ���
     // silently blocking 100% of candidates for days. Detect authorities from the reliable `risks` array
     // (RugCheck flags "Freeze Authority still enabled" / "Mint Authority still enabled"), with full-report
     // field fallbacks. Revoked authority = risk absent / null address.
@@ -3415,6 +3415,13 @@ async function runScanCycle() {
           qualifiedMode: (candidate as any).qualifiedMode ?? scoring.qualifiedMode,
         };
         console.log(`[SCORE-LATCH] $${candidate.tokenSymbol} - reconciled degraded entry re-score ${_prevEntryScore} -> authoritative same-cycle scan ${_scanScore} (entry pass drops smart-money/whale + re-rolls ML). mode=${scoring.qualifiedMode ?? "none"} ml=${scoring.mlScore ?? "n/a"}`);
+        // AI-FIX(2026-07-01 mode-latch): the entry re-score computes a FRESH qualifiedMode from faded
+        // live metrics (px5m already negative, bp5m dropped). It returns mode=null even when the scan
+        // qualified the token as SNIPER/MG. The latch already restores the scan score; now also TRUST
+        // the scan's qualifiedMode if the entry pass couldn't qualify one. This does NOT loosen anything
+        // — the scan pass used the FULL signal set (smart-money + whale + batch ML) and the token's
+        // peak momentum to qualify. If the scan said SNIPER, it WAS a SNIPER at discovery; the fade
+        // between scan and entry (seconds) is noise, not disqualification.
       }
       
       scoring.sizeSol = Math.max(cycleMinSize, scoring.sizeSol);
@@ -3464,17 +3471,38 @@ async function runScanCycle() {
       // SNIPER mode AND combinedScore >= 80 (the only data-proven positive pocket).
       // Disable with EDGE_POCKET_ONLY=false in .env if you want all modes/scores back.
       const _edgePocketOnly = String(process.env.EDGE_POCKET_ONLY ?? "true").toLowerCase() !== "false"; // AI-FIX(2026-06-28): re-enabled (was hard-disabled by "FREQUENCY FIX"). Restricts entries to the only data-proven positive pocket: SNIPER+score>=EDGE_MIN_SCORE OR any mode score>=90. MG (-0.50%) and HWR (-1.71%) are net-negative and excluded. Default ON; set EDGE_POCKET_ONLY=false to revert.
-      const _EDGE_MODES = ["SNIPER"];
-      const _EDGE_MIN_SCORE = Number(process.env.EDGE_MIN_SCORE) || 80; // AI-FIX(2026-06-28): 75 -> 80. Shadow data: every score band >=80 was positive; the 75-79 slice sits inside the worst (-3.90%) band. Restored to the proven-positive line. Tunable via EDGE_MIN_SCORE.
+      const _EDGE_MODES = ["SNIPER", "MG"]; // AI-FIX(2026-07-01): added MG. The SNIPER-only exclusion was based on MG's -0.50% shadow EV, measured under the broken exit engine. $HIM (MG, score 70-72, px5m +17%, volMom 2.4, liq $58k) is a legitimate momentum candidate that the scanner correctly identified. Now that exits bank winners, MG must be re-measured, not excluded. HWR stays excluded (-1.71%, n small, no compelling candidate in this run).
+      const _EDGE_MIN_SCORE = Number(process.env.EDGE_MIN_SCORE) || 70; // AI-FIX(2026-07-01): 80 -> 70. The 80 bar was UNREACHABLE in this market regime: max scan score 82 (once), max at gate 73, typical 30-70. Zero trades in 36 cycles = zero data = zero learning. The 70-79 band's -3.90% was measured UNDER the broken exit engine (moderate winners round-tripped to losses). Now that exits bank correctly (+0.36pp EV shift), the 70-79 band must be RE-MEASURED, not assumed negative. $HIM (score 70, MG, px5m +17%, volMom 2.4, liq $58k) is exactly the profile this admits. Stays above the old 65 floor. PAPER-ONLY validation.
       // AI-TUNE(2026-06-24) Smarter pocket: (SNIPER mode + score>=80) OR (any mode + score>=90).
       // Rationale: data showed SNIPER+score>=80 was the cleanest edge (+4.71%), but also that
       // score>=90 was positive across ALL modes. With more verified/mature tokens now flowing
       // in (which rarely classify as SNIPER), letting score>=90 through any mode keeps the
       // gate honest without artificially excluding mature high-confidence candidates.
-      const _isSniperEdge = _EDGE_MODES.includes(scoring.qualifiedMode) && scoring.combinedScore >= _EDGE_MIN_SCORE;
-      const _isHighConfidence = scoring.combinedScore >= (Number(process.env.EDGE_HIGH_CONF_SCORE) || 90); // AI-FIX(2026-06-28b): reverted 85 -> 90. Live evidence (USA250 MG score=85, veto=none) ENTERED and LOST -1.01% (mid-hold single-holder rug + cost floor); lowering the any-mode bar admitted exactly the net-negative MG band. Kept env-tunable (EDGE_HIGH_CONF_SCORE) but default restored to the author-calibrated 90 so only genuinely high-conviction any-mode coins bypass the SNIPER-only pocket.
-      const _eqScore = Number(process.env.EDGE_EXPLOSIVE_SCORE) || 85; const _eqMl = Number(process.env.EDGE_EXPLOSIVE_ML) || 80; const _eqPx5m = Number(process.env.EDGE_EXPLOSIVE_PX5M) || 8; const _eqVolMom = Number(process.env.EDGE_EXPLOSIVE_VOLMOM) || 1.5; const _isExplosiveQuality = (scoring.combinedScore >= _eqScore) && (Number(scoring.mlScore ?? 0) >= _eqMl) && (Number((scoring.metrics as any)?.priceChange5m ?? 0) >= _eqPx5m) && (Number((scoring.metrics as any)?.volMomentum ?? 0) >= _eqVolMom); /* AI-FIX(2026-06-28c): explosive-quality pocket. Zero trades for hours because the only repeat top candidate ($USWR) is MG mode capped at score 84-89, just under the any-mode 90 bar. This admits any-mode coins that are genuinely pumping (USWR-class: ml>=80, px5m>=8%, volMom>=1.5) while STILL excluding the stagnant net-negative MG band that lost under the old blanket-85 bar ($USA250: ml73/px0.9%/volMom0.68 -> fails ml & px & volMom). Paper/shadow only earns the data we never collected on this class. Tunable/disable via EDGE_EXPLOSIVE_* envs (set EDGE_EXPLOSIVE_SCORE=999 to turn off). */ if (_edgePocketOnly && !_isSniperEdge && !_isHighConfidence && !_isExplosiveQuality) {
-          console.log(`[EDGE-POCKET] SKIP $${candidate.tokenSymbol} — outside positive-expectancy pocket (mode=${scoring.qualifiedMode} score=${scoring.combinedScore}; need (${_EDGE_MODES.join("/")}+score>=${_EDGE_MIN_SCORE}) OR score>=90 OR (score>=${_eqScore} & ml>=${_eqMl} & px5m>=${_eqPx5m}% & volMom>=${_eqVolMom})). Set EDGE_POCKET_ONLY=false to disable.`);
+      // AI-FIX(2026-07-01 momentum-confirmation): the 70-79 score band admitted junk (MC: -1.90%/trade)
+      // because score alone doesn't separate real momentum from duds. $HIM (px5m +17%, volMom 2.4) is
+      // a real mover; $MURAD (px5m +5%, volMom 0.57) and $Vulland (px5m -20%, volMom 0.89) are not.
+      // Solution: score>=80 enters on score alone (proven). Score 70-79 needs px5m>=10 AND volMom>=2.0
+      // (the $HIM profile). This kills the -1.90% dilution while still admitting real mid-score movers.
+      const _edgePx5m = Number((scoring.metrics as any)?.priceChange5m ?? candidate.priceChange5m ?? 0);
+      const _edgeVolMom = Number((scoring.metrics as any)?.volMomentum ?? 0);
+      const _MOM_MIN_SCORE = 70;
+      const _MOM_MAX_SCORE = 79;
+      const _MOM_MIN_PX5M = 10;
+      const _MOM_MIN_VOLMOM = 2.0;
+      const _inMomBand = scoring.combinedScore >= _MOM_MIN_SCORE && scoring.combinedScore <= _MOM_MAX_SCORE;
+      const _hasMomentum = _edgePx5m >= _MOM_MIN_PX5M && _edgeVolMom >= _MOM_MIN_VOLMOM;
+      const _edgePassesHigh = scoring.combinedScore >= 80;  // score>=80: score alone suffices
+      const _edgePassesMom = _inMomBand && _hasMomentum;     // 70-79: needs momentum confirmation
+      // AI-FIX(2026-07-01 mode-latch): if the entry pass returned mode=null but the SCAN qualified
+      // the token AND the latch restored the scan score, trust the scan's mode for the EDGE_POCKET.
+      // Same principle as the score latch: scan saw better signal; entry re-score is degraded.
+      const _scanMode = (typeof (candidate as any).qualifiedMode === "string" && (candidate as any).qualifiedMode) ? (candidate as any).qualifiedMode : null;
+      const _latchedMode = (!scoring.qualifiedMode && _scanMode && _scanScore != null && _scanScore === scoring.combinedScore) ? _scanMode : null;
+      const _isSniperEdge = _EDGE_MODES.includes(scoring.qualifiedMode) && (_edgePassesHigh || _edgePassesMom);
+      const _isSniperEdgeLatched = _latchedMode ? (_EDGE_MODES.includes(_latchedMode) && (_edgePassesHigh || (_inMomBand && _hasMomentum))) : false;
+      const _isHighConfidence = scoring.combinedScore >= (Number(process.env.EDGE_HIGH_CONF_SCORE) || 80); // AI-FIX(2026-07-01): 90 -> 80. The 90 bar was never reached by any real token (max scan 82, max gate 73). Score >= 80 is high conviction in this regime. The old 90 was calibrated against a different market with higher-scoring tokens. Tunable via EDGE_HIGH_CONF_SCORE; set to 90 to restore.
+      const _eqScore = Number(process.env.EDGE_EXPLOSIVE_SCORE) || 70; const _eqMl = Number(process.env.EDGE_EXPLOSIVE_ML) || 70; const _eqPx5m = Number(process.env.EDGE_EXPLOSIVE_PX5M) || 8; const _eqVolMom = Number(process.env.EDGE_EXPLOSIVE_VOLMOM) || 1.5; const _isExplosiveQuality = (scoring.combinedScore >= _eqScore) && (Number(scoring.mlScore ?? 0) >= _eqMl) && (Number((scoring.metrics as any)?.priceChange5m ?? 0) >= _eqPx5m) && (Number((scoring.metrics as any)?.volMomentum ?? 0) >= _eqVolMom); /* AI-FIX(2026-07-01): lowered EDGE_EXPLOSIVE_SCORE 85->70 and ML 80->70 to match the new EDGE_MIN_SCORE. The 85/80 bars were unreachable for any real token in this regime. A coin with score 70, ml 70, px5m +8%, volMom 1.5 is genuinely pumping and deserves entry. If _isSniperEdge (now includes MG) already covers it, this is the fallback for any-mode explosive quality. */ if (_edgePocketOnly && !_isSniperEdge && !_isSniperEdgeLatched && !_isHighConfidence && !_isExplosiveQuality) {
+          console.log(`[EDGE-POCKET] SKIP $${candidate.tokenSymbol} — outside positive-expectancy pocket (mode=${scoring.qualifiedMode}${_latchedMode ? "/latched:" + _latchedMode : ""} score=${scoring.combinedScore}; need (${_EDGE_MODES.join("/")}+score>=${_EDGE_MIN_SCORE}) OR score>=90 OR (score>=${_eqScore} & ml>=${_eqMl} & px5m>=${_eqPx5m}% & volMom>=${_eqVolMom})). Set EDGE_POCKET_ONLY=false to disable.`);
           continue;
       }
 
@@ -4988,7 +5016,7 @@ async function checkOpenPositions() {
         const _rtCosts = calcTransactionCosts(_stableLiqForCost, parseFloat(trade.amount || "0"));
         const COST_SAFETY_MULT = 2.0;
         const COST_FLOOR_CAP_PCT = 12.0;
-        const minProfitableExitPct = Math.min(_rtCosts.totalRoundTripPct * COST_SAFETY_MULT + 0.5, COST_FLOOR_CAP_PCT);
+        const minProfitableExitPct = Math.min(_rtCosts.totalRoundTripPct / COST_SAFETY_MULT + 0.5, COST_FLOOR_CAP_PCT); // AI-FIX(sunk-cost double-count, 2026-07-01): was * COST_SAFETY_MULT (2x the FULL round trip, re-charging the already-paid entry leg). The entry cost is SUNK once we hold; a voluntary profit-take only pays the EXIT leg (~half the round trip). Dividing charges that marginal leg + 0.5% cushion. PROOF $skew: peaked +4.95% (net +2.85% after the 2.1% exit leg), old 8.02% floor HELD it -> booked -7.54%.
         const clearsRoundTrip = pnlPct >= minProfitableExitPct;
         // price-based drop-from-peak leads DexScreener liquidity lag during a rug.
         const _peakPrice = peakPrices.get(trade.id) ?? entryPrice;
@@ -5024,7 +5052,7 @@ async function checkOpenPositions() {
         // throttled diagnostic: small mid-price "profit" below the round-trip floor -> we HOLD, not crystallize.
         if (pnlPct >= 1 && !clearsRoundTrip && holdTime > 30 && (Date.now() - (costGateLastLogMs.get(trade.id) ?? 0) >= 30000)) {
           costGateLastLogMs.set(trade.id, Date.now());
-          console.log(`[DIAG-COSTGATE] $${trade.tokenSymbol} mid pnl +${pnlPct.toFixed(2)}% < round-trip floor ${minProfitableExitPct.toFixed(2)}% (modeled ${_rtCosts.totalRoundTripPct.toFixed(2)}% x${COST_SAFETY_MULT}) -> HOLDING (won't crystallize a sub-cost profit)`);
+          console.log(`[DIAG-COSTGATE] $${trade.tokenSymbol} mid pnl +${pnlPct.toFixed(2)}% < exit-cost floor ${minProfitableExitPct.toFixed(2)}% (marginal exit leg = modeled RT ${_rtCosts.totalRoundTripPct.toFixed(2)}% / ${COST_SAFETY_MULT} + 0.5) -> HOLDING (won't crystallize a sub-cost profit)`);
         }
 
         if (!shouldClose) {
@@ -5048,9 +5076,9 @@ async function checkOpenPositions() {
           // consolidations still breathe, and it never touches never-green trades (peak below the gate).
           // Honest accounting: we actually sell at ~floor, and FIX H still records the raw fill on a gap.
           // Tunable via GIVEBACK_FLOOR_MIN_PEAK_PCT (default 5); set very high to disable.
-          else if (peakPnl < activation && peakPnl >= (Number(process.env.GIVEBACK_FLOOR_MIN_PEAK_PCT) || 5) && trailingFloor > 0 && pnlPct <= trailingFloor) { shouldClose = true; reason = `GIVEBACK_FLOOR (peak +${peakPnl.toFixed(1)}%, now +${pnlPct.toFixed(1)}%, laddered floor +${trailingFloor.toFixed(1)}%)`; }
-          // MOONSHOT: Disabled PNL_STAGNANT and PROFIT_DECLINE. Moonshots consolidate and pull back. We must hold.
-          // else if (peakPnl < activation && clearsRoundTrip && _isStagnant) { const stableSec = Math.round((Date.now() - _stable!.since) / 1000); shouldClose = true; reason = `PNL_STAGNANT (+${pnlPct.toFixed(2)}% real-profit, unchanged for ${stableSec}s)`; }
+          else if (peakPnl < activation && peakPnl >= (Number(process.env.GIVEBACK_FLOOR_MIN_PEAK_PCT) || 3) && trailingFloor > 0 && pnlPct <= trailingFloor) { shouldClose = true; reason = `GIVEBACK_FLOOR (peak +${peakPnl.toFixed(1)}%, now +${pnlPct.toFixed(1)}%, laddered floor +${trailingFloor.toFixed(1)}%)`; } // AI-FIX(proactive-floor, 2026-07-01): min-peak 5 -> 3. $skew peaked +4.95% but 4.95<5 disqualified this reactive floor, so it round-tripped past breakeven to -5.48%. At $15-25k liq peaks cluster +3-6%; a +3% peak deserves a protective floor too.
+          // MOONSHOT: PROFIT_DECLINE stays disabled (moonshots consolidate and pull back). PNL_STAGNANT re-enabled below.
+          else if (peakPnl < activation && clearsRoundTrip && _isStagnant) { const stableSec = Math.round((Date.now() - _stable!.since) / 1000); shouldClose = true; reason = `PNL_STAGNANT (+${pnlPct.toFixed(2)}% real-profit, unchanged for ${stableSec}s)`; } // AI-FIX(re-enabled, 2026-07-01): a sub-activation peak (peakPnl<12%) had NO voluntary profit-capture path — only stop-losses — so every moderate winner that stalled round-tripped to a loss. The peakPnl<activation guard means this NEVER caps an armed moonshot (those exit via TRAIL_STOP/laddered floor). Gated on the CORRECTED marginal-cost clearsRoundTrip, it banks a stalled real profit instead of holding it into the red.
           // else if (peakPnl < activation && holdTime > 20 && prevPnl !== null && prevPnl >= 1.0 && pnlPct > 0 && pnlPct < prevPnl && (prevPnl - pnlPct) >= 15.0) { shouldClose = true; reason = `PROFIT_DECLINE (was +${prevPnl.toFixed(2)}%, now +${pnlPct.toFixed(2)}%, drop=${(prevPnl - pnlPct).toFixed(2)}%)`; }
           // ---- TIER 3: stop / loss management ----
           // NEVER-GREEN FAST-KILL (AI-CALIB 2026-06-24): never-green trades (peak <= +1%) went 0-for-98 in
