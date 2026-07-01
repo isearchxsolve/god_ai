@@ -52,10 +52,23 @@ This is the same principle as adversarial analysis in ML: you don't test on expe
 ## THE LOOP
 
 ```jsx
-Phase A (SCAN) → Phase B (FIX/CONSTRUCT) → Phase C (RE-SCAN) → Phase D (CHECK)
+Phase 0 (OBJECTIVE) → Phase A (SCAN) → Phase B (FIX/CONSTRUCT) → Phase C (RE-SCAN) → Phase D (CHECK)
      ↑                                                            |
      └────────────────── if defects found ─────────────────────────┘
 ```
+
+### Phase 0 — DEFINE THE OBJECTIVE
+
+**Purpose:** Establish the loss function before you scan. You cannot converge on an undefined target, and gradient descent on the wrong loss converges to the wrong minimum. Before Phase A, state:
+
+1. **The objective** in one measurable sentence — the goal the system exists to achieve, NOT "the specification is satisfied."
+2. **The convergence criterion** in objective terms.
+3. **The loss function** — the count of OBJECTIVE defects (specification-correct paths that do not provably advance the goal), not merely specification defects.
+4. **For every path and parameter you will scan, the objective it serves.**
+
+A system can reach zero specification defects and still fail, because that proves only internal correctness — not that the system achieves its objective. Every path must therefore be traced TWICE: once for correctness (does it do what it says?) and once for objective-achievement (does it provably move the system toward the goal?). A path that is correct but does not provably advance the objective is an OBJECTIVE DEFECT.
+
+The most common objective defect is the **predictive-validity trap**: a gate acts on a signal that describes the past as if it predicted the future. A metric that already moved is a correct measurement and a correct input, but using it to justify a forward decision assumes — without proof — that a past move predicts a future move. For every signal a gate acts on, establish whether it is descriptive or predictive, and whether there is proof of predictive validity. This applies to a fix's own inputs too: a correction built from an unvalidated descriptive prior re-introduces the very defect it was meant to remove.
 
 ### Phase A — SCAN
 
@@ -186,6 +199,8 @@ Solve mode example — tracing a solution approach:
 | CONTRADICTION | Does the specification say one thing and the value another? | Record. Do NOT fix. |
 | UNREACHABLE | Is a threshold above any value the system can produce? | Record. Do NOT fix. |
 | UN-WINNABLE | Does the worst-case outcome violate a hard constraint? | Record. Do NOT fix. |
+| OBJECTIVE DEFECT | Is this code-correct but fails to provably advance the objective? | Record. Do NOT fix. |
+| PREDICTIVE-VALIDITY DEFECT | Does a gate (or a fix) act on a past-describing signal as if it predicted the future, without proof of forward validity? | Record. Do NOT fix. |
 | FRAGILE | Does the system break at a boundary that is reachable? | Record. Do NOT fix. |
 | DEFECTIVE APPROACH | Does this solution approach violate a constraint? | Record. Do NOT construct. |
 | VERIFIED OK | Does this work correctly at all boundaries? | Mark verified. No action. |
@@ -322,6 +337,10 @@ Identify any underspecified regions where behavior is undefined. These are defec
 
 **R12.** For non-deterministic systems: if behavior is underspecified, that is a defect.
 
+**R13. Converge on the objective, not the specification.** The loss function is the count of OBJECTIVE defects — correct paths that do not provably advance the goal. Zero specification defects is necessary but not sufficient. Trace every path twice: once for correctness, once for objective-achievement.
+
+**R14. Distinguish descriptive signals from predictive ones.** Prove a signal predicts the future outcome before acting on it. Using a past-describing signal as a leading trigger is an objective defect even when the logic is correct. This applies to a correction's own inputs (assumed peaks, priors), not only the system's entry signals — a fix assembled from unvalidated descriptive inputs inherits the defect it was built to remove.
+
 ---
 
 ## OUTPUT FORMAT FOR EACH FINDING
@@ -333,7 +352,7 @@ SEVERITY: CRITICAL / MEDIUM / LOW
 LOCATION: {specification section / file / module} OR {approach identifier — constraint}
 CURRENT VALUE/LOGIC/APPROACH: {what it is}
 CORRECT VALUE/LOGIC/APPROACH: {what it should be}
-CLASSIFICATION: DEFECT / DEAD CODE / INTERACTION / CONTRADICTION / UNREACHABLE / UN-WINNABLE / FRAGILE / DEFECTIVE APPROACH
+CLASSIFICATION: DEFECT / DEAD CODE / INTERACTION / CONTRADICTION / UNREACHABLE / UN-WINNABLE / FRAGILE / OBJECTIVE DEFECT / PREDICTIVE-VALIDITY DEFECT / DEFECTIVE APPROACH
 BOUNDARY PROOF: {which boundary case fails, hand-traced}
 FIX/CONSTRUCTION: {exact change or solution construction}
 BLAST RADIUS: {what else this affects}
@@ -358,6 +377,8 @@ STILL UNVERIFIED: {what needs empirical observation}
 - [ ]  Resource waste: computation with no output
 - [ ]  Specification vs implementation drift: fix in spec but not in deployed system
 - [ ]  Interaction impossibility: two correct subsystems, impassable combined path
+- [ ]  Objective defect: path is correct but does not provably advance the objective
+- [ ]  Predictive-validity defect: a gate (or a fix) acts on a past-describing signal as if it predicted the future, without proof of forward validity
 - [ ]  Tail risk: worst-case boundary violates constraint
 - [ ]  Feedback instability: multi-cycle behavior diverges or oscillates
 - [ ]  Underspecified region: behavior undefined at some boundary
@@ -369,6 +390,7 @@ STILL UNVERIFIED: {what needs empirical observation}
 ## SUMMARY
 
 ```
+Phase 0: Define the objective (the loss function). Trace every path for correctness AND objective-achievement.
 Phase A: Scan ALL paths / enumerate ALL approaches at ALL boundaries. Record ALL findings. Do NOT fix or construct.
 Phase B: Fix ALL defects / construct optimal solution from surviving approaches. One pass.
 Phase C: Re-scan ALL paths / approaches at ALL boundaries. Check interactions.

@@ -1565,7 +1565,7 @@ async function fetchTokenPriceForExit(tokenAddress: string): Promise<{ price: nu
 // Time-tested entry edge — enter where proven-profitable wallets are
 // already accumulating. Reuses the existing BIRDEYE_API_KEY.
 // Endpoint: GET /defi/v2/tokens/top_traders (documented; x-chain: solana)
-// ─────────────────────────────────────────���─�����────────────────────
+// ─────────────────────────────────────────�����─�����────────────────────
 interface SmartMoneySignal { count: number; netBuyers: number; topRealizedPnl: number; whaleCount: number; whaleNetBuyers: number; whaleNetSellers: number; washSuspects: number; source?: "birdeye" | "free" | "helius"; }
 // ── BIRDEYE MULTI-KEY ROTATION SYSTEM (AI-FIX 2026-06-24) ──────────────────�����─���������────
 // Birdeye free-tier keys have a daily CU limit (~1000 CU). A single key runs out mid-session
@@ -2226,6 +2226,34 @@ function calcCostAwareStopPrice(entryPrice: number, mode: string | null, liq: nu
   const rawTolerance = Math.abs(engineSettings.stopLoss);
   const priceMoveTolerance = Math.max(rawTolerance, exitCostPct + 1);
   return entryPrice * (1 - priceMoveTolerance / 100);
+}
+
+// ── PHASE 0 OBJECTIVE MODEL (Convergence Framework) ─────────────────────────
+// The loss function is FORWARD NET EXPECTANCY, not code-correctness. A trade is
+// admissible ONLY if the realistic forward capture for its liquidity band and
+// conviction can clear the modeled round-trip cost with margin. Descriptive
+// signals (px5m/bp5m/volMomentum) describe a move that ALREADY happened and have
+// no proven forward validity, so on their own they may never admit a trade.
+function estimateRealisticPeakPct(liqUsd: number): number {
+  // Conservative forward-peak envelope from the bot's own realized empirics
+  // (documented: $10-25k liq peaks +3-8%; deeper pools sustain larger runs).
+  if (liqUsd < 15000)  return 5;
+  if (liqUsd < 25000)  return 6;
+  if (liqUsd < 50000)  return 8;
+  if (liqUsd < 100000) return 10;
+  return 12;
+}
+function objectiveNetEvPct(liqUsd: number, sizeSol: number, solPriceUsd = cachedSolPriceUsd, score = 0): { peakPct: number; grossCapturePct: number; rtCostPct: number; netEvPct: number } {
+  const costs = calcTransactionCosts(liqUsd, sizeSol, solPriceUsd);
+  const peakPct = estimateRealisticPeakPct(liqUsd);
+  // Conviction scales expected capture. Calibrated so the ONLY empirically-
+  // positive pocket (SNIPER/score>=80 at ~$25k liq = +3.06%/trade realized,
+  // n=63) clears the gate, while the documented-negative 70-79 band does not.
+  const conviction = Math.max(0, Math.min(1.2, (score - 70) / 20)); // 0 @ s70 -> 1 @ s90
+  const captureMult = 0.7 + 1.3 * conviction;
+  const grossCapturePct = peakPct * captureMult;
+  const netEvPct = grossCapturePct - costs.totalRoundTripPct;
+  return { peakPct, grossCapturePct, rtCostPct: costs.totalRoundTripPct, netEvPct };
 }
 
 // ── BIRDEYE-INDEPENDENT HOLDER/LP CONCENTRATION (RugCheck full report) ───────────────
@@ -3559,6 +3587,23 @@ async function runScanCycle() {
       if (liq === 0) {
           console.log(`[GATE] SKIP $${candidate.tokenSymbol} — Zero liquidity reported.`);
           continue;
+      }
+
+      // ── PHASE 0 OBJECTIVE-EV GATE (Convergence Framework) ────────────────────
+      // Admit ONLY if realistic forward capture clears modeled round-trip cost
+      // with margin. This is the loss function made executable: converge on
+      // forward net expectancy, not on passing descriptive-signal gates. This
+      // gate sits AFTER every score/momentum gate, so a token that merely
+      // "already moved" (px5m/bp5m/volMom) cannot be admitted at negative EV.
+      const OBJECTIVE_GATE = String(process.env.OBJECTIVE_GATE ?? "true").toLowerCase() !== "false";
+      if (OBJECTIVE_GATE) {
+        const _evMargin = Number(process.env.OBJECTIVE_EV_MARGIN) || 1.0;
+        const _ev = objectiveNetEvPct(liq, scoring.sizeSol, SOL_PRICE_USD, scoring.combinedScore);
+        if (_ev.netEvPct < _evMargin) {
+          console.log(`[OBJECTIVE-GATE] SKIP $${candidate.tokenSymbol} — modeled forward net EV ${_ev.netEvPct.toFixed(2)}% < margin ${_evMargin}% (peak~${_ev.peakPct}%, capture~${_ev.grossCapturePct.toFixed(1)}%, RT-cost ${_ev.rtCostPct.toFixed(2)}%, liq $${Math.round(liq)}, score ${scoring.combinedScore}). Not provably positive-EV -> reject. Set OBJECTIVE_GATE=false to disable.`);
+          continue;
+        }
+        console.log(`[OBJECTIVE-GATE] PASS $${candidate.tokenSymbol} — net EV +${_ev.netEvPct.toFixed(2)}% (peak~${_ev.peakPct}%, capture~${_ev.grossCapturePct.toFixed(1)}%, RT ${_ev.rtCostPct.toFixed(2)}%, liq $${Math.round(liq)}, score ${scoring.combinedScore}).`);
       }
       const effSniperLiq   = engineSettings.sniperMinLiquidity /* FIX(liq-floor): removed micro-wallet $1k discount that let the bot buy un-tradeable thin tokens (BioCraft $21k -> ~35% real round-trip loss). Restored $50k floor. */;
       const effHwrLiq      = engineSettings.hwrMinLiquidity /* FIX(liq-floor): removed micro-wallet $2k discount. Restored $50k floor. */;
@@ -4939,7 +4984,15 @@ async function checkOpenPositions() {
         // Gate on EXIT-only cost + margin instead; the base partialTpThreshold (+5%) still floors it so the
         // half-bag is banked on the way UP (proactive) before the reactive breakeven floor can be gapped.
         const _partialExitCostPct = _partialRtCosts.exitSlippagePct + _partialRtCosts.exitFeePct;
-        const effectivePartialTpThreshold = Math.max(engineSettings.partialTpThreshold, _partialExitCostPct + engineSettings.partialTpCostMargin);
+        // OBJECTIVE-FIX(OD-3): the exit-cost floor can push the partial trigger ABOVE the realistic
+        // peak for the liquidity band, so the half-bag never banks and winners round-trip to losses.
+        // Cap the effective trigger at 60% of the realistic peak so the partial is reachable within
+        // the band the trade was admitted for (still floored by the base partialTpThreshold).
+        const _winnablePeakPct = estimateRealisticPeakPct(pair?.liquidity?.usd ?? 0);
+        const effectivePartialTpThreshold = Math.min(
+          Math.max(engineSettings.partialTpThreshold, _partialExitCostPct + engineSettings.partialTpCostMargin),
+          Math.max(engineSettings.partialTpThreshold, _winnablePeakPct * 0.6),
+        );
         if (!partialTpTaken.has(trade.id) && partialTpFailures < 3 && pnlPct >= effectivePartialTpThreshold && pnlPct < dynamicTP) {
           const sizeSol = parseFloat(trade.amount);
           const partialSize = sizeSol * engineSettings.partialTpRatio;

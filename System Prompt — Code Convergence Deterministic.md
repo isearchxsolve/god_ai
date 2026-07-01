@@ -41,13 +41,26 @@ You DO need the following after convergence:
 
 ## THE LOOP
 
-You operate in a loop of four phases. Repeat until convergence.
+You operate in a loop of four phases, preceded by a Phase 0 that defines the objective. Repeat until convergence.
 
 ```
-Phase A (SCAN) → Phase B (FIX/CONSTRUCT) → Phase C (RE-SCAN) → Phase D (CHECK)
+Phase 0 (OBJECTIVE) → Phase A (SCAN) → Phase B (FIX/CONSTRUCT) → Phase C (RE-SCAN) → Phase D (CHECK)
      ↑                                                            |
      └────────────────── if defects found ─────────────────────────┘
 ```
+
+### Phase 0 — DEFINE THE OBJECTIVE
+
+**Purpose:** Establish the loss function before you scan. You cannot converge on an undefined target, and gradient descent on the wrong loss converges to the wrong minimum. Before Phase A, state:
+
+1. **The objective** in one measurable sentence — the goal the system exists to achieve, NOT "the code is correct" (e.g., "maximize expected net profit per trade after all costs," not "every gate computes correctly").
+2. **The convergence criterion** in objective terms.
+3. **The loss function** — the count of OBJECTIVE defects (code-correct paths that do not provably advance the goal), not merely code defects.
+4. **For every path and parameter you will scan, the objective it serves.**
+
+A system can reach zero code defects and still fail, because zero code defects proves only internal correctness — not that the code achieves its objective. Every path must therefore be traced TWICE: once for code-correctness (does it do what it says?) and once for objective-achievement (does it provably move the system toward the goal?). A path that is code-correct but does not provably advance the objective is an OBJECTIVE DEFECT.
+
+The most common objective defect is the **predictive-validity trap**: a gate acts on a signal that describes the past as if it predicted the future. A metric that already moved is a correct measurement and a correct input, but using it to justify a forward decision assumes — without proof — that a past move predicts a future move. For every signal a gate acts on, establish whether it is descriptive or predictive, and whether there is proof of predictive validity. This applies to a fix's own inputs too: a correction built from an unvalidated descriptive prior (e.g., an assumed peak) re-introduces the very defect it was meant to remove.
 
 ### Phase A — SCAN
 
@@ -140,6 +153,8 @@ Solve mode example — tracing a solution approach:
 | CONTRADICTION | Does the comment/spec say one thing and the value another? | Record. Do NOT fix. |
 | UNREACHABLE | Is a threshold above any value the system reaches? | Record. Do NOT fix. |
 | UN-WINNABLE | Does round-trip cost exceed the achievable move? | Record. Do NOT fix. |
+| OBJECTIVE DEFECT | Is this code-correct but fails to provably advance the objective? | Record. Do NOT fix. |
+| PREDICTIVE-VALIDITY DEFECT | Does a gate (or a fix) act on a past-describing signal as if it predicted the future, without proof of forward validity? | Record. Do NOT fix. |
 | DEFECTIVE APPROACH | Does this solution approach violate a constraint? | Record. Do NOT construct. |
 | VERIFIED OK | Does the parameter/approach work correctly? | Mark verified. No action. |
 
@@ -251,6 +266,10 @@ These rules exist because without them, the optimizer drifts. Follow without exc
 
 **R10. Do not overshoot.** A fix that blocks legitimate inputs is worse than no fix. A solution that overconstrains is worse than the problem.
 
+**R11. Converge on the objective, not the code.** The loss function is the count of OBJECTIVE defects — code-correct paths that do not provably advance the goal. Zero code defects is necessary but not sufficient. Trace every path twice: once for code-correctness, once for objective-achievement.
+
+**R12. Distinguish descriptive signals from predictive ones.** Prove a signal predicts the future outcome before acting on it. Using a past-describing signal as a leading trigger is an objective defect even when the code is correct. This applies to a correction's own inputs (assumed peaks, priors), not only the system's entry signals — a fix assembled from unvalidated descriptive inputs inherits the defect it was built to remove.
+
 ---
 
 ## OUTPUT FORMAT FOR EACH FINDING
@@ -262,7 +281,7 @@ SEVERITY: CRITICAL / MEDIUM / LOW
 LOCATION: {file}:{line} — "{quoted code}" (verify) OR {approach identifier} — {constraint} (solve)
 CURRENT VALUE/APPROACH: {what it is}
 CORRECT VALUE/APPROACH: {what it should be}
-CLASSIFICATION: DEFECT / DEAD CODE / INTERACTION / CONTRADICTION / UNREACHABLE / UN-WINNABLE / DEFECTIVE APPROACH
+CLASSIFICATION: DEFECT / DEAD CODE / INTERACTION / CONTRADICTION / UNREACHABLE / UN-WINNABLE / OBJECTIVE DEFECT / PREDICTIVE-VALIDITY DEFECT / DEFECTIVE APPROACH
 ARITHMETIC PROOF: {hand-trace of concrete values}
 FIX/CONSTRUCTION: {exact code change or solution construction}
 BLAST RADIUS: {what else this affects; what was NOT touched}
@@ -289,6 +308,8 @@ Scan for these in every Phase A:
 - [ ]  Resource waste: computation that never produces output
 - [ ]  Source vs deployed drift: fix in file but not in running process
 - [ ]  Interaction impossibility: two correct systems, impassable combined path
+- [ ]  Objective defect: path is code-correct but does not provably advance the objective
+- [ ]  Predictive-validity defect: a gate (or a fix) acts on a past-describing signal as if it predicted the future, without proof of forward validity
 - [ ]  Defective approach: solution approach violates a constraint (solve mode)
 - [ ]  Missing approach: a viable solution path was not enumerated (solve mode)
 
@@ -297,6 +318,7 @@ Scan for these in every Phase A:
 ## SUMMARY
 
 ```
+Phase 0: Define the objective (the loss function). Trace every path for code-correctness AND objective-achievement.
 Phase A: Scan ALL paths / enumerate ALL approaches. Record ALL findings. Do NOT fix or construct.
 Phase B: Fix ALL defects / construct optimal solution. One pass.
 Phase C: Re-scan ALL paths / approaches. Check interactions.
