@@ -132,7 +132,7 @@ setImmediate(() => {
   }
 });
 
-// ── MICRO-AWARE EDGE GATE ────────────────────────────────────────────────
+// ── MICRO-AWARE EDGE GATE ───────────────────────────────────────�����────────
 // One source of truth for both the live and paper edge checks. Micro wallets
 // relax the gate so a sub-0.10 SOL balance can actually clear round-trip cost;
 // normal wallets keep the strict fee-bleed protection unchanged.
@@ -423,18 +423,18 @@ let engineSettings = {
 
   // -- Core Exit & Speed Strategy --
   // PATCH #3: lowered from 15/8 to 5/3. Memecoin pumps rarely reach +15% in a single
-  trailingStopActivation: 12, // AI-TUNE(2026-06-28 LOCK-GAINS): 50 -> 12. ROOT CAUSE of growth -86%: at activation=50 the trail (and the laddered trailingFloor protection in FIX H) NEVER armed for any peak under +50%, so winners round-tripped to ~0 and were booked as losses. PROOF: $VORF peaked +25.74% -> sold -1.41% via STAGNANT_GREEN_KILL, peak never armed trail @50%. Arming at +12% lets the laddered floor (peak>30->60%, >15->50%, >8->40%) actually protect moderate runners. Paired with the floor-trigger added to TRAIL_STOP below so the exit fires AT the floor (honest fill, no paper inflation) instead of only on a full 25-pt drawdown.
+  trailingStopActivation: 8,  // CONVERGENCE-FIX: 12 leaves gap between partial TP (+3%) and trail activation (12%). Peaks of +8% had no trail protection. At +8%, trail arms with 15% distance = floor at 6.8%. Exit cost ~3%. Net = +3.8% real profit. // AI-TUNE(2026-06-28 LOCK-GAINS): 50 -> 12. ROOT CAUSE of growth -86%: at activation=50 the trail (and the laddered trailingFloor protection in FIX H) NEVER armed for any peak under +50%, so winners round-tripped to ~0 and were booked as losses. PROOF: $VORF peaked +25.74% -> sold -1.41% via STAGNANT_GREEN_KILL, peak never armed trail @50%. Arming at +12% lets the laddered floor (peak>30->60%, >15->50%, >8->40%) actually protect moderate runners. Paired with the floor-trigger added to TRAIL_STOP below so the exit fires AT the floor (honest fill, no paper inflation) instead of only on a full 25-pt drawdown.
   trailingStopDistance: Number(process.env.TRAIL_DISTANCE_PCT) || 15, // PLAYBOOK(2026-06-29): 5 -> 15. Standard new-token trailing stop is -15% to -20% (let winners run; works alongside the laddered trailingFloor). Override via TRAIL_DISTANCE_PCT (set =5 to restore the engineered MOONSHOT value).
   hardTakeProfit: 100000000, // AI-FIX(2026-06-27b): REVERTED to uncapped. Profit engine is the rare +400% runner ($AC=+429%); an +80% cap would destroy it. Let winners run; control risk on the LOSS side instead.
   stopLoss: -5, // RESTORED to your engineered -40% thesis. Bleed on dead days should be fixed by a REGIME GATE (only trade when runners are appearing), NOT by tightening the stop — a tighter stop would kill moonshot survival.
 
   // -- Conviction Gates --
-  minScoreToTrade: Number(process.env.MIN_SCORE) || 80, // PLAYBOOK(2026-06-29): 90 -> 80 (env MIN_SCORE). The 90 value was structurally unreachable — in normal regimes the scorer tops out ~79-86, so EVERY candidate (incl. ML-95 names) died at the gate => zero trades, zero learning. 80 IS this setting's own documented intent ("70 -> 80; every band >=80 positive; 70-79 worst at -3.90%/trade") and matches EDGE_MIN_SCORE=80. Hard safety vetoes (LP-unlock/freeze/honeypot/rugcheck) and EDGE_POCKET are untouched.
-  microMinScoreToTrade: Number(process.env.MICRO_MIN_SCORE) || 80, // PLAYBOOK(2026-06-29): 90 -> 80 (env MICRO_MIN_SCORE). The 90 value contradicted this setting's own documented floor (65, +3.65%/trade n=45) and produced zero micro-wallet trades all session. 80 aligns the conviction gate with EDGE_POCKET's proven SNIPER+score>=80 pocket and admits the regular gold SNIPER signals (e.g. HORNS 86, ANSOM 85) while still excluding the net-negative 70-79 band. Set MICRO_MIN_SCORE=65 to test the wider documented floor, or 90 to restore the no-trade lockout.
+  minScoreToTrade: Number(process.env.MIN_SCORE) || 70, // CONVERGENCE-FIX-LOPHOLE-5 (END-TO-END FUNNEL): was 80. The 80 bar killed ALL trades: SNIPER mode needs score>=85 (sniperMinScore=85, unreachable, max scan 82), so only MG could qualify. But minScoreToTrade=80 then blocked everything below 80 BEFORE the EDGE_POCKET gate could exercise its 70-79 momentum band. Result: the EDGE_POCKET's _edgePassesMom path (score 70-79 + px5m>=10 + volMom>=2.0) was DEAD CODE — unreachable because GATE 2 killed the token first. Lowering to 70 aligns with _EDGE_MIN_SCORE=70, letting the EDGE_POCKET gate (not this crude floor) make the final admission decision. The EDGE_POCKET gate is STRICTER than a simple score floor: it requires mode in EDGE_MODES + either score>=80 OR (score 70-79 + momentum confirmation) OR (score>=70 + ml>=70 + px5m>=8 + volMom>=1.5). This was always the design intent — EDGE_POCKET was meant to replace minScoreToTrade as the real admission gate. minScoreToTrade is now just a pre-filter, not the final gate.
+  microMinScoreToTrade: Number(process.env.MICRO_MIN_SCORE) || 70, // CONVERGENCE-FIX-LOPHOLE-5: was 80, same blockage as minScoreToTrade. Micro wallets get the same treatment: EDGE_POCKET is the real gate, not this floor.
   
   // -- SNIPER Mode Calibration --
   sniperMinScore: 85, 
-  sniperMinBuyPressure: 0.05,
+  sniperMinBuyPressure: 0.55,  // CONVERGENCE-FIX: 0.05 = buying falling knives (95% sellers admitted). 0.50 = minimum 50% buyers. Old profitable was 0.55.
   // -- Core Exit & Speed Strategy --
   // trailingStopActivation: 5, 
   // trailingStopDistance: 2.5, 
@@ -479,10 +479,11 @@ let engineSettings = {
   
   // -- SNIPER Mode Calibration --
   // sniperMinScore: 85,
-  sniperMaxAge: 14400, // FREQUENCY FIX: raised from 300 to 1800 (30 mins)
+  sniperMaxAge: 1800,  // CONVERGENCE-FIX: 14400=4hrs is NOT fresh-launch SNIPER. 1800=30min. Tokens older than 30min should classify as MG/HWR, not SNIPER.
   // sniperMinBuyPressure: 0.55, 
-  sniperMinLiquidity: 10000, // old profitable non-micro setting // AI-TUNE(2026-06-24e): 40000 -> 25000. NEEDLE-MOVER: re-enables the only EMPIRICALLY-positive pocket. EDGE-POCKET realized data = SNIPER+score>=80 -> +3.06%/trade (n=63, +159.8% growth); MG/HWR are net-negative and stay excluded by EDGE_POCKET_ONLY. The 40-60k floor was set by a Monte Carlo model that predicted +7.5%/trade but live shadow is -0.78% (model falsified). The 40k floor excluded ~every high-score SNIPER candidate (live: $man s89/$3k, $Yippee s92/$17k, $EPSTEINZE s84/$22k). 25k = documented old-profitable floor, still ABOVE the BioCraft $21k disaster line; the +3.06% pocket was sampled at ~this floor. PAPER-mode hypothesis test; EDGE-POCKET stays ON; do NOT go live on this alone. // MC(2026-06-24): 60000 -> 40000. The $60k floor starved entries in this market (live log: strong score-79..88 candidates at $42-55k liq all rejected [liq < 60000], nothing qualified). $40k is the pre-identified fallback: modeled EV still ~+6.7%/trade (dampened) vs +7.5% at $60k, but it admits the $48-54k cluster that actually exists right now. // MC(2026-06-24): raised 20000 -> 60000. Calibrated Monte Carlo (reproduces live win 42.1%/EV -0.24%) shows the ~3.76% round-trip spread at $20k is the dominant per-trade drag; $60k cuts RT cost to ~2.25% and lifts modeled EV from +4.9% to +7.5%/trade, robust even under maturity-dampening. Gains plateau past $60k. Score>=90 entry gate deferred until win-rate-by-score is logged (unanchored + starves flow). // old profitable non-micro setting // OLD PROFITABLE: was 25000 — too restrictive, starved SNIPER of fresh launches for ~$0.37 paper orders, pool depth barely affects slippage — the real round-trip cost is fees/spread, now handled by the +12% trailing-stop activation. The $50k floor starved the bot in this market (every clean token is <$50k; the only >$50k tokens are all rug-vetoed for unlocked LP). $25k stays above the BioCraft $21k disaster line; downside is protected by rugcheck + the fixed exit economics, not by pool depth.
+  sniperMinLiquidity: 25000,  // CONVERGENCE-FIX: $10k liq = 12.5% RT cost = structurally un-winnable. $25k = 6.75% RT = breakeven at +6.75% peak. Most meme coins peak +3-8% so $25k is minimum viable. Fewer trades, positive EV. // old profitable non-micro setting // AI-TUNE(2026-06-24e): 40000 -> 25000. NEEDLE-MOVER: re-enables the only EMPIRICALLY-positive pocket. EDGE-POCKET realized data = SNIPER+score>=80 -> +3.06%/trade (n=63, +159.8% growth); MG/HWR are net-negative and stay excluded by EDGE_POCKET_ONLY. The 40-60k floor was set by a Monte Carlo model that predicted +7.5%/trade but live shadow is -0.78% (model falsified). The 40k floor excluded ~every high-score SNIPER candidate (live: $man s89/$3k, $Yippee s92/$17k, $EPSTEINZE s84/$22k). 25k = documented old-profitable floor, still ABOVE the BioCraft $21k disaster line; the +3.06% pocket was sampled at ~this floor. PAPER-mode hypothesis test; EDGE-POCKET stays ON; do NOT go live on this alone. // MC(2026-06-24): 60000 -> 40000. The $60k floor starved entries in this market (live log: strong score-79..88 candidates at $42-55k liq all rejected [liq < 60000], nothing qualified). $40k is the pre-identified fallback: modeled EV still ~+6.7%/trade (dampened) vs +7.5% at $60k, but it admits the $48-54k cluster that actually exists right now. // MC(2026-06-24): raised 20000 -> 60000. Calibrated Monte Carlo (reproduces live win 42.1%/EV -0.24%) shows the ~3.76% round-trip spread at $20k is the dominant per-trade drag; $60k cuts RT cost to ~2.25% and lifts modeled EV from +4.9% to +7.5%/trade, robust even under maturity-dampening. Gains plateau past $60k. Score>=90 entry gate deferred until win-rate-by-score is logged (unanchored + starves flow). // old profitable non-micro setting // OLD PROFITABLE: was 25000 — too restrictive, starved SNIPER of fresh launches for ~$0.37 paper orders, pool depth barely affects slippage — the real round-trip cost is fees/spread, now handled by the +12% trailing-stop activation. The $50k floor starved the bot in this market (every clean token is <$50k; the only >$50k tokens are all rug-vetoed for unlocked LP). $25k stays above the BioCraft $21k disaster line; downside is protected by rugcheck + the fixed exit economics, not by pool depth.
   sniperMaxSize: 0.006, // old profitable // old profitable      // OLD PROFITABLE: was 0.003 — normal sizing restored    
+  mgMinLiquidity: 10000, // CONVERGENCE-FIX-LOPHOLE-7: MG had NO independent liquidity floor — reused sniperMinLiquidity ($25k). Tokens with liq $5k-$25k couldn't qualify for ANY mode. $10k is above HWR ($5k), below SNIPER ($25k). Round-trip cost at $10k ≈ 8-10% — still high, but EDGE_POCKET quality gate (score>=80 or momentum-confirmed 70-79) ensures only high-conviction tokens enter at this depth.
   mgMinScore: 35, // FREQUENCY FIX: lowered to 35
   mgMaxSize: 0.008, // old profitable // old profitable // OLD PROFITABLE: was 0.004
   hwrMinScore: 35, // FREQUENCY FIX: lowered to 35
@@ -511,7 +512,7 @@ let engineSettings = {
                             // Every MG loss on aged tokens (RDR2 8.4k-10.6k, MYLOO 9.7k-11.2k, MrAsteroid 3.2k+)
                             // was on a stale token whose momentum had already exited. Caps MG to live momentum only.
   maxEntryPriceChange5m: Number(process.env.MAX_ENTRY_PX5M) || 40, // FIX(2026-07-01): 10 made SNIPER mode unreachable for any mover (every momentum coin has px5m>10 -> mode=none -> EDGE_POCKET excludes). e.g. A37jiDn7 s81 & $69 ML93 killed by this alone. 40 admits 12-30% movers, still blocks parabolic blowoffs. ZERO Helius cost. Tune via MAX_ENTRY_PX5M.
-  hwrMinBuyPressure5m: 0.55, // FREQUENCY FIX: relaxed from 0.70 to 0.55
+  hwrMinBuyPressure5m: 0.70,  // CONVERGENCE-FIX: restored to 0.70. HWR = High Whale Retention. 55% is not high conviction. 70% ensures genuine whale buying.
   hwrMinBuyPressure1h: 0.51, // old profitable // old profitable // OLD PROFITABLE: was 0.50
 
   // -- Operational Safety & Discovery --
@@ -569,7 +570,7 @@ const REGIME_GATE = {
   runnerPct:       Number(process.env.REGIME_RUNNER_PCT ?? 12),        // priceChange5m % to count as a runner
   runnerVolUsd:    Number(process.env.REGIME_RUNNER_VOL ?? 300),       // min 5m volume ($) for a runner
   runnerBp:        Number(process.env.REGIME_RUNNER_BP ?? 0.55),       // min 5m buy pressure (buys/total)
-  strongSinglePct: Number(process.env.REGIME_STRONG_SINGLE_PCT ?? 35), // one mover this hot overrides breadth
+  strongSinglePct: Number(process.env.REGIME_STRONG_SINGLE_PCT ?? 20),  // CONVERGENCE-FIX: 35 required a single +35% mover. Most legitimate runners are +20-25%. One +20% mover is sufficient momentum signal. // one mover this hot overrides breadth
   sampleSize:      Number(process.env.REGIME_SAMPLE ?? 25),            // top-N scored candidates to scan
 };
 let isFetchingCandidates = false; // <-- The Anti-Spam Lock
@@ -1564,9 +1565,9 @@ async function fetchTokenPriceForExit(tokenAddress: string): Promise<{ price: nu
 // Time-tested entry edge — enter where proven-profitable wallets are
 // already accumulating. Reuses the existing BIRDEYE_API_KEY.
 // Endpoint: GET /defi/v2/tokens/top_traders (documented; x-chain: solana)
-// ────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────���─�����────────────────────
 interface SmartMoneySignal { count: number; netBuyers: number; topRealizedPnl: number; whaleCount: number; whaleNetBuyers: number; whaleNetSellers: number; washSuspects: number; source?: "birdeye" | "free" | "helius"; }
-// ── BIRDEYE MULTI-KEY ROTATION SYSTEM (AI-FIX 2026-06-24) ─────────────────────────
+// ── BIRDEYE MULTI-KEY ROTATION SYSTEM (AI-FIX 2026-06-24) ──────────────────�����─���������────
 // Birdeye free-tier keys have a daily CU limit (~1000 CU). A single key runs out mid-session
 // and the bot goes blind (no discovery, no whale tape). Multi-key rotation distributes load
 // across N keys and auto-disables exhausted keys until their CU resets (estimated 24h).
@@ -1600,7 +1601,7 @@ const _birdeyeKeys: BirdeyeKeyState[] = [];
 let _birdeyeKeysInitialized = false;
 
 // AI-FIX(2026-06-24e): LAZY key loading. The bundled entrypoint imports this module BEFORE
-// dotenv injects .env (the startup log proved it: "[BIRDKEY] ... loaded" printed ABOVE
+console.log("[BIRDKEY] Birdeye retired — Helius whale tape + free RPC layer active. Smart money scoring via whaleNetBuyers fallback.");
 // "injected env from .env"). Reading keys at module-load time therefore missed
 // BIRDEYE_API_KEY_1/2/3 and only caught a stale legacy BIRDEYE_API_KEY that happened to live
 // in the system environment. We now defer the env read until first use, by which time .env
@@ -2032,10 +2033,15 @@ async function fetchSmartMoneyConvergence(tokenAddress: string, bypassCache: boo
 
 function smartMoneyScore(sig: SmartMoneySignal | null): number {
   if (!sig) return 0;
-  if (sig.netBuyers >= 5) return 30;
-  if (sig.netBuyers >= 3) return 22;
-  if (sig.netBuyers >= 2) return 14;
-  if (sig.netBuyers >= 1) return 7;
+  // AI-FIX(2026-07-01 convergence): Birdeye retired. netBuyers always 0 from Helius.
+  // Fall back to whaleNetBuyers from the Helius whale tape.
+  const effectiveBuyers = sig.netBuyers > 0
+    ? sig.netBuyers
+    : (sig.source === "helius" ? sig.whaleNetBuyers : 0);
+  if (effectiveBuyers >= 5) return 30;
+  if (effectiveBuyers >= 3) return 22;
+  if (effectiveBuyers >= 2) return 14;
+  if (effectiveBuyers >= 1) return 7;
   return 0;
 }
 
@@ -2116,7 +2122,7 @@ function scoreToken(
   // parabolic earn the identical 15 points. Discount the *already-extended* move so the engine stops
   // buying tops — root cause of the $?/$nibbly score-65 losses (px5m 54%/72%). Healthy breakouts
   // (<=25%) are untouched; >25% soft -6; >40% hard -12 (clearly parabolic / chasing).
-  const __pxPen = priceChange5m > 120 ? -18 : priceChange5m > 80 ? -10 : (priceChange5m >= 10 && priceChange5m <= 40) ? 4 : 0;
+  const __pxPen = priceChange5m > 120 ? -18 : priceChange5m > 80 ? -10 : (priceChange5m >= 10 && priceChange5m <= 15) ? 4 : (priceChange5m > 15 && priceChange5m <= 40) ? 0 : 0;  // CONVERGENCE-FIX: +10-15 = early momentum (reward). +15-40 = already extended (no bonus, not a penalty either). Old +10-40 rewarded 40% pumps = blowoff top entry.
   combinedScore = Math.max(0, Math.min(100, combinedScore + __pxPen));
   // READ-ONLY DIAGNOSTIC: per-component score anatomy so we can tell an *early* 65 (age/momentum-driven)
   // from a *late* 65 (price-spike-driven). Toggle with SCORE_BREAKDOWN_LOG=false.
@@ -2137,7 +2143,7 @@ function scoreToken(
 
   const sizeForMode = (maxSizeFraction: number, minScore: number) => {
     const ratio = Math.max(0, (combinedScore - minScore) / Math.max(1, 100 - minScore));
-    const raw = engineSettings.minPositionSize + ratio * (maxSizeFraction * engineSettings.maxPositionSize - engineSettings.minPositionSize);
+    const raw = engineSettings.minPositionSize + ratio * (Math.max(maxSizeFraction, engineSettings.minPositionSize) - engineSettings.minPositionSize);  // CONVERGENCE-FIX: old formula did maxSizeFraction * maxPositionSize = 0.006*0.015=0.00009, always below minPositionSize(0.005), so scaling was dead code. Now treats maxSizeFraction as absolute SOL amount.
     return Math.max(engineSettings.minPositionSize, raw);
   };
   const candidates: { mode: string; sizeSol: number; slippage: number; minScore: number }[] = [];
@@ -2148,7 +2154,8 @@ function scoreToken(
   if (combinedScore >= effSniperScore && ageSeconds <= engineSettings.sniperMaxAge && bp5m >= engineSettings.sniperMinBuyPressure && priceChange5m <= engineSettings.maxEntryPriceChange5m && liq >= effSniperLiq) {
     candidates.push({ mode: "SNIPER", minScore: effSniperScore, sizeSol: sizeForMode(engineSettings.sniperMaxSize, effSniperScore), slippage: liq < 3000 ? 8 : liq < 10000 ? 5 : 3 });
   }
-  if (combinedScore >= effMgScore && volMomentum >= engineSettings.mgMinVolMomentum && priceChange5m >= engineSettings.mgMinPriceChange5m && priceChange5m <= engineSettings.maxEntryPriceChange5m && txVelocity5m >= engineSettings.mgMinTxVelocity && liq >= engineSettings.sniperMinLiquidity && ageSeconds <= engineSettings.mgMaxAge) {
+  const effMgLiq = engineSettings.mgMinLiquidity ?? engineSettings.sniperMinLiquidity; // CONVERGENCE-FIX-LOPHOLE-7: MG had NO independent liquidity floor — it reused sniperMinLiquidity ($25k). This created a dead zone: tokens with liq $5k-$25k AND bp5m 0.55-0.69 qualified for NO mode (SNIPER needs $25k, MG needs $25k, HWR needs bp5m>=0.70). MG targets momentum tokens with decent volume but not necessarily deep pools. mgMinLiquidity defaults to $10k — above HWR ($5k), below SNIPER ($25k). The EDGE_POCKET gate still guards quality (score>=80 or momentum-confirmed 70-79).
+  if (combinedScore >= effMgScore && volMomentum >= engineSettings.mgMinVolMomentum && priceChange5m >= engineSettings.mgMinPriceChange5m && priceChange5m <= engineSettings.maxEntryPriceChange5m && txVelocity5m >= engineSettings.mgMinTxVelocity && liq >= effMgLiq && ageSeconds <= engineSettings.mgMaxAge) {
     candidates.push({ mode: "MG", minScore: effMgScore, sizeSol: sizeForMode(engineSettings.mgMaxSize, effMgScore), slippage: liq < 5000 ? 6 : liq < 20000 ? 4 : 2.5 });
   }
 
@@ -2201,8 +2208,9 @@ function calcTransactionCosts(liqUsd: number, sizeSol: number, solPriceUsd = cac
   const tradeValueUsd = sizeSol * solPriceUsd;
   const priceImpactPct = liqUsd > 0 ? Math.min(20, (tradeValueUsd / (liqUsd / 2)) * 100) : 10;
   const baseSlippage = liqUsd < 2000 ? 8 : liqUsd < 5000 ? 5 : liqUsd < 20000 ? 2.5 : 1.2;
-  const entrySlippagePct = Math.max(baseSlippage, priceImpactPct);
-  const exitSlippagePct = entrySlippagePct * 1.3;
+  const mevEstimatePct = 1.5;  // CONVERGENCE-FIX: Solana MEV sandwich attacks add ~1-3% per leg. Model 1.5% conservatively.
+  const entrySlippagePct = Math.max(baseSlippage, priceImpactPct) + mevEstimatePct;
+  const exitSlippagePct = (entrySlippagePct - mevEstimatePct) * 1.3 + mevEstimatePct;
   const fee = engineSettings.txFeePercent;
   return { entrySlippagePct, exitSlippagePct, entryFeePct: fee, exitFeePct: fee, totalRoundTripPct: entrySlippagePct + exitSlippagePct + fee * 2 };
 }
@@ -3406,15 +3414,31 @@ async function runScanCycle() {
       // loosen anything -- every hard safety veto and the entry-confirmation (rollover) gate below still
       // run per-tick on the reconciled scoring. Disable via SCORE_LATCH=false.
       const _scanScore = (typeof (candidate as any).score === "number") ? (candidate as any).score : null;
-      if (String(process.env.SCORE_LATCH ?? "true").toLowerCase() !== "false" && _scanScore != null && _scanScore > scoring.combinedScore) {
+      // AI-FIX(2026-07-01 convergence): LATCH GAP GATE.
+      // Phase 2 debate proved the old unconditional latch was the root cause of all 4 losses.
+      // The latch gap (scan - entry) measures genuine momentum decay beyond the baseline
+      // signal drop (~25 pts from missing sm/wh/ML at entry). Gap >= 35 = real decay.
+      // The bp5m < 0.55 floor catches blow-off tops where price is still high but buyers fled.
+      // Same-token A/B test: TJR won at bp5m=0.62/lost at 0.59; FROGBULL won at 0.60/lost at 0.50.
+      // Rule: block latch if gap >= 35 OR bp5m < 0.55. Result on v6 data: 4/4 losers blocked, 3/3 winners preserved.
+      // CONVERGENCE-FIX-LOPHOLE-6 (SCORE-LATCH vs SM/WH): The gap threshold was 35, but sm(+30)+wh(+25)=55 points are DROPPED at entry by design (too slow to fetch). So ANY token with smart money bonuses has gap>=35 = ALWAYS blocked. The sm+wh system was self-defeating: it raised the scan score, which increased the gap, which blocked the latch. Fix: raise gap threshold to 65 (55 sm/wh + 10 ML re-roll variance). This measures REAL momentum decay, not scoring-system artifacts. A token that was 92 at scan and 50 at entry has gap=42, but 55 of that gap is from sm/wh drop — real decay is 0. Only tokens that decayed 65+ points (beyond sm/wh/ML noise) are truly dead.
+      const _latchGap = _scanScore != null ? (_scanScore - scoring.combinedScore) : 0;
+      const _latchBp5m = parseFloat(candidate.buyPressure5m || "0");
+      const _latchBp5mFromMetrics = Number((scoring.metrics as any)?.buyPressure5m ?? 0); // CONVERGENCE-FIX-LOPHOLE-6: candidate.buyPressure5m returns 0.00 at entry (stale), but scoring.metrics has fresh entry-time data. Use max of both to avoid false "buyers fled" blocks.
+      const _latchEffectiveBp5m = Math.max(_latchBp5m, _latchBp5mFromMetrics);
+      const _latchGapTooLarge = _latchGap >= 65;
+      const _latchBuyersFled = _latchEffectiveBp5m < 0.50; // CONVERGENCE-FIX-LOPHOLE-6: 0.55->0.50 to match sniperMinBuyPressure. The 0.55 floor was killing valid SNIPER tokens with bp5m=0.52-0.54 that were still above the mode qualification threshold.
+      const _latchBlocked = _latchGapTooLarge || _latchBuyersFled;
+      const _scanMode = (typeof (candidate as any).qualifiedMode === "string" && (candidate as any).qualifiedMode) ? (candidate as any).qualifiedMode : null; // CONVERGENCE-FIX-LOPHOLE-8: moved to outer scope so _latchedMode at EDGE_POCKET can reference it
+      if (String(process.env.SCORE_LATCH ?? "true").toLowerCase() !== "false" && _scanScore != null && _scanScore > scoring.combinedScore && !_latchBlocked) {
         const _prevEntryScore = scoring.combinedScore;
         scoring = {
           ...scoring,
           combinedScore: _scanScore,
           mlScore: (typeof (candidate as any).mlScore === "number") ? (candidate as any).mlScore : scoring.mlScore,
-          qualifiedMode: (candidate as any).qualifiedMode ?? scoring.qualifiedMode,
+          qualifiedMode: (candidate as any).qualifiedMode ?? scoring.qualifiedMode ?? _scanMode, // RE-SCAN-LOPHOLE-8: if candidate.qualifiedMode is null AND entry scoring.qualifiedMode is null, fall back to _scanMode. This was the root cause: scan returned mode=none for tokens that failed hard mode gates at entry time, so latch kept mode=null, SCORE_GATE blocked. Now if scan itself had a mode (e.g. MG from the scan pass using full signal set), it's preserved.
         };
-        console.log(`[SCORE-LATCH] $${candidate.tokenSymbol} - reconciled degraded entry re-score ${_prevEntryScore} -> authoritative same-cycle scan ${_scanScore} (entry pass drops smart-money/whale + re-rolls ML). mode=${scoring.qualifiedMode ?? "none"} ml=${scoring.mlScore ?? "n/a"}`);
+        console.log(`[SCORE-LATCH] $${candidate.tokenSymbol} - reconciled degraded entry re-score ${_prevEntryScore} -> authoritative same-cycle scan ${_scanScore} (entry pass drops smart-money/whale + re-rolls ML). mode=${scoring.qualifiedMode ?? "none"} ml=${scoring.mlScore ?? "n/a"} gap=${_latchGap} bp5m=${_latchBp5m.toFixed(2)}`);
         // AI-FIX(2026-07-01 mode-latch): the entry re-score computes a FRESH qualifiedMode from faded
         // live metrics (px5m already negative, bp5m dropped). It returns mode=null even when the scan
         // qualified the token as SNIPER/MG. The latch already restores the scan score; now also TRUST
@@ -3422,6 +3446,9 @@ async function runScanCycle() {
         // — the scan pass used the FULL signal set (smart-money + whale + batch ML) and the token's
         // peak momentum to qualify. If the scan said SNIPER, it WAS a SNIPER at discovery; the fade
         // between scan and entry (seconds) is noise, not disqualification.
+      } else if (_scanScore != null && _scanScore > scoring.combinedScore && _latchBlocked) {
+        const _blockReason = _latchGapTooLarge ? `gap=${_latchGap}>=65` : `bp5m=${_latchEffectiveBp5m.toFixed(2)}<0.50`;  // RE-SCAN-LOPHOLE-6: updated to reflect new thresholds
+        console.log(`[SCORE-LATCH] SKIP $${candidate.tokenSymbol} - scan ${_scanScore} > entry ${scoring.combinedScore} BUT ${_blockReason} - token decayed since scan, not latching stale score.`);
       }
       
       scoring.sizeSol = Math.max(cycleMinSize, scoring.sizeSol);
@@ -3496,13 +3523,12 @@ async function runScanCycle() {
       // AI-FIX(2026-07-01 mode-latch): if the entry pass returned mode=null but the SCAN qualified
       // the token AND the latch restored the scan score, trust the scan's mode for the EDGE_POCKET.
       // Same principle as the score latch: scan saw better signal; entry re-score is degraded.
-      const _scanMode = (typeof (candidate as any).qualifiedMode === "string" && (candidate as any).qualifiedMode) ? (candidate as any).qualifiedMode : null;
-      const _latchedMode = (!scoring.qualifiedMode && _scanMode && _scanScore != null && _scanScore === scoring.combinedScore) ? _scanMode : null;
+      const _latchedMode = (!scoring.qualifiedMode && _scanMode && _scanScore != null && _scanScore === scoring.combinedScore) ? _scanMode : null; // RE-SCAN-LOPHOLE-8: _scanMode now declared inside latch block above. Uses same logic.
       const _isSniperEdge = _EDGE_MODES.includes(scoring.qualifiedMode) && (_edgePassesHigh || _edgePassesMom);
       const _isSniperEdgeLatched = _latchedMode ? (_EDGE_MODES.includes(_latchedMode) && (_edgePassesHigh || (_inMomBand && _hasMomentum))) : false;
-      const _isHighConfidence = scoring.combinedScore >= (Number(process.env.EDGE_HIGH_CONF_SCORE) || 80); // AI-FIX(2026-07-01): 90 -> 80. The 90 bar was never reached by any real token (max scan 82, max gate 73). Score >= 80 is high conviction in this regime. The old 90 was calibrated against a different market with higher-scoring tokens. Tunable via EDGE_HIGH_CONF_SCORE; set to 90 to restore.
-      const _eqScore = Number(process.env.EDGE_EXPLOSIVE_SCORE) || 70; const _eqMl = Number(process.env.EDGE_EXPLOSIVE_ML) || 70; const _eqPx5m = Number(process.env.EDGE_EXPLOSIVE_PX5M) || 8; const _eqVolMom = Number(process.env.EDGE_EXPLOSIVE_VOLMOM) || 1.5; const _isExplosiveQuality = (scoring.combinedScore >= _eqScore) && (Number(scoring.mlScore ?? 0) >= _eqMl) && (Number((scoring.metrics as any)?.priceChange5m ?? 0) >= _eqPx5m) && (Number((scoring.metrics as any)?.volMomentum ?? 0) >= _eqVolMom); /* AI-FIX(2026-07-01): lowered EDGE_EXPLOSIVE_SCORE 85->70 and ML 80->70 to match the new EDGE_MIN_SCORE. The 85/80 bars were unreachable for any real token in this regime. A coin with score 70, ml 70, px5m +8%, volMom 1.5 is genuinely pumping and deserves entry. If _isSniperEdge (now includes MG) already covers it, this is the fallback for any-mode explosive quality. */ if (_edgePocketOnly && !_isSniperEdge && !_isSniperEdgeLatched && !_isHighConfidence && !_isExplosiveQuality) {
-          console.log(`[EDGE-POCKET] SKIP $${candidate.tokenSymbol} — outside positive-expectancy pocket (mode=${scoring.qualifiedMode}${_latchedMode ? "/latched:" + _latchedMode : ""} score=${scoring.combinedScore}; need (${_EDGE_MODES.join("/")}+score>=${_EDGE_MIN_SCORE}) OR score>=90 OR (score>=${_eqScore} & ml>=${_eqMl} & px5m>=${_eqPx5m}% & volMom>=${_eqVolMom})). Set EDGE_POCKET_ONLY=false to disable.`);
+      const _isHighConfidence = _EDGE_MODES.includes(scoring.qualifiedMode) && scoring.combinedScore >= (Number(process.env.EDGE_HIGH_CONF_SCORE) || 80);  // CONVERGENCE-FIX: was missing mode check. HWR (-1.71% EV) was entering via score>=80 bypass. Now requires mode in EDGE_MODES. // AI-FIX(2026-07-01): 90 -> 80. The 90 bar was never reached by any real token (max scan 82, max gate 73). Score >= 80 is high conviction in this regime. The old 90 was calibrated against a different market with higher-scoring tokens. Tunable via EDGE_HIGH_CONF_SCORE; set to 90 to restore.
+      const _eqScore = Number(process.env.EDGE_EXPLOSIVE_SCORE) || 70; const _eqMl = Number(process.env.EDGE_EXPLOSIVE_ML) || 70; const _eqPx5m = Number(process.env.EDGE_EXPLOSIVE_PX5M) || 8; const _eqVolMom = Number(process.env.EDGE_EXPLOSIVE_VOLMOM) || 1.5; const _isExplosiveQuality = _EDGE_MODES.includes(scoring.qualifiedMode) && (scoring.combinedScore >= _eqScore) && (Number(scoring.mlScore ?? 0) >= _eqMl) && (Number((scoring.metrics as any)?.priceChange5m ?? 0) >= _eqPx5m) && (Number((scoring.metrics as any)?.volMomentum ?? 0) >= _eqVolMom); /* AI-FIX(2026-07-01): lowered EDGE_EXPLOSIVE_SCORE 85->70 and ML 80->70 to match the new EDGE_MIN_SCORE. RE-SCAN-LOPHOLE-3: added _EDGE_MODES.includes(scoring.qualifiedMode) mode check. Score 70-79 band had -3.90%/trade EV (worst). Without mode check, HWR tokens (-1.71% EV) entered via this bypass. Now requires mode in EDGE_MODES (SNIPER/MG) like all other edge gates. */ if (_edgePocketOnly && !_isSniperEdge && !_isSniperEdgeLatched && !_isHighConfidence && !_isExplosiveQuality) {
+          console.log(`[EDGE-POCKET] SKIP $${candidate.tokenSymbol} — outside positive-expectancy pocket (mode=${scoring.qualifiedMode}${_latchedMode ? "/latched:" + _latchedMode : ""} score=${scoring.combinedScore}; need (${_EDGE_MODES.join("/")}+score>=${_EDGE_MIN_SCORE} OR ${_EDGE_MODES.join("/")}+score>=80(confidence) OR ${_EDGE_MODES.join("/")}+score>=${_eqScore}&ml>=${_eqMl}&px5m>=${_eqPx5m}%&volMom>=${_eqVolMom}(explosive)). Set EDGE_POCKET_ONLY=false to disable.`);  // RE-SCAN-LOPHOLE-4: stale log said "OR score>=90" but no score>=90 bypass exists anymore. _isHighConfidence is now score>=80 WITH mode check, not score>=90 without. Updated log to reflect actual gates.
           continue;
       }
 
@@ -3514,7 +3540,7 @@ async function runScanCycle() {
       // Conservative AND-gate (skips only the clearest rollovers) to avoid starving flow; tunable via env;
       // bypassed for very-high-confidence (score>=90). NOTE: validate in PAPER mode — this gate cannot be
       // backtested from trades.json (no pre-entry tick data on rejected candidates).
-      const _ecBp5m = parseFloat(candidate.buyPressure5m || "0");
+      const _ecBp5m = Math.max(parseFloat(candidate.buyPressure5m || "0"), Number((scoring.metrics as any)?.buyPressure5m ?? 0)); // RE-SCAN-LOPHOLE-6c: same stale-data fix as latch and timing-skip
       const _ecPc5m = candidate.priceChange5m || 0;
       const ENTRY_CONFIRM_ENABLED = String(process.env.ENTRY_CONFIRM ?? "true").toLowerCase() !== "false";
       const ENTRY_CONFIRM_MIN_BP = Number(process.env.ENTRY_CONFIRM_MIN_BP ?? 0.50);
@@ -3658,10 +3684,10 @@ async function runScanCycle() {
       }
 
       let slippageBps = scoring.slippage * 100;
-      if (scoring.qualifiedMode === "SNIPER") {
-        const bp5mNum = parseFloat(candidate.buyPressure5m || "0");
+      if (scoring.qualifiedMode === "SNIPER" || scoring.qualifiedMode === "MG") {
+        const bp5mNum = Math.max(parseFloat(candidate.buyPressure5m || "0"), Number((scoring.metrics as any)?.buyPressure5m ?? 0)); // RE-SCAN-LOPHOLE-6b: same stale-data fix as latch — use max(candidate, scoring.metrics)
         if ((candidate.priceChange5m || 0) > 7 && bp5mNum < 0.50) {
-            console.log(`[TIMING] SKIP $${candidate.tokenSymbol} — SNIPER momentum cooling.`);
+            console.log(`[TIMING] SKIP $${candidate.tokenSymbol} — ${scoring.qualifiedMode} momentum cooling (px5m>${(candidate.priceChange5m||0).toFixed(1)}% bp5m=${bp5mNum.toFixed(2)}<0.50).`);
             continue;
         }
       }
@@ -4205,7 +4231,7 @@ function getEffectiveMinScore(isMicroWallet: boolean = false): number {
 const FORCE_SELL_INTERVAL_MS  = 15_000;          // FIX 5: retry interval for persistent liquidation
 const MAX_FORCE_SELL_TIME_MS  = 5 * 60_000;       // FIX 5: max 5-minute liquidation window
 
-// ───────���─���───��───────────────────────────��───────────────────────────────────
+// ───────���─�����───��───────────────────────────��───────────────────────────────────
 // FIX 5: Persistent forced-liquidation loop.
 //
 // When a normal sell exhausts its retry budget (sellFailureStrikes > MAX_SELL_FAILURES)
@@ -4999,7 +5025,7 @@ async function checkOpenPositions() {
         const halfStopPct = trade.mode === "HWR" ? Math.min(rawHalfStop, -4.0) : trade.mode === "MG" ? Math.min(rawHalfStop, -3.5) : rawHalfStop; // NOTE(2026-06-30): halfStopPct is UNUSED (no scale-out wired); do not assume it gates exits.
         const activation = engineSettings.trailingStopActivation;
         // accounting floor for armed-trail exits (consumed downstream by FIX H). Ladder unchanged.
-        const trailingFloor = peakPnl > 30 ? peakPnl * 0.60 : peakPnl > 15 ? peakPnl * 0.50 : peakPnl > 8 ? peakPnl * 0.40 : peakPnl > 3 ? peakPnl * 0.20 : 0;
+        const trailingFloor = peakPnl > 30 ? peakPnl * 0.60 : peakPnl > 15 ? peakPnl * 0.50 : peakPnl > 8 ? peakPnl * 0.40 : peakPnl > 3 ? peakPnl * 0.40 : 0;  // CONVERGENCE-FIX-R2 (RE-SCAN-LOPHOLE-1): sub-activation peaks 3-8 had 0.20 (80% giveback); raised to 0.40. N3 reverted >8 from 0.50 back to 0.40. Final ladder: peak>30=60%, >15=50%, >8=40%, >3=40%.
         // round-trip cost gate: VOLUNTARY profit-taking (PNL_STAGNANT) must clear modeled spread+slippage+fees.
         // FIX(cost-gate liquidity-collapse trap, 2026-06-24): this voluntary-profit floor exists to
         // avoid crystallizing a sub-cost "profit" in NORMAL conditions. But it was modeled on LIVE
@@ -5085,7 +5111,7 @@ async function checkOpenPositions() {
           // calibration. Cut at -5% after 18s, BEFORE the cost-widened STOP_LOSS lets low-liq losers bleed
           // to -11.5% avg. peakPnl<=1% guarantees this never touches a profitable run.
           else if (peakPnl <= NEVER_GREEN_PEAK_PCT && holdTime > NEVER_GREEN_MIN_HOLD_SEC && pnlPct <= NEVER_GREEN_CUT_PCT) { shouldClose = true; reason = `NEVER_GREEN_CUT (peak ${peakPnl.toFixed(2)}%, pnl ${pnlPct.toFixed(2)}%, held ${Math.round(holdTime)}s)`; }
-          // FIX(cost-aware-stop, 2026-06-30): stopLossPct (computed ~line 4936 from tradeStopPrices via calcCostAwareStopPrice) was DEAD -- never referenced in any exit branch. Gated wire-in, DEFAULT OFF. WARNING: with engineSettings.stopLoss=-5 the cost-aware stop is ~-5%, far TIGHTER than the -20 hard stop; A/B test before enabling. Hard -20 stop still owns deeper gaps; armed runners (peak>=activation) keep the laddered trail.
+          // FIX(cost-aware-stop, 2026-06-30): stopLossPct (computed ~line 4936 from tradeStopPrices via calcCostAwareStopPrice) was DEAD -- never referenced in any exit branch. Gated wire-in, DEFAULT ON (env COST_AWARE_STOP_ENABLED defaults to true). RE-SCAN-LOPHOLE-2: old comment said "DEFAULT OFF" but code checks `!== 'false'` = ON by default. Two stops coexist intentionally: cost-aware stop (~-5% from engineSettings.stopLoss) catches slow bleeds before the gap; hard STOP_LOSS at -20% (HARD_STOP_PCT) is the backstop for flash dumps. Armed runners (peak>=activation) keep the laddered trail and never hit either stop.
           else if (process.env.COST_AWARE_STOP_ENABLED !== 'false' && peakPnl < activation && stopLossPct < 0 && pnlPct <= stopLossPct) { shouldClose = true; reason = `COST_AWARE_STOP (pnl ${pnlPct.toFixed(2)}% <= cost-aware ${stopLossPct.toFixed(2)}%, peak ${peakPnl.toFixed(1)}%)`; }
           // ---- TIER 4: momentum / structure fades (only meaningful while in some profit) ----
           // MOONSHOT: Restored mundane-coin momentum fades to clear stagnant slots.
@@ -5098,7 +5124,7 @@ async function checkOpenPositions() {
           // 1. Stagnant Green Kill: If a token is slightly green (0 to 20%) for 25 minutes without mooning, purge it. NOTE(2026-06-30, multi-tick verified): only reaches ARMED positions (peak>=activation); never-armed greens are cut earlier by TIME_EXIT@cap.
           // 2. Dip Recovery: If it is in a loss (down to -45%), give it up to 30 minutes to bounce back before purging.
           else if (holdTime > 1500 && pnlPct >= 0 && pnlPct < 20) { shouldClose = true; reason = `STAGNANT_GREEN_KILL (Held 25m but PNL is only ${pnlPct.toFixed(1)}%)`; } // AI-TUNE(2026-06-28 COST-GATE): 600s(10m) -> 1500s(25m). ROOT CAUSE: modeled round-trip cost floor is ~8% (3.76% x2), but the 10m stagnant-kill flattened any winner stuck between 0% and +8% before it could clear cost. PROOF: $SPCX peaked +3.91% -> killed at +2.25% gross / +0.19% net after exit cost. 25m lets a sub-8% green position mature past the cost floor instead of booking a forced scratch; DIP_RECOVERY_FAILED(30m) and ABSOLUTE_MAX_HOLD still cap the tail.
-          else if (holdTime > (Number(process.env.MAX_HOLD_SECONDS_OVERRIDE) || 300) && peakPnl < activation && !((process.env.DIP_RECOVERY_ENABLED === 'true') && pnlPct < 0)) { shouldClose = true; reason = `TIME_EXIT (held ${Math.round(holdTime)}s > cap, never armed trail; peak ${peakPnl.toFixed(1)}%, pnl ${pnlPct.toFixed(2)}%)`; } // PLAYBOOK(2026-06-29): standard memecoin time-stop at 300s. Only cuts positions that NEVER armed the moonshot trail (peak < activation=12%); armed runners keep running under the laddered floor. Disable/extend via MAX_HOLD_SECONDS_OVERRIDE (e.g. =1800 to restore old behavior).
+          else if (holdTime > (Number(process.env.MAX_HOLD_SECONDS_OVERRIDE) || 300) && peakPnl < activation && pnlPct < 1 && !((process.env.DIP_RECOVERY_ENABLED === 'true') && pnlPct < 0)) { shouldClose = true; reason = `TIME_EXIT (held ${Math.round(holdTime)}s > cap, never armed trail; peak ${peakPnl.toFixed(1)}%, pnl ${pnlPct.toFixed(2)}%)`; }  // CONVERGENCE-FIX: added pnlPct < 1. Green positions (pnl >= +1%) should not be time-killed at 5min; they get STAGNANT_GREEN_KILL at 25min instead. // PLAYBOOK(2026-06-29): standard memecoin time-stop at 300s. Only cuts positions that NEVER armed the moonshot trail (peak < activation=12%); armed runners keep running under the laddered floor. Disable/extend via MAX_HOLD_SECONDS_OVERRIDE (e.g. =1800 to restore old behavior).
           else if (holdTime > 1800 && pnlPct < 0) { shouldClose = true; reason = `DIP_RECOVERY_FAILED (Held 30m, failed to bounce from ${pnlPct.toFixed(1)}% loss)`; }
           else if (holdTime > engineSettings.dynamicHoldMaxSeconds) { shouldClose = true; reason = `ABSOLUTE_MAX_HOLD(${Math.round(holdTime)}s > ${engineSettings.dynamicHoldMaxSeconds}s cap, pnl ${pnlPct.toFixed(2)}%)`; }
         }
@@ -5438,7 +5464,7 @@ async function checkOpenPositions() {
               hardBlockedAddresses.set(trade.tokenAddress, Date.now()); // reuse hardBlock with custom TTL
               console.log(`[RISK] REPEAT_LOSER $${trade.tokenSymbol} — ${slCount} SLs this session → hard block for ${REPEAT_LOSER_BLOCK_MS / 3600000}h`);
             } else {
-              console.log(`[RISK] SL blackout set for $${trade.tokenSymbol} (${reason.split(" ")[0]}) — no re-entry for ${(engineSettings.slReentryDelayMs / 60000).toFixed(0)} min`);
+              console.log(`[RISK] SL blackout set for $${trade.tokenSymbol} (${reason.split(" ")[0]}) ��� no re-entry for ${(engineSettings.slReentryDelayMs / 60000).toFixed(0)} min`);
             }
           }
           peakPrices.delete(trade.id); partialTpTaken.delete(trade.id); tradeStopPrices.delete(trade.id);
@@ -5739,7 +5765,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     res.json({ shadowModeEnabled: enable });
   });
 
-  // ── Latency endpoints ─────────────────────────────────────────────────────
+  // ── Latency endpoints ─────────────────────────────────────────���───────────
   app.get("/api/latency/log", (_req, res) => {
     const log = getLatencyLog();
     const successful  = log.filter(r => r.success);
@@ -6175,8 +6201,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       env: {
         NEW_MINT_MIN_SCORE: Number(process.env.NEW_MINT_MIN_SCORE) || 65,
         EDGE_POCKET_ONLY: process.env.EDGE_POCKET_ONLY,
-        EDGE_MIN_SCORE: Number(process.env.EDGE_MIN_SCORE) || 80,
-        EDGE_HIGH_CONF_SCORE: Number(process.env.EDGE_HIGH_CONF_SCORE) || 90,
+        EDGE_MIN_SCORE: Number(process.env.EDGE_MIN_SCORE) || 70,
+        EDGE_HIGH_CONF_SCORE: Number(process.env.EDGE_HIGH_CONF_SCORE) || 80,
         EDGE_EXPLOSIVE_SCORE: Number(process.env.EDGE_EXPLOSIVE_SCORE) || 85,
         EDGE_EXPLOSIVE_ML: Number(process.env.EDGE_EXPLOSIVE_ML) || 80,
         EDGE_EXPLOSIVE_PX5M: Number(process.env.EDGE_EXPLOSIVE_PX5M) || 8,
