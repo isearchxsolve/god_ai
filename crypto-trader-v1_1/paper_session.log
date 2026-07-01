@@ -1,4 +1,4 @@
-◇ injected env (72) from .env // tip: ◈ secrets for agents [www.dotenvx.com]
+◇ injected env (72) from .env // tip: ⌘ multiple files { path: ['.env.local', '.env'] }
 [SECURITY] ADMIN_SECRET loaded — admin endpoints require authentication (requireAdmin active).
 ==================== 1000x ROI TRADING BOT ====================
 [CONFIG] MODE=paper from .env applied to trading mode.
@@ -13,7 +13,7 @@
 [ENGINE] Restored wallet balance from DB: 0.030 SOL
 [ENGINE] ML Service connected
 [ENGINE] Fetching live SOL price from DexScreener...
-[ENGINE] SOL price locked at $75.24
+[ENGINE] SOL price locked at $75.08
 [GOLD HUNTER] Starting per-feed processing...
 [GOLD HUNTER] Active — signal/5s trending/30s trenches/20s cluster/30s dex/30s newMints/20s
 [DEBUG] currentBalance: 0.03, isMicroWallet: true
@@ -23,202 +23,537 @@
 [GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
 [GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
 [GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
-Browserslist: browsers data (caniuse-lite) is 9 months old. Please run:
-  npx update-browserslist-db@latest
-  Why you should do it regularly: https://github.com/browserslist/update-db#readme
-[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
-[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
 [SCANNER-QUEUE] Tracking 0 fast scanner tokens via free API (Waiting for $10k breakout)
 [SRC-XTRA] quality-only union=50 | jupVerified=0 jupTop=50 gkVol=0 (verified-set size=0, offset=0)
-[QUALITY] Jupiter verified list refreshed: 56 tokens.
-[QUALITY] in=57 pass=46 jupVerified=0 cuts: notVerified=0 tooYoung=11 | flags: REQUIRE_VERIFIED=false MIN_AGE_MIN=5
-[GMGN] error: Command failed: gmgn-cli token info --chain sol --address 498DeYRS7AtLdE5wbwXbpFtinMTDTJxuvfXMraDDpump --raw
-
-[ML-DIAG] batch http=200 sent=11 got=11 first={"pump_probability":0.6,"dump_risk":0.4,"raw_probability":0.6,"penalties":["ml_uncalibrated(raw=0.023)"],"model_version":"heuristic_override"}
-[SCORE-BREAKDOWN] $MURAD combined=24 raw=55(liq12+bp16+vol3+px5+tx8+age0+bp1h3+fdv5=52/95) ml=60(adj48 dump40%) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=2.4% volMom=0.67 bp5m=0.71 ageS=77313 liq=$38957
-[SCORE-BREAKDOWN] $Vulland combined=58 raw=67(liq15+bp20+vol12+px-3+tx10+age0+bp1h5+fdv5=64/95) ml=74(adj64 dump26%) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=-2.5% volMom=2.64 bp5m=0.80 ageS=41023 liq=$57673
-[SCORE-BREAKDOWN] $ZAYED combined=47 raw=61(liq12+bp20+vol12+px-4+tx8+age0+bp1h5+fdv5=58/95) ml=74(adj64 dump26%) sm=0 wh=0 pen=-16(mc-8/age-8/px0/flat0) | drivers: px5m=-3.6% volMom=2.94 bp5m=0.82 ageS=60365 liq=$27456
-[SCORE-BREAKDOWN] $bull combined=12 raw=25(liq12+bp0+vol12+px-7+tx2+age0+bp1h0+fdv5=24/95) ml=23(adj14 dump78%) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=-6.6% volMom=2.35 bp5m=0.17 ageS=70419 liq=$44911
-[SCORE-BREAKDOWN] $DYM combined=6 raw=40(liq12+bp5+vol3+px2+tx10+age0+bp1h1+fdv5=38/95) ml=19(adj11 dump82%) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=0.9% volMom=0.89 bp5m=0.55 ageS=5089 liq=$24321
-[SCORE-BREAKDOWN] $Horseradish combined=0 raw=29(liq12+bp0+vol0+px2+tx8+age0+bp1h1+fdv5=28/95) ml=19(adj11 dump82%) sm=0 wh=0 pen=-20(mc0/age-8/px0/flat-12) | drivers: px5m=0.8% volMom=0.47 bp5m=0.35 ageS=34660 liq=$47952
-[SCORE-BREAKDOWN] $HOPE combined=33 raw=57(liq12+bp20+vol6+px2+tx4+age0+bp1h5+fdv5=54/95) ml=75(adj66 dump25%) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=0.9% volMom=1.02 bp5m=0.78 ageS=46683 liq=$44202
-[SCORE-BREAKDOWN] $Bool combined=0 raw=34(liq12+bp5+vol3+px-4+tx10+age0+bp1h1+fdv5=32/95) ml=19(adj11 dump82%) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=-3.2% volMom=0.97 bp5m=0.53 ageS=20154 liq=$29435
-[SCORE-BREAKDOWN] $hood combined=46 raw=56(liq10+bp10+vol0+px15+tx10+age0+bp1h3+fdv5=53/95) ml=56(adj44 dump44%) sm=0 wh=0 pen=-4(mc-8/age0/px4/flat0) | drivers: px5m=27.4% volMom=0.29 bp5m=0.56 ageS=4121 liq=$10432
-[SCORE-BREAKDOWN] $CASHCAT combined=20 raw=39(liq10+bp13+vol6+px-10+tx10+age0+bp1h3+fdv5=37/95) ml=53(adj41 dump47%) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=-29.9% volMom=1.18 bp5m=0.63 ageS=5248 liq=$11140
-[SCORE-BREAKDOWN] $FABLE combined=18 raw=41(liq12+bp10+vol9+px-10+tx10+age0+bp1h3+fdv5=39/95) ml=48(adj36 dump52%) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=-16.9% volMom=1.70 bp5m=0.59 ageS=7662 liq=$30493
+[QUALITY] Jupiter verified list refreshed: 53 tokens.
+[QUALITY] in=67 pass=66 jupVerified=0 cuts: notVerified=0 tooYoung=1 | flags: REQUIRE_VERIFIED=false MIN_AGE_MIN=5
 [GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
-[HELIUS-TAPE] 2pr3yK whales=10 netBuy=6 netSell=4 wash=0 bundleSlots=0 (txs=49)
-[GOLD-SIGNAL] LEGENDARY | 498DeYRS | score=80
-[SCORE-BREAKDOWN] $FABLE combined=21 raw=41(liq12+bp10+vol9+px-10+tx10+age0+bp1h3+fdv5=39/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=-16.5% volMom=1.66 bp5m=0.60 ageS=7664 liq=$30575
-[HELIUS-TAPE] hZ5KWo whales=10 netBuy=6 netSell=4 wash=5 bundleSlots=7 BUNDLE (txs=100)
-[HELIUS-TAPE] 6XUkLa whales=10 netBuy=6 netSell=4 wash=5 bundleSlots=8 BUNDLE (txs=96)
-[SAFETY] $FABLE rugScore=1 rugScoreNorm=1 freeze=false mint=false veto=none
-[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
-[GOLD-SIGNAL] HIGH | 2PuWgsCj | score=66
-[SCORE-BREAKDOWN] $QUOTA combined=12 raw=32(liq10+bp16+vol0+px-10+tx6+age0+bp1h3+fdv5=30/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=-13.2% volMom=0.39 bp5m=0.69 ageS=8561 liq=$12201
-[GOLD-ENTRY] SKIP $QUOTA — score 73 < 80 mode=none
-[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
-[GOLD-SIGNAL] HIGH | CzigqJ9h | score=67
-[SCORE-BREAKDOWN] $SUPERMAN combined=23 raw=43(liq15+bp13+vol0+px-3+tx10+age0+bp1h1+fdv5=41/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-20(mc0/age-8/px0/flat-12) | drivers: px5m=-2.8% volMom=0.26 bp5m=0.63 ageS=105688 liq=$86707
-[GOLD-ENTRY] SKIP $SUPERMAN — score 74 < 80 mode=none
-[GOLD-TRENDING] HIGH | 2aQKC1xi | score=55
-[SCORE-BREAKDOWN] $Udin combined=13 raw=41(liq12+bp13+vol0+px5+tx4+age0+bp1h0+fdv5=39/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=1.8% volMom=0.12 bp5m=0.64 ageS=100597 liq=$32454
-[GOLD-ENTRY] SKIP $Udin — score 61 < 80 mode=none
-[GOLD-TRENDING] HIGH | HHSnURXU | score=52
-[SCORE-BREAKDOWN] $STYRA combined=17 raw=33(liq12+bp0+vol0+px10+tx4+age0+bp1h0+fdv5=31/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-16(mc-8/age-8/px0/flat0) | drivers: px5m=5.6% volMom=0.28 bp5m=0.46 ageS=145422 liq=$26222
-[GOLD-ENTRY] SKIP $STYRA — score 57 < 80 mode=none
-[HELIUS-TAPE] AP6vhU whales=10 netBuy=4 netSell=5 wash=0 bundleSlots=0 (txs=41)
+[ML-DIAG] batch http=200 sent=16 got=16 first={"pump_probability":0.5900000000000001,"dump_risk":0.4099999999999999,"raw_probability":0.5900000000000001,"penalties":["ml_uncalibrated(raw=0.002)"],"model_version":"heuristic_ove
+[SCORE-BREAKDOWN] $MURAD combined=19 raw=48(liq12+bp13+vol6+px-5+tx10+age0+bp1h5+fdv5=46/95) ml=59(adj47 dump41%) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=-4.5% volMom=1.03 bp5m=0.64 ageS=81770 liq=$29443
+[SCORE-BREAKDOWN] $Vulland combined=31 raw=47(liq12+bp20+vol3+px-10+tx10+age0+bp1h5+fdv5=45/95) ml=66(adj55 dump34%) sm=0 wh=0 pen=-20(mc0/age-8/px0/flat-12) | drivers: px5m=-20.9% volMom=0.89 bp5m=0.89 ageS=45480 liq=$46928
+[SCORE-BREAKDOWN] $TOLY combined=0 raw=25(liq12+bp0+vol3+px-1+tx4+age0+bp1h1+fdv5=24/95) ml=19(adj11 dump82%) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=-0.2% volMom=0.93 bp5m=0.31 ageS=51478 liq=$35984
+[SCORE-BREAKDOWN] $DYM combined=30 raw=54(liq12+bp5+vol3+px15+tx10+age0+bp1h1+fdv5=51/95) ml=23(adj14 dump77%) sm=0 wh=0 pen=-4(mc-8/age0/px4/flat0) | drivers: px5m=17.5% volMom=0.95 bp5m=0.55 ageS=9546 liq=$31678
+[SCORE-BREAKDOWN] $HIM combined=52 raw=69(liq15+bp10+vol12+px15+tx8+age0+bp1h1+fdv5=66/95) ml=56(adj44 dump44%) sm=0 wh=0 pen=-4(mc0/age-8/px4/flat0) | drivers: px5m=17.4% volMom=2.41 bp5m=0.57 ageS=70916 liq=$58218
+[SCORE-BREAKDOWN] $ALON combined=15 raw=32(liq15+bp0+vol15+px-9+tx4+age0+bp1h0+fdv5=30/95) ml=23(adj14 dump78%) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=-8.4% volMom=3.77 bp5m=0.47 ageS=65833 liq=$68772
+[SCORE-BREAKDOWN] $OCCAM combined=23 raw=48(liq15+bp5+vol12+px2+tx8+age0+bp1h1+fdv3=46/95) ml=23(adj14 dump77%) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=0.9% volMom=2.19 bp5m=0.53 ageS=52842 liq=$175621
+[SCORE-BREAKDOWN] $VITALY combined=7 raw=57(liq12+bp13+vol9+px5+tx10+age0+bp1h0+fdv5=54/95) ml=21(adj13 dump79%) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=1.7% volMom=1.83 bp5m=0.61 ageS=85522 liq=$42553
+[SCORE-BREAKDOWN] $Horseradish combined=7 raw=40(liq12+bp5+vol0+px5+tx10+age0+bp1h1+fdv5=38/95) ml=24(adj15 dump76%) sm=0 wh=0 pen=-20(mc0/age-8/px0/flat-12) | drivers: px5m=1.9% volMom=0.46 bp5m=0.52 ageS=39117 liq=$49236
+[SCORE-BREAKDOWN] $HOPE combined=0 raw=43(liq12+bp13+vol6+px-2+tx4+age0+bp1h3+fdv5=41/95) ml=21(adj13 dump79%) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=-1.0% volMom=1.15 bp5m=0.60 ageS=51140 liq=$40323
+[SCORE-BREAKDOWN] $Bool combined=22 raw=53(liq12+bp0+vol9+px15+tx8+age0+bp1h1+fdv5=50/95) ml=23(adj14 dump78%) sm=0 wh=0 pen=-12(mc-8/age-8/px4/flat0) | drivers: px5m=15.8% volMom=1.77 bp5m=0.39 ageS=24611 liq=$30454
+[SCORE-BREAKDOWN] $FABLE combined=0 raw=25(liq12+bp0+vol9+px-10+tx8+age0+bp1h0+fdv5=24/95) ml=19(adj11 dump82%) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=-25.7% volMom=1.58 bp5m=0.27 ageS=7615 liq=$45619
+[SCORE-BREAKDOWN] $skew combined=37 raw=55(liq12+bp10+vol15+px-4+tx10+age4+bp1h0+fdv5=52/95) ml=48(adj36 dump52%) sm=0 wh=0 pen=-8(mc-8/age0/px0/flat0) | drivers: px5m=-3.9% volMom=3.40 bp5m=0.55 ageS=1518 liq=$22637
+[SCORE-BREAKDOWN] $Figgleton combined=0 raw=22(liq10+bp0+vol3+px-10+tx10+age2+bp1h1+fdv5=21/95) ml=19(adj11 dump82%) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=-30.8% volMom=0.55 bp5m=0.50 ageS=2603 liq=$15867
+[SCORE-BREAKDOWN] $hood combined=0 raw=13(liq10+bp0+vol0+px-10+tx6+age0+bp1h1+fdv5=12/95) ml=19(adj11 dump82%) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=-11.2% volMom=0.24 bp5m=0.32 ageS=8578 liq=$11849
+[SCORE-BREAKDOWN] $MeiMei combined=41 raw=60(liq15+bp0+vol12+px15+tx10+age0+bp1h0+fdv5=57/95) ml=51(adj39 dump49%) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=75.4% volMom=2.72 bp5m=0.40 ageS=64087 liq=$56079
+[HELIUS-TAPE] FfpUuX whales=10 netBuy=6 netSell=3 wash=5 bundleSlots=3 BUNDLE (txs=96)
+[HELIUS-TAPE] hZ5KWo whales=10 netBuy=5 netSell=5 wash=5 bundleSlots=31 BUNDLE (txs=100)
 [BIRDKEY] No Birdeye API keys found. Set BIRDEYE_API_KEY_1, _2, etc. in .env
-[SCORE-BREAKDOWN] $Vulland combined=70 raw=67(liq15+bp20+vol12+px-3+tx10+age0+bp1h5+fdv5=64/95) ml=74(adj64 dump26%) sm=0 wh=12 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=-2.5% volMom=2.64 bp5m=0.80 ageS=41030 liq=$57673
-[SCORE-BREAKDOWN] $ZAYED combined=59 raw=61(liq12+bp20+vol12+px-4+tx8+age0+bp1h5+fdv5=58/95) ml=74(adj64 dump26%) sm=0 wh=12 pen=-16(mc-8/age-8/px0/flat0) | drivers: px5m=-3.6% volMom=2.94 bp5m=0.82 ageS=60372 liq=$27456
-[SCORE-BREAKDOWN] $HOPE combined=25 raw=57(liq12+bp20+vol6+px2+tx4+age0+bp1h5+fdv5=54/95) ml=75(adj66 dump25%) sm=0 wh=-8 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=0.9% volMom=1.02 bp5m=0.78 ageS=46690 liq=$44202
-[SCORE-BREAKDOWN] $hood combined=58 raw=56(liq10+bp10+vol0+px15+tx10+age0+bp1h3+fdv5=53/95) ml=56(adj44 dump44%) sm=0 wh=12 pen=-4(mc-8/age0/px4/flat0) | drivers: px5m=27.4% volMom=0.29 bp5m=0.56 ageS=4128 liq=$10432
-[DIAG-SCOREWALL] top5 (pre-safety): #1 $Vulland score=70 mode=HWR bp5m=0.80 px5m=-2.46 volMom=2.64 liq=57673 age=41030s mlScore=74 rej=[]  ||  #2 $ZAYED score=59 mode=HWR bp5m=0.82 px5m=-3.61 volMom=2.94 liq=27456 age=60372s mlScore=74 rej=[]  ||  #3 $hood score=58 mode=MG bp5m=0.56 px5m=27.40 volMom=0.29 liq=10432 age=4128s mlScore=56 rej=[]  ||  #4 $HOPE score=25 mode=none bp5m=0.78 px5m=0.86 volMom=1.02 liq=44202 age=46690s mlScore=75 rej=[score too low, age > 14400, px5m < 1.2]  ||  #5 $MURAD score=24 mode=none bp5m=0.71 px5m=2.43 volMom=0.67 liq=38957 age=77313s mlScore=60 rej=[score too low, age > 14400]
-[SAFETY] $Vulland rugScore=1 rugScoreNorm=1 freeze=false mint=false veto=none
-[SCAN] Funnel: seen=1159 -> cutLiq=291 cutVol=655 cutAge=154 cutPrice=0 cutVolZero=0 cutHoneypot=2 cutTooNew=0 | survived=46 deduped=11 scored=11
-[SCAN] Discovery: 11 candidates found.
-[REGIME] Cold feed — standing down on new entries (hotRunners=1/2 @≥12% & $300 & bp0.55, peak5m=27.4% < 35%). Open positions still managed.
+[SCORE-BREAKDOWN] $Vulland combined=31 raw=47(liq12+bp20+vol3+px-10+tx10+age0+bp1h5+fdv5=45/95) ml=66(adj55 dump34%) sm=0 wh=0 pen=-20(mc0/age-8/px0/flat-12) | drivers: px5m=-20.9% volMom=0.89 bp5m=0.89 ageS=45482 liq=$46928
+[SCORE-BREAKDOWN] $HIM combined=70 raw=69(liq15+bp10+vol12+px15+tx8+age0+bp1h1+fdv5=66/95) ml=56(adj44 dump44%) sm=0 wh=18 pen=-4(mc0/age-8/px4/flat0) | drivers: px5m=17.4% volMom=2.41 bp5m=0.57 ageS=70918 liq=$58218
+[DIAG-SCOREWALL] top5 (pre-safety): #1 $HIM score=70 mode=MG bp5m=0.57 px5m=17.37 volMom=2.41 liq=58218 age=70918s mlScore=56 rej=[]  ||  #2 $MeiMei score=41 mode=none bp5m=0.40 px5m=75.36 volMom=2.72 liq=56079 age=64087s mlScore=51 rej=[age > 14400, px5m > 40 (chase), hwrBp5m < 0.55, bp1h < 0.51]  ||  #3 $skew score=37 mode=none bp5m=0.55 px5m=-3.93 volMom=3.40 liq=22637 age=1518s mlScore=48 rej=[px5m < 1.2, bp1h < 0.51]  ||  #4 $Vulland score=31 mode=HWR bp5m=0.89 px5m=-20.86 volMom=0.89 liq=46928 age=45482s mlScore=66 rej=[]  ||  #5 $DYM score=30 mode=none bp5m=0.55 px5m=17.51 volMom=0.95 liq=31678 age=9546s mlScore=23 rej=[score too low, hwrBp5m < 0.55]
+[SAFETY] $HIM rugScore=17794 rugScoreNorm=58 freeze=false mint=false veto=Single holder ownership
+[SAFETY-VETO] $HIM HARD-VETO on risk flag: Single holder ownership
+[PRESCREEN] Dropped top candidate $HIM — rugcheck_veto_single_holder_ownership
+[SCAN] Funnel: seen=1172 -> cutLiq=305 cutVol=647 cutAge=151 cutPrice=0 cutVolZero=0 cutHoneypot=2 cutTooNew=0 | survived=66 deduped=16 scored=15
+[SCAN] Discovery: 15 candidates found.
+[REGIME] Runner regime ON — hotRunners=0, peak5m=75.4%. Entries enabled.
+[SCORE-BREAKDOWN] $MeiMei combined=52 raw=60(liq15+bp0+vol12+px15+tx10+age0+bp1h0+fdv5=57/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=69.7% volMom=2.66 bp5m=0.38 ageS=64090 liq=$55149
+[SCORE_GATE] SKIP $MeiMei — Score: 41 (Min: 80) | Mode: none (Reason: age > 14400, px5m > 40 (chase), hwrBp5m < 0.55, bp1h < 0.51) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $skew combined=44 raw=52(liq12+bp5+vol15+px-2+tx10+age4+bp1h0+fdv5=49/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-8(mc-8/age0/px0/flat0) | drivers: px5m=-1.0% volMom=3.54 bp5m=0.55 ageS=1521 liq=$22974
+[SCORE-LATCH] $skew - reconciled degraded entry re-score 36 -> authoritative same-cycle scan 37 (entry pass drops smart-money/whale + re-rolls ML). mode=none ml=48
+[SCORE_GATE] SKIP $skew — Score: 37 (Min: 80) | Mode: none (Reason: px5m < 1.2, hwrBp5m < 0.55, bp1h < 0.51) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $Vulland combined=27 raw=47(liq12+bp20+vol3+px-10+tx10+age0+bp1h5+fdv5=45/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-20(mc0/age-8/px0/flat-12) | drivers: px5m=-22.3% volMom=0.85 bp5m=0.88 ageS=45483 liq=$46498
+[SCORE_GATE] SKIP $Vulland — Score: 31 (Min: 80) | Mode: none (Reason: score too low, age > 14400, px5m < 1.2) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $DYM combined=50 raw=54(liq12+bp5+vol3+px15+tx10+age0+bp1h1+fdv5=51/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-4(mc-8/age0/px4/flat0) | drivers: px5m=17.5% volMom=0.95 bp5m=0.55 ageS=9550 liq=$31678
+[SCORE_GATE] SKIP $DYM — Score: 30 (Min: 80) | Mode: MG | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $OCCAM combined=40 raw=48(liq15+bp5+vol12+px2+tx8+age0+bp1h1+fdv3=46/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=0.2% volMom=2.13 bp5m=0.51 ageS=52846 liq=$174989
+[SCORE_GATE] SKIP $OCCAM — Score: 23 (Min: 80) | Mode: none (Reason: age > 14400, px5m < 1.2, hwrBp5m < 0.55, bp1h < 0.51) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $Bool combined=42 raw=54(liq12+bp0+vol9+px15+tx10+age0+bp1h0+fdv5=51/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-12(mc-8/age-8/px4/flat0) | drivers: px5m=14.8% volMom=1.79 bp5m=0.34 ageS=24615 liq=$30313
+[SCORE_GATE] SKIP $Bool — Score: 22 (Min: 80) | Mode: MG | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $MURAD combined=19 raw=47(liq12+bp13+vol6+px-6+tx10+age0+bp1h5+fdv5=45/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=-5.9% volMom=1.08 bp5m=0.62 ageS=81774 liq=$29243
+[SCORE_GATE] SKIP $MURAD — Score: 19 (Min: 80) | Mode: none (Reason: score too low, age > 14400, px5m < 1.2) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $ALON combined=29 raw=37(liq15+bp5+vol15+px-9+tx4+age0+bp1h0+fdv5=35/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=-8.5% volMom=3.77 bp5m=0.50 ageS=65838 liq=$68754
+[SCORE_GATE] SKIP $ALON — Score: 18 (Min: 80) | Mode: none (Reason: score too low, age > 14400, px5m < 1.2, hwrBp5m < 0.55, bp1h < 0.51) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $VITALY combined=29 raw=57(liq12+bp13+vol9+px5+tx10+age0+bp1h0+fdv5=54/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=1.8% volMom=1.83 bp5m=0.61 ageS=85527 liq=$42561
+[SCORE_GATE] SKIP $VITALY — Score: 7 (Min: 80) | Mode: none (Reason: score too low, age > 14400, bp1h < 0.51) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $Horseradish combined=20 raw=40(liq12+bp5+vol0+px5+tx10+age0+bp1h1+fdv5=38/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-20(mc0/age-8/px0/flat-12) | drivers: px5m=1.9% volMom=0.46 bp5m=0.52 ageS=39122 liq=$49236
+[SCORE_GATE] SKIP $Horseradish — Score: 7 (Min: 80) | Mode: none (Reason: score too low, age > 14400, hwrBp5m < 0.55) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $TOLY combined=0 raw=25(liq12+bp0+vol3+px-1+tx4+age0+bp1h1+fdv5=24/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=-0.1% volMom=0.95 bp5m=0.35 ageS=51483 liq=$35981
+[SCORE_GATE] SKIP $TOLY — Score: 0 (Min: 80) | Mode: none (Reason: score too low, age > 14400, px5m < 1.2, hwrBp5m < 0.55) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $HOPE combined=15 raw=43(liq12+bp13+vol6+px-2+tx4+age0+bp1h3+fdv5=41/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=-1.0% volMom=1.15 bp5m=0.60 ageS=51145 liq=$40323
+[SCORE_GATE] SKIP $HOPE — Score: 0 (Min: 80) | Mode: none (Reason: score too low, age > 14400, px5m < 1.2) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $FABLE combined=5 raw=25(liq12+bp0+vol9+px-10+tx8+age0+bp1h0+fdv5=24/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=-25.7% volMom=1.58 bp5m=0.27 ageS=7621 liq=$45619
+[SCORE_GATE] SKIP $FABLE — Score: 0 (Min: 80) | Mode: none (Reason: score too low, px5m < 1.2, hwrBp5m < 0.55, bp1h < 0.51) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $Figgleton combined=2 raw=22(liq10+bp0+vol3+px-10+tx10+age2+bp1h1+fdv5=21/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=-36.6% volMom=0.59 bp5m=0.49 ageS=2609 liq=$15191
+[SCORE_GATE] SKIP $Figgleton — Score: 0 (Min: 80) | Mode: none (Reason: score too low, px5m < 1.2, hwrBp5m < 0.55) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $hood combined=0 raw=13(liq10+bp0+vol0+px-10+tx6+age0+bp1h1+fdv5=12/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=-11.2% volMom=0.24 bp5m=0.32 ageS=8584 liq=$11849
+[SCORE_GATE] SKIP $hood — Score: 0 (Min: 80) | Mode: none (Reason: score too low, px5m < 1.2, hwrBp5m < 0.55) | Size: 0.0050 (Min: 0.005)
 [GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
 [DEBUG] currentBalance: 0.03, isMicroWallet: true
 [SCAN] Micro-Wallet Mode Active (Bal: 0.0300 SOL)
 [FETCHER-PATCH] old-profit funnel active | liq>=1000 vol5m>=500 minAge=0s minSells=2
 [GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
-[HELIUS-TAPE] 498DeY whales=10 netBuy=5 netSell=5 wash=0 bundleSlots=2 (txs=27)
-[GOLD-ENTRY] ENTERING $FABLE | size=0.0050 SOL | score=88 | gold=LEGENDARY (80) | liq=$30575
-[GOLD-ENTRY] PAPER ENTER $FABLE size=0.0050 SOL score=88
-[LIFECYCLE:HOLD] id=#10998 $FABLE | age: 1s | pnl: -1.67% | peak: 0.00% | price: $0.00015900 | mode: SNIPER
 [GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[GMGN] error: Command failed: gmgn-cli market trenches --chain sol --type near_completion --launchpad-platform Pump.fun --launchpad-platform letsbonk --min-smart-degen-count 2 --max-creator-created-count 5 --max-in
 [GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[GOLD-SIGNAL] LEGENDARY | 498DeYRS | score=75
+[SCORE-BREAKDOWN] $FABLE combined=20 raw=28(liq12+bp0+vol12+px-10+tx8+age0+bp1h0+fdv5=27/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-8(mc-8/age0/px0/flat0) | drivers: px5m=-29.3% volMom=2.22 bp5m=0.25 ageS=7642 liq=$44506
+[GOLD-ENTRY] SKIP $FABLE — rolling over (bp5m=0.25 pc5m=-29.3%)
 [GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[GOLD-TRENDING] HIGH | CzigqJ9h | score=67
+[SCORE-BREAKDOWN] $SUPERMAN combined=23 raw=43(liq15+bp10+vol3+px-3+tx8+age0+bp1h3+fdv5=41/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-20(mc0/age-8/px0/flat-12) | drivers: px5m=-2.3% volMom=0.56 bp5m=0.57 ageS=110173 liq=$86480
+[GOLD-ENTRY] SKIP $SUPERMAN — score 74 < 80 mode=none
+[GOLD-TRENDING] HIGH | 2aQKC1xi | score=55
+[SCORE-BREAKDOWN] $Udin combined=0 raw=24(liq12+bp5+vol0+px-6+tx6+age0+bp1h1+fdv5=23/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=-5.8% volMom=0.45 bp5m=0.55 ageS=105082 liq=$31774
 [GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
-[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
-[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
-[SCANNER-QUEUE] Tracking 0 fast scanner tokens via free API (Waiting for $10k breakout)
-[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
-[SRC-XTRA] quality-only union=78 | jupVerified=60 jupTop=50 gkVol=0 (verified-set size=56, offset=4)
-[QUALITY] in=48 pass=40 jupVerified=0 cuts: notVerified=0 tooYoung=8 | flags: REQUIRE_VERIFIED=false MIN_AGE_MIN=5
-[SCORE-BREAKDOWN] $MURAD combined=24 raw=56(liq12+bp20+vol3+px2+tx8+age0+bp1h3+fdv5=53/95) ml=60(adj48 dump40%) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=0.3% volMom=0.81 bp5m=0.78 ageS=77360 liq=$38558
-[SCORE-BREAKDOWN] $Vulland combined=58 raw=68(liq15+bp20+vol12+px-2+tx10+age0+bp1h5+fdv5=65/95) ml=74(adj64 dump26%) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=-1.4% volMom=2.67 bp5m=0.80 ageS=41070 liq=$57974
-[SCORE-BREAKDOWN] $ZAYED combined=56 raw=72(liq12+bp16+vol9+px15+tx6+age0+bp1h5+fdv5=68/95) ml=74(adj64 dump26%) sm=0 wh=0 pen=-12(mc-8/age-8/px4/flat0) | drivers: px5m=10.4% volMom=1.85 bp5m=0.71 ageS=60412 liq=$27831
-[SCORE-BREAKDOWN] $bull combined=0 raw=22(liq12+bp0+vol9+px-5+tx0+age0+bp1h0+fdv5=21/95) ml=19(adj11 dump82%) sm=0 wh=0 pen=-20(mc0/age-8/px0/flat-12) | drivers: px5m=-4.6% volMom=1.60 bp5m=0.33 ageS=70466 liq=$44911
-[SCORE-BREAKDOWN] $DYM combined=7 raw=43(liq12+bp5+vol3+px5+tx10+age0+bp1h1+fdv5=41/95) ml=19(adj11 dump81%) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=2.9% volMom=0.89 bp5m=0.54 ageS=5136 liq=$24810
-[SCORE-BREAKDOWN] $Horseradish combined=0 raw=26(liq12+bp0+vol0+px-1+tx8+age0+bp1h1+fdv5=25/95) ml=19(adj11 dump82%) sm=0 wh=0 pen=-20(mc0/age-8/px0/flat-12) | drivers: px5m=-0.1% volMom=0.46 bp5m=0.36 ageS=34707 liq=$48079
-[SCORE-BREAKDOWN] $HOPE combined=23 raw=48(liq12+bp16+vol6+px-4+tx6+age0+bp1h5+fdv5=46/95) ml=66(adj55 dump34%) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=-3.9% volMom=1.34 bp5m=0.73 ageS=46730 liq=$43145
-[SCORE-BREAKDOWN] $Bool combined=0 raw=35(liq12+bp5+vol6+px-6+tx10+age0+bp1h1+fdv5=33/95) ml=19(adj11 dump82%) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=-5.4% volMom=1.01 bp5m=0.50 ageS=20201 liq=$29102
-[SCORE-BREAKDOWN] $hood combined=46 raw=56(liq10+bp10+vol0+px15+tx10+age0+bp1h3+fdv5=53/95) ml=56(adj44 dump44%) sm=0 wh=0 pen=-4(mc-8/age0/px4/flat0) | drivers: px5m=35.4% volMom=0.31 bp5m=0.57 ageS=4168 liq=$10748
-[SCORE-BREAKDOWN] $CASHCAT combined=20 raw=39(liq10+bp13+vol6+px-10+tx10+age0+bp1h3+fdv5=37/95) ml=53(adj41 dump47%) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=-27.1% volMom=1.24 bp5m=0.63 ageS=5295 liq=$11348
-[SCORE-BREAKDOWN] $FABLE combined=18 raw=41(liq12+bp10+vol9+px-10+tx10+age0+bp1h3+fdv5=39/95) ml=48(adj36 dump52%) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=-9.7% volMom=1.81 bp5m=0.59 ageS=7709 liq=$31783
-[SCORE-BREAKDOWN] $Vulland combined=70 raw=68(liq15+bp20+vol12+px-2+tx10+age0+bp1h5+fdv5=65/95) ml=74(adj64 dump26%) sm=0 wh=12 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=-1.4% volMom=2.67 bp5m=0.80 ageS=41070 liq=$57974
-[SCORE-BREAKDOWN] $ZAYED combined=68 raw=72(liq12+bp16+vol9+px15+tx6+age0+bp1h5+fdv5=68/95) ml=74(adj64 dump26%) sm=0 wh=12 pen=-12(mc-8/age-8/px4/flat0) | drivers: px5m=10.4% volMom=1.85 bp5m=0.71 ageS=60412 liq=$27831
-[SCORE-BREAKDOWN] $hood combined=58 raw=56(liq10+bp10+vol0+px15+tx10+age0+bp1h3+fdv5=53/95) ml=56(adj44 dump44%) sm=0 wh=12 pen=-4(mc-8/age0/px4/flat0) | drivers: px5m=35.4% volMom=0.31 bp5m=0.57 ageS=4168 liq=$10748
-[DIAG-SCOREWALL] top5 (pre-safety): #1 $Vulland score=70 mode=HWR bp5m=0.80 px5m=-1.38 volMom=2.67 liq=57974 age=41070s mlScore=74 rej=[]  ||  #2 $ZAYED score=68 mode=MG bp5m=0.71 px5m=10.37 volMom=1.85 liq=27831 age=60412s mlScore=74 rej=[]  ||  #3 $hood score=58 mode=MG bp5m=0.57 px5m=35.35 volMom=0.31 liq=10748 age=4168s mlScore=56 rej=[]  ||  #4 $MURAD score=24 mode=none bp5m=0.78 px5m=0.26 volMom=0.81 liq=38558 age=77360s mlScore=60 rej=[score too low, age > 14400, px5m < 1.2]  ||  #5 $HOPE score=23 mode=none bp5m=0.73 px5m=-3.91 volMom=1.34 liq=43145 age=46730s mlScore=66 rej=[score too low, age > 14400, px5m < 1.2]
-[SCAN] Funnel: seen=1189 -> cutLiq=296 cutVol=670 cutAge=172 cutPrice=0 cutVolZero=0 cutHoneypot=3 cutTooNew=0 | survived=40 deduped=11 scored=11
-[SCAN] Discovery: 11 candidates found.
-[REGIME] Runner regime ON — hotRunners=1, peak5m=35.4%. Entries enabled.
-[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
-[SCORE-BREAKDOWN] $Vulland combined=59 raw=67(liq15+bp20+vol12+px-3+tx10+age0+bp1h5+fdv5=64/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=-2.5% volMom=2.70 bp5m=0.80 ageS=41070 liq=$57634
-[SCORE_GATE] SKIP $Vulland — Score: 58 (Min: 80) | Mode: HWR | Size: 0.0050 (Min: 0.005)
-[SCORE-BREAKDOWN] $ZAYED combined=60 raw=72(liq12+bp16+vol9+px15+tx6+age0+bp1h5+fdv5=68/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-12(mc-8/age-8/px4/flat0) | drivers: px5m=10.8% volMom=1.76 bp5m=0.70 ageS=60413 liq=$27831
-[SCORE_GATE] SKIP $ZAYED — Score: 56 (Min: 80) | Mode: MG | Size: 0.0050 (Min: 0.005)
-[SCORE-BREAKDOWN] $hood combined=52 raw=56(liq10+bp10+vol0+px15+tx10+age0+bp1h3+fdv5=53/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-4(mc-8/age0/px4/flat0) | drivers: px5m=33.8% volMom=0.27 bp5m=0.59 ageS=4169 liq=$10696
-[SCORE_GATE] SKIP $hood — Score: 46 (Min: 80) | Mode: MG | Size: 0.0050 (Min: 0.005)
-[SCORE-BREAKDOWN] $MURAD combined=19 raw=47(liq12+bp20+vol0+px-3+tx8+age0+bp1h3+fdv5=45/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=-2.4% volMom=0.49 bp5m=0.79 ageS=77361 liq=$38588
-[SCORE_GATE] SKIP $MURAD — Score: 20 (Min: 80) | Mode: none (Reason: score too low, age > 14400, px5m < 1.2) | Size: 0.0050 (Min: 0.005)
-[SCORE-BREAKDOWN] $HOPE combined=20 raw=48(liq12+bp16+vol6+px-4+tx6+age0+bp1h5+fdv5=46/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=-3.9% volMom=1.34 bp5m=0.71 ageS=46731 liq=$43138
-[SCORE_GATE] SKIP $HOPE — Score: 23 (Min: 80) | Mode: none (Reason: score too low, age > 14400, px5m < 1.2) | Size: 0.0050 (Min: 0.005)
-[SCORE-BREAKDOWN] $CASHCAT combined=19 raw=39(liq10+bp13+vol6+px-10+tx10+age0+bp1h3+fdv5=37/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=-25.4% volMom=1.22 bp5m=0.63 ageS=5296 liq=$11062
-[SCORE_GATE] SKIP $CASHCAT — Score: 20 (Min: 80) | Mode: none (Reason: score too low, px5m < 1.2) | Size: 0.0050 (Min: 0.005)
-[GATE] SKIP $FABLE — Re-entry delay active.
-[SCORE-BREAKDOWN] $DYM combined=23 raw=43(liq12+bp5+vol3+px5+tx10+age0+bp1h1+fdv5=41/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=2.9% volMom=0.89 bp5m=0.54 ageS=5138 liq=$24810
-[SCORE_GATE] SKIP $DYM — Score: 7 (Min: 80) | Mode: none (Reason: score too low, hwrBp5m < 0.55) | Size: 0.0050 (Min: 0.005)
-[SCORE-BREAKDOWN] $bull combined=2 raw=22(liq12+bp0+vol9+px-5+tx0+age0+bp1h0+fdv5=21/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-20(mc0/age-8/px0/flat-12) | drivers: px5m=-4.6% volMom=1.60 bp5m=0.33 ageS=70468 liq=$44911
-[SCORE_GATE] SKIP $bull — Score: 0 (Min: 80) | Mode: none (Reason: score too low, age > 14400, px5m < 1.2, tx5m < 8, hwrBp5m < 0.55, bp1h < 0.51) | Size: 0.0050 (Min: 0.005)
-[SCORE-BREAKDOWN] $Horseradish combined=11 raw=31(liq12+bp0+vol0+px5+tx6+age0+bp1h1+fdv5=29/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-20(mc0/age-8/px0/flat-12) | drivers: px5m=1.9% volMom=0.33 bp5m=0.38 ageS=34710 liq=$48079
-[SCORE_GATE] SKIP $Horseradish — Score: 1 (Min: 80) | Mode: none (Reason: score too low, age > 14400, hwrBp5m < 0.55) | Size: 0.0050 (Min: 0.005)
-[SCORE-BREAKDOWN] $Bool combined=5 raw=33(liq12+bp5+vol3+px-3+tx8+age0+bp1h1+fdv5=31/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=-2.2% volMom=0.86 bp5m=0.52 ageS=20204 liq=$29292
-[SCORE_GATE] SKIP $Bool — Score: 0 (Min: 80) | Mode: none (Reason: score too low, age > 14400, px5m < 1.2, hwrBp5m < 0.55, bp1h < 0.51) | Size: 0.0050 (Min: 0.005)
-[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
-[HELIUS-TAPE] swap fetch failed for 498DeYRS7AtLdE5wbwXbpFtinMTDTJxuvfXMraDDpump: The operation was aborted due to timeout
-[DEBUG] currentBalance: 0.024999999999999998, isMicroWallet: true
-[SCAN] Micro-Wallet Mode Active (Bal: 0.0250 SOL)
-[FETCHER-PATCH] old-profit funnel active | liq>=1000 vol5m>=500 minAge=0s minSells=2
-[GMGN] error: Command failed: gmgn-cli market signal --chain sol --groups "[{\"signal_type\":[11,12],\"mc_min\":20000,\"mc_max\":10000000}]" --raw
-[gmgn-cli] POST /v1/market/token_signal fetch failed: ConnectTimeou
-[GMGN-DEBUG] signal poll: 0 type-11/12 signal(s) parsed
-[GMGN] error: Command failed: gmgn-cli token info --chain sol --address 32SXUJ1SKDGsQe1XWrqZS6U69dBwtHumx7DTUwzhpump --raw
-[gmgn-cli] GET /v1/token/info fetch failed: ConnectTimeoutError: Connect Timeout Error (att
-[GMGN] error: Command failed: gmgn-cli token info --chain sol --address 9L2GBHGpTS8Ct2FwpW9XTon8hJfEysMPYTK2LDqZpump --raw
-[gmgn-cli] GET /v1/token/info fetch failed: ConnectTimeoutError: Connect Timeout Error (att
-[GMGN] error: Command failed: gmgn-cli market trenches --chain sol --type completed --launchpad-platform Pump.fun --launchpad-platform letsbonk --min-smart-degen-count 2 --max-creator-created-count 10 --min-holder-
-[GMGN] error: Command failed: gmgn-cli token info --chain sol --address 2hci7YELD2n8JREvP3LXbPJSx1rJnDb9fBZyP6iUpump --raw
-
-[LIFECYCLE:HOLD] id=#10998 $FABLE | age: 58s | pnl: -1.67% | peak: 0.00% | price: $0.00015900 | mode: SNIPER
-[GMGN] error: Command failed: gmgn-cli token info --chain sol --address EPD8jj7bVhNh3o7Wx1XZ39aaacSki8p2ABaN61yhUnBh --raw
-[gmgn-cli] GET /v1/token/info fetch failed: ConnectTimeoutError: Connect Timeout Error (att
-[GOLD HUNTER] 🏆 1 signals | LEGENDARY: 0 | HIGH: 1
-[DIAG-COSTGATE] $FABLE mid pnl +3.77% < round-trip floor 8.02% (modeled 3.76% x2) -> HOLDING (won't crystallize a sub-cost profit)
-[GMGN] error: Command failed: gmgn-cli market signal --chain sol --groups "[{\"signal_type\":[11,12],\"mc_min\":20000,\"mc_max\":10000000}]" --raw
-[gmgn-cli] POST /v1/market/token_signal fetch failed: ConnectTimeou
-[GMGN-DEBUG] signal poll: 0 type-11/12 signal(s) parsed
-[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
-[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
-[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[GOLD-ENTRY] SKIP $Udin — score 61 < 80 mode=none
+[GOLD-TRENDING] HIGH | HHSnURXU | score=52
+[SCORE-BREAKDOWN] $STYRA combined=17 raw=33(liq12+bp5+vol15+px-10+tx4+age0+bp1h0+fdv5=31/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-16(mc-8/age-8/px0/flat0) | drivers: px5m=-11.3% volMom=3.73 bp5m=0.50 ageS=149907 liq=$25542
+[GOLD-ENTRY] SKIP $STYRA — score 57 < 80 mode=none
+[GOLD-TRENDING] HIGH | GFGA9S2d | score=62
+[SCORE-BREAKDOWN] $HAHALAND combined=36 raw=52(liq12+bp13+vol3+px10+tx6+age0+bp1h0+fdv5=49/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-16(mc-8/age-8/px0/flat0) | drivers: px5m=6.3% volMom=0.89 bp5m=0.62 ageS=27421 liq=$25631
+[GOLD-ENTRY] SKIP $HAHALAND — score 68 < 80 mode=MG
 [GOLD-TRENDING] HIGH | 2k8ifEcQ | score=73
-[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
-[SCORE-BREAKDOWN] $DYM combined=41 raw=49(liq12+bp5+vol6+px8+tx10+age0+bp1h1+fdv5=47/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-8(mc-8/age0/px0/flat0) | drivers: px5m=5.0% volMom=1.06 bp5m=0.52 ageS=5171 liq=$25058
+[SCORE-BREAKDOWN] $DYM combined=53 raw=57(liq12+bp5+vol6+px15+tx10+age0+bp1h1+fdv5=54/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-4(mc-8/age0/px4/flat0) | drivers: px5m=14.9% volMom=1.04 bp5m=0.54 ageS=9582 liq=$31325
 [GOLD-ENTRY] SKIP $DYM — outside EDGE_POCKET (score=80 gold=HIGH)
-[GOLD HUNTER] 🏆 0 signals | LEGENDARY: 0 | HIGH: 0
-[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
-[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
-[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
-[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
-[LIFECYCLE:HOLD] id=#10998 $FABLE | age: 88s | pnl: 3.77% | peak: 3.77% | price: $0.00016780 | mode: SNIPER
-[DIAG-COSTGATE] $FABLE mid pnl +3.77% < round-trip floor 8.02% (modeled 3.76% x2) -> HOLDING (won't crystallize a sub-cost profit)
 [SCANNER-QUEUE] Tracking 0 fast scanner tokens via free API (Waiting for $10k breakout)
-[PROFIT-LOCK] FABLE floor=2.8pct trig=4.3pct rt=3.8pct (peak=5.88pct)
-[SRC-XTRA] quality-only union=78 | jupVerified=60 jupTop=50 gkVol=0 (verified-set size=56, offset=8)
-[QUALITY] in=40 pass=40 jupVerified=0 cuts: notVerified=0 tooYoung=0 | flags: REQUIRE_VERIFIED=false MIN_AGE_MIN=5
-[PROFIT-LOCK] FABLE floor=2.8pct trig=4.3pct rt=3.8pct (peak=5.88pct)
-[SCORE-BREAKDOWN] $MURAD combined=28 raw=58(liq12+bp20+vol3+px2+tx8+age0+bp1h5+fdv5=55/95) ml=66(adj55 dump34%) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=0.4% volMom=0.95 bp5m=0.81 ageS=77422 liq=$39126
-[SCORE-BREAKDOWN] $Vulland combined=76 raw=86(liq15+bp20+vol12+px15+tx10+age0+bp1h5+fdv5=82/95) ml=82(adj75 dump18%) sm=0 wh=0 pen=-4(mc0/age-8/px4/flat0) | drivers: px5m=10.6% volMom=2.12 bp5m=0.83 ageS=41132 liq=$59304
-[SCORE-BREAKDOWN] $ZAYED combined=56 raw=72(liq12+bp16+vol9+px15+tx6+age0+bp1h5+fdv5=68/95) ml=74(adj64 dump26%) sm=0 wh=0 pen=-12(mc-8/age-8/px4/flat0) | drivers: px5m=10.2% volMom=1.83 bp5m=0.67 ageS=60474 liq=$27759
-[SCORE-BREAKDOWN] $DYM combined=25 raw=54(liq12+bp5+vol6+px12+tx10+age0+bp1h1+fdv5=51/95) ml=21(adj13 dump80%) sm=0 wh=0 pen=-8(mc-8/age0/px0/flat0) | drivers: px5m=8.1% volMom=1.09 bp5m=0.51 ageS=5198 liq=$25426
-[SCORE-BREAKDOWN] $Horseradish combined=0 raw=27(liq12+bp0+vol0+px2+tx6+age0+bp1h1+fdv5=26/95) ml=19(adj11 dump82%) sm=0 wh=0 pen=-20(mc0/age-8/px0/flat-12) | drivers: px5m=0.1% volMom=0.18 bp5m=0.36 ageS=34769 liq=$48177
-[SCORE-BREAKDOWN] $HOPE combined=3 raw=25(liq12+bp5+vol3+px-10+tx4+age0+bp1h5+fdv5=24/95) ml=49(adj37 dump51%) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=-9.6% volMom=0.91 bp5m=0.53 ageS=46792 liq=$43317
-[SCORE-BREAKDOWN] $Bool combined=18 raw=55(liq12+bp5+vol9+px10+tx10+age0+bp1h1+fdv5=52/95) ml=21(adj13 dump80%) sm=0 wh=0 pen=-16(mc-8/age-8/px0/flat0) | drivers: px5m=6.2% volMom=1.63 bp5m=0.52 ageS=20263 liq=$30529
-[SCORE-BREAKDOWN] $hood combined=46 raw=56(liq10+bp10+vol0+px15+tx10+age0+bp1h3+fdv5=53/95) ml=56(adj44 dump44%) sm=0 wh=0 pen=-4(mc-8/age0/px4/flat0) | drivers: px5m=31.4% volMom=0.28 bp5m=0.59 ageS=4230 liq=$10596
-[SCORE-BREAKDOWN] $CASHCAT combined=16 raw=36(liq10+bp10+vol6+px-10+tx10+age0+bp1h3+fdv5=34/95) ml=48(adj36 dump52%) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=-27.8% volMom=1.22 bp5m=0.57 ageS=5357 liq=$10880
-[SCORE-BREAKDOWN] $FABLE combined=18 raw=41(liq12+bp10+vol9+px-10+tx10+age0+bp1h3+fdv5=39/95) ml=48(adj36 dump52%) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=-14.5% volMom=1.85 bp5m=0.59 ageS=7771 liq=$30812
 [GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
-[HELIUS-TAPE] 2pr3yK whales=10 netBuy=7 netSell=3 wash=0 bundleSlots=1 (txs=77)
-[HELIUS-TAPE] hZ5KWo whales=10 netBuy=5 netSell=5 wash=5 bundleSlots=11 BUNDLE (txs=100)
-[HELIUS-TAPE] 6XUkLa whales=10 netBuy=5 netSell=5 wash=5 bundleSlots=7 BUNDLE (txs=96)
-[SCORE-BREAKDOWN] $Vulland combined=76 raw=86(liq15+bp20+vol12+px15+tx10+age0+bp1h5+fdv5=82/95) ml=82(adj75 dump18%) sm=0 wh=0 pen=-4(mc0/age-8/px4/flat0) | drivers: px5m=10.6% volMom=2.12 bp5m=0.83 ageS=41135 liq=$59304
-[SCORE-BREAKDOWN] $ZAYED combined=56 raw=72(liq12+bp16+vol9+px15+tx6+age0+bp1h5+fdv5=68/95) ml=74(adj64 dump26%) sm=0 wh=0 pen=-12(mc-8/age-8/px4/flat0) | drivers: px5m=10.2% volMom=1.83 bp5m=0.67 ageS=60477 liq=$27759
-[SCORE-BREAKDOWN] $hood combined=71 raw=56(liq10+bp10+vol0+px15+tx10+age0+bp1h3+fdv5=53/95) ml=56(adj44 dump44%) sm=0 wh=25 pen=-4(mc-8/age0/px4/flat0) | drivers: px5m=31.4% volMom=0.28 bp5m=0.59 ageS=4233 liq=$10596
-[DIAG-SCOREWALL] top5 (pre-safety): #1 $Vulland score=76 mode=MG bp5m=0.83 px5m=10.64 volMom=2.12 liq=59304 age=41135s mlScore=82 rej=[]  ||  #2 $hood score=71 mode=MG bp5m=0.59 px5m=31.35 volMom=0.28 liq=10596 age=4233s mlScore=56 rej=[]  ||  #3 $ZAYED score=56 mode=MG bp5m=0.67 px5m=10.20 volMom=1.83 liq=27759 age=60477s mlScore=74 rej=[]  ||  #4 $MURAD score=28 mode=none bp5m=0.81 px5m=0.36 volMom=0.95 liq=39126 age=77422s mlScore=66 rej=[score too low, age > 14400, px5m < 1.2]  ||  #5 $DYM score=25 mode=none bp5m=0.51 px5m=8.07 volMom=1.09 liq=25426 age=5198s mlScore=21 rej=[score too low, hwrBp5m < 0.55]
-[SAFETY] $Vulland rugScore=1 rugScoreNorm=1 freeze=false mint=false veto=none
-[PROFIT-LOCK] FABLE floor=2.8pct trig=4.3pct rt=3.8pct (peak=5.88pct)
-[SCAN] Funnel: seen=1110 -> cutLiq=262 cutVol=647 cutAge=161 cutPrice=0 cutVolZero=0 cutHoneypot=0 cutTooNew=0 | survived=40 deduped=10 scored=10
-[SCAN] Discovery: 10 candidates found.
-[REGIME] Cold feed — standing down on new entries (hotRunners=1/2 @≥12% & $300 & bp0.55, peak5m=31.4% < 35%). Open positions still managed.
+[SRC-XTRA] quality-only union=79 | jupVerified=60 jupTop=50 gkVol=0 (verified-set size=53, offset=7)
+[QUALITY] in=69 pass=65 jupVerified=0 cuts: notVerified=0 tooYoung=4 | flags: REQUIRE_VERIFIED=false MIN_AGE_MIN=5
 [GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
 [GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
-[PROFIT-LOCK] FABLE floor=2.8pct trig=4.3pct rt=3.8pct (peak=5.88pct)
-[DEBUG] currentBalance: 0.030293753865182432, isMicroWallet: true
-[SCAN] Micro-Wallet Mode Active (Bal: 0.0303 SOL)
+[SCORE-BREAKDOWN] $MURAD combined=32 raw=56(liq12+bp10+vol3+px8+tx10+age0+bp1h5+fdv5=53/95) ml=53(adj41 dump47%) sm=0 wh=0 pen=-16(mc-8/age-8/px0/flat0) | drivers: px5m=4.3% volMom=0.56 bp5m=0.55 ageS=81811 liq=$29625
+[SCORE-BREAKDOWN] $Vulland combined=31 raw=47(liq12+bp20+vol3+px-10+tx10+age0+bp1h5+fdv5=45/95) ml=66(adj55 dump34%) sm=0 wh=0 pen=-20(mc0/age-8/px0/flat-12) | drivers: px5m=-13.9% volMom=0.82 bp5m=0.91 ageS=45521 liq=$46808
+[SCORE-BREAKDOWN] $TOLY combined=0 raw=31(liq12+bp0+vol3+px2+tx6+age0+bp1h1+fdv5=29/95) ml=19(adj11 dump82%) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=0.4% volMom=0.95 bp5m=0.27 ageS=51519 liq=$35912
+[SCORE-BREAKDOWN] $DYM combined=30 raw=54(liq12+bp5+vol3+px15+tx10+age0+bp1h1+fdv5=51/95) ml=23(adj14 dump77%) sm=0 wh=0 pen=-4(mc-8/age0/px4/flat0) | drivers: px5m=15.4% volMom=0.90 bp5m=0.54 ageS=9587 liq=$31231
+[SCORE-BREAKDOWN] $HIM combined=47 raw=64(liq15+bp5+vol12+px15+tx8+age0+bp1h1+fdv5=61/95) ml=51(adj39 dump49%) sm=0 wh=0 pen=-4(mc0/age-8/px4/flat0) | drivers: px5m=17.1% volMom=2.46 bp5m=0.52 ageS=70957 liq=$58988
+[SCORE-BREAKDOWN] $ALON combined=18 raw=37(liq15+bp5+vol15+px-9+tx4+age0+bp1h0+fdv5=35/95) ml=23(adj14 dump78%) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=-8.2% volMom=4.20 bp5m=0.53 ageS=65874 liq=$68754
+[SCORE-BREAKDOWN] $OCCAM combined=12 raw=51(liq15+bp10+vol9+px2+tx8+age0+bp1h1+fdv3=48/95) ml=21(adj13 dump79%) sm=0 wh=0 pen=-20(mc0/age-8/px0/flat-12) | drivers: px5m=0.7% volMom=1.83 bp5m=0.58 ageS=52883 liq=$175980
+[SCORE-BREAKDOWN] $VITALY combined=0 raw=43(liq12+bp13+vol6+px-5+tx10+age0+bp1h0+fdv5=41/95) ml=21(adj13 dump79%) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=-4.6% volMom=1.27 bp5m=0.61 ageS=85563 liq=$42487
+[SCORE-BREAKDOWN] $Horseradish combined=31 raw=52(liq15+bp0+vol3+px15+tx10+age0+bp1h1+fdv5=49/95) ml=28(adj18 dump72%) sm=0 wh=0 pen=-4(mc0/age-8/px4/flat0) | drivers: px5m=11.3% volMom=0.58 bp5m=0.46 ageS=39158 liq=$50575
+[SCORE-BREAKDOWN] $Bool combined=36 raw=57(liq12+bp0+vol12+px15+tx10+age0+bp1h0+fdv5=54/95) ml=51(adj39 dump49%) sm=0 wh=0 pen=-12(mc-8/age-8/px4/flat0) | drivers: px5m=21.4% volMom=2.07 bp5m=0.40 ageS=24652 liq=$31032
+[SCORE-BREAKDOWN] $FABLE combined=12 raw=26(liq12+bp0+vol12+px-10+tx6+age0+bp1h0+fdv5=25/95) ml=23(adj14 dump78%) sm=0 wh=0 pen=-8(mc-8/age0/px0/flat0) | drivers: px5m=-29.6% volMom=2.17 bp5m=0.04 ageS=7656 liq=$44506
+[SCORE-BREAKDOWN] $skew combined=34 raw=48(liq12+bp10+vol15+px-10+tx10+age4+bp1h0+fdv5=46/95) ml=48(adj36 dump52%) sm=0 wh=0 pen=-8(mc-8/age0/px0/flat0) | drivers: px5m=-13.9% volMom=3.74 bp5m=0.55 ageS=1559 liq=$23348
+[SCORE-BREAKDOWN] $Figgleton combined=0 raw=19(liq10+bp0+vol0+px-10+tx10+age2+bp1h1+fdv5=18/95) ml=19(adj11 dump82%) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=-20.6% volMom=0.50 bp5m=0.48 ageS=2644 liq=$15814
+[SCORE-BREAKDOWN] $hood combined=0 raw=13(liq10+bp0+vol0+px-10+tx6+age0+bp1h1+fdv5=12/95) ml=19(adj11 dump82%) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=-18.7% volMom=0.24 bp5m=0.17 ageS=8619 liq=$11662
+[SCORE-BREAKDOWN] $MeiMei combined=43 raw=63(liq15+bp0+vol15+px15+tx10+age0+bp1h0+fdv5=60/95) ml=51(adj39 dump49%) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=60.6% volMom=3.17 bp5m=0.42 ageS=64128 liq=$53856
+[HELIUS-TAPE] J23oV9 whales=10 netBuy=3 netSell=7 wash=0 bundleSlots=0 (txs=24)
+[SCORE-BREAKDOWN] $Vulland combined=31 raw=47(liq12+bp20+vol3+px-10+tx10+age0+bp1h5+fdv5=45/95) ml=66(adj55 dump34%) sm=0 wh=0 pen=-20(mc0/age-8/px0/flat-12) | drivers: px5m=-13.9% volMom=0.82 bp5m=0.91 ageS=45524 liq=$46808
+[SCORE-BREAKDOWN] $HIM combined=65 raw=64(liq15+bp5+vol12+px15+tx8+age0+bp1h1+fdv5=61/95) ml=51(adj39 dump49%) sm=0 wh=18 pen=-4(mc0/age-8/px4/flat0) | drivers: px5m=17.1% volMom=2.46 bp5m=0.52 ageS=70960 liq=$58988
+[SCORE-BREAKDOWN] $Bool combined=28 raw=57(liq12+bp0+vol12+px15+tx10+age0+bp1h0+fdv5=54/95) ml=51(adj39 dump49%) sm=0 wh=-8 pen=-12(mc-8/age-8/px4/flat0) | drivers: px5m=21.4% volMom=2.07 bp5m=0.40 ageS=24655 liq=$31032
+[DIAG-SCOREWALL] top5 (pre-safety): #1 $HIM score=65 mode=MG bp5m=0.52 px5m=17.09 volMom=2.46 liq=58988 age=70960s mlScore=51 rej=[]  ||  #2 $MeiMei score=43 mode=none bp5m=0.42 px5m=60.60 volMom=3.17 liq=53856 age=64128s mlScore=51 rej=[age > 14400, px5m > 40 (chase), hwrBp5m < 0.55, bp1h < 0.51]  ||  #3 $skew score=34 mode=none bp5m=0.55 px5m=-13.87 volMom=3.74 liq=23348 age=1559s mlScore=48 rej=[score too low, px5m < 1.2, bp1h < 0.51]  ||  #4 $MURAD score=32 mode=none bp5m=0.55 px5m=4.35 volMom=0.56 liq=29625 age=81811s mlScore=53 rej=[score too low, age > 14400]  ||  #5 $Vulland score=31 mode=HWR bp5m=0.91 px5m=-13.92 volMom=0.82 liq=46808 age=45524s mlScore=66 rej=[]
+[PRESCREEN] Dropped top candidate $HIM — rugcheck_veto_single_holder_ownership
+[SCAN] Funnel: seen=1202 -> cutLiq=304 cutVol=671 cutAge=156 cutPrice=0 cutVolZero=0 cutHoneypot=2 cutTooNew=0 | survived=65 deduped=15 scored=14
+[SCAN] Discovery: 14 candidates found.
+[REGIME] Runner regime ON — hotRunners=0, peak5m=60.6%. Entries enabled.
+[SCORE-BREAKDOWN] $MeiMei combined=55 raw=63(liq15+bp0+vol15+px15+tx10+age0+bp1h0+fdv5=60/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=60.6% volMom=3.17 bp5m=0.42 ageS=64132 liq=$53856
+[SCORE_GATE] SKIP $MeiMei — Score: 43 (Min: 80) | Mode: none (Reason: age > 14400, px5m > 40 (chase), hwrBp5m < 0.55, bp1h < 0.51) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $skew combined=40 raw=48(liq12+bp10+vol15+px-10+tx10+age4+bp1h0+fdv5=46/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-8(mc-8/age0/px0/flat0) | drivers: px5m=-16.3% volMom=3.75 bp5m=0.55 ageS=1563 liq=$23016
+[SCORE_GATE] SKIP $skew — Score: 34 (Min: 80) | Mode: none (Reason: px5m < 1.2, bp1h < 0.51) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $MURAD combined=25 raw=53(liq12+bp10+vol3+px5+tx10+age0+bp1h5+fdv5=50/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=2.4% volMom=0.53 bp5m=0.55 ageS=81815 liq=$29353
+[SCORE-LATCH] $MURAD - reconciled degraded entry re-score 19 -> authoritative same-cycle scan 32 (entry pass drops smart-money/whale + re-rolls ML). mode=none ml=53
+[SCORE_GATE] SKIP $MURAD — Score: 32 (Min: 80) | Mode: none (Reason: score too low, age > 14400) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $Vulland combined=27 raw=47(liq12+bp20+vol3+px-10+tx10+age0+bp1h5+fdv5=45/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-20(mc0/age-8/px0/flat-12) | drivers: px5m=-15.0% volMom=0.87 bp5m=0.90 ageS=45525 liq=$46518
+[SCORE_GATE] SKIP $Vulland — Score: 31 (Min: 80) | Mode: none (Reason: score too low, age > 14400, px5m < 1.2) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $Horseradish combined=35 raw=43(liq12+bp5+vol0+px8+tx10+age0+bp1h1+fdv5=41/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=4.4% volMom=0.43 bp5m=0.52 ageS=39162 liq=$48983
+[SCORE-LATCH] $Horseradish - reconciled degraded entry re-score 22 -> authoritative same-cycle scan 31 (entry pass drops smart-money/whale + re-rolls ML). mode=MG ml=28
+[SCORE_GATE] SKIP $Horseradish — Score: 31 (Min: 80) | Mode: MG | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $DYM combined=50 raw=54(liq12+bp5+vol3+px15+tx10+age0+bp1h1+fdv5=51/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-4(mc-8/age0/px4/flat0) | drivers: px5m=14.5% volMom=0.91 bp5m=0.54 ageS=9592 liq=$31110
+[SCORE_GATE] SKIP $DYM — Score: 30 (Min: 80) | Mode: MG | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $Bool combined=40 raw=52(liq12+bp0+vol9+px15+tx8+age0+bp1h0+fdv5=49/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-12(mc-8/age-8/px4/flat0) | drivers: px5m=17.9% volMom=1.94 bp5m=0.42 ageS=24657 liq=$30564
+[SCORE_GATE] SKIP $Bool — Score: 33 (Min: 80) | Mode: MG | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $ALON combined=30 raw=38(liq15+bp5+vol15+px-10+tx6+age0+bp1h0+fdv5=36/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=-9.3% volMom=4.22 bp5m=0.50 ageS=65879 liq=$68345
+[SCORE_GATE] SKIP $ALON — Score: 18 (Min: 80) | Mode: none (Reason: score too low, age > 14400, px5m < 1.2, hwrBp5m < 0.55, bp1h < 0.51) | Size: 0.0050 (Min: 0.005)
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[SCORE-BREAKDOWN] $OCCAM combined=22 raw=42(liq15+bp5+vol9+px-1+tx8+age0+bp1h1+fdv3=40/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-20(mc0/age-8/px0/flat-12) | drivers: px5m=-0.3% volMom=2.00 bp5m=0.54 ageS=52889 liq=$175118
+[SCORE-LATCH] $OCCAM - reconciled degraded entry re-score 7 -> authoritative same-cycle scan 12 (entry pass drops smart-money/whale + re-rolls ML). mode=none ml=21
+[SCORE_GATE] SKIP $OCCAM — Score: 12 (Min: 80) | Mode: none (Reason: score too low, age > 14400, px5m < 1.2, hwrBp5m < 0.55, bp1h < 0.51) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $FABLE combined=20 raw=28(liq12+bp0+vol12+px-10+tx8+age0+bp1h0+fdv5=27/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-8(mc-8/age0/px0/flat0) | drivers: px5m=-29.3% volMom=2.22 bp5m=0.25 ageS=7662 liq=$44506
+[SCORE_GATE] SKIP $FABLE — Score: 13 (Min: 80) | Mode: none (Reason: score too low, px5m < 1.2, hwrBp5m < 0.55, bp1h < 0.51) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $TOLY combined=3 raw=31(liq12+bp0+vol3+px2+tx6+age0+bp1h1+fdv5=29/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=0.4% volMom=0.95 bp5m=0.27 ageS=51525 liq=$35912
+[SCORE_GATE] SKIP $TOLY — Score: 0 (Min: 80) | Mode: none (Reason: score too low, age > 14400, px5m < 1.2, hwrBp5m < 0.55) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $VITALY combined=15 raw=43(liq12+bp13+vol6+px-5+tx10+age0+bp1h0+fdv5=41/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=-4.6% volMom=1.27 bp5m=0.61 ageS=85569 liq=$42486
+[SCORE_GATE] SKIP $VITALY — Score: 0 (Min: 80) | Mode: none (Reason: score too low, age > 14400, px5m < 1.2, bp1h < 0.51) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $Figgleton combined=0 raw=19(liq10+bp0+vol0+px-10+tx10+age2+bp1h1+fdv5=18/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=-21.4% volMom=0.50 bp5m=0.48 ageS=2650 liq=$15732
+[SCORE_GATE] SKIP $Figgleton — Score: 0 (Min: 80) | Mode: none (Reason: score too low, px5m < 1.2, hwrBp5m < 0.55) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $hood combined=0 raw=13(liq10+bp0+vol0+px-10+tx6+age0+bp1h1+fdv5=12/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=-18.7% volMom=0.24 bp5m=0.17 ageS=8626 liq=$11662
+[SCORE_GATE] SKIP $hood — Score: 0 (Min: 80) | Mode: none (Reason: score too low, px5m < 1.2, hwrBp5m < 0.55) | Size: 0.0050 (Min: 0.005)
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[DEBUG] currentBalance: 0.03, isMicroWallet: true
+[SCAN] Micro-Wallet Mode Active (Bal: 0.0300 SOL)
 [FETCHER-PATCH] old-profit funnel active | liq>=1000 vol5m>=500 minAge=0s minSells=2
 [GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
 [GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
-[PROFIT-LOCK] FABLE floor=2.8pct trig=4.3pct rt=3.8pct (peak=5.88pct)
 [GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
-[PROFIT-LOCK] FABLE floor=2.8pct trig=4.3pct rt=3.8pct (peak=5.88pct)
-[LIFECYCLE:HOLD] id=#10998 $FABLE | age: 119s | pnl: 5.88% | peak: 5.88% | price: $0.00017120 | mode: SNIPER
-[EXIT][BREAKEVEN_LOCK_HIT] FABLE pnl=-0.68pct trail=1.8pct peak=5.88pct
-[EXIT:NOFLOOR] $FABLE | BREAKEVEN_LOCK_HIT | raw pnl -0.68% recorded as-is — peak +5.9% never armed trail @ 12% (no paper inflation)
-[LIFECYCLE:EXIT] id=#10998 $FABLE | reason: BREAKEVEN_LOCK_HIT | pnl: -0.68% | peakPnl: 5.88% | holdTime: 120s | mode: paper
-[PAPER] LOSS SELL $FABLE @ $0.00016060 | PNL: -2.74% | BREAKEVEN_LOCK_HIT | ExitCost: -2.1% | Bal: 0.030 SOL
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[SCANNER-QUEUE] Tracking 0 fast scanner tokens via free API (Waiting for $10k breakout)
+[GOLD HUNTER] 🏆 1 signals | LEGENDARY: 0 | HIGH: 1
+[SRC-XTRA] quality-only union=79 | jupVerified=60 jupTop=50 gkVol=0 (verified-set size=53, offset=14)
+[QUALITY] in=70 pass=66 jupVerified=0 cuts: notVerified=0 tooYoung=4 | flags: REQUIRE_VERIFIED=false MIN_AGE_MIN=5
+[SCORE-BREAKDOWN] $MURAD combined=36 raw=58(liq12+bp10+vol3+px10+tx10+age0+bp1h5+fdv5=55/95) ml=58(adj46 dump42%) sm=0 wh=0 pen=-16(mc-8/age-8/px0/flat0) | drivers: px5m=5.0% volMom=0.57 bp5m=0.56 ageS=81851 liq=$29725
+[SCORE-BREAKDOWN] $Vulland combined=36 raw=57(liq12+bp20+vol3+px-1+tx10+age0+bp1h5+fdv5=54/95) ml=66(adj55 dump34%) sm=0 wh=0 pen=-20(mc0/age-8/px0/flat-12) | drivers: px5m=-0.3% volMom=0.86 bp5m=0.91 ageS=45561 liq=$47282
+[SCORE-BREAKDOWN] $TOLY combined=0 raw=31(liq12+bp0+vol3+px2+tx6+age0+bp1h1+fdv5=29/95) ml=24(adj15 dump76%) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=1.2% volMom=0.95 bp5m=0.33 ageS=51559 liq=$35959
+[SCORE-BREAKDOWN] $DYM combined=32 raw=57(liq12+bp5+vol6+px15+tx10+age0+bp1h1+fdv5=54/95) ml=23(adj14 dump77%) sm=0 wh=0 pen=-4(mc-8/age0/px4/flat0) | drivers: px5m=15.5% volMom=1.00 bp5m=0.55 ageS=9627 liq=$31242
+[SCORE-BREAKDOWN] $HIM combined=47 raw=64(liq15+bp5+vol12+px15+tx8+age0+bp1h1+fdv5=61/95) ml=51(adj39 dump49%) sm=0 wh=0 pen=-4(mc0/age-8/px4/flat0) | drivers: px5m=17.8% volMom=2.52 bp5m=0.52 ageS=70997 liq=$59156
+[SCORE-BREAKDOWN] $ALON combined=16 raw=33(liq15+bp0+vol15+px-10+tx6+age0+bp1h0+fdv5=31/95) ml=23(adj14 dump78%) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=-9.8% volMom=4.45 bp5m=0.48 ageS=65914 liq=$68159
+[SCORE-BREAKDOWN] $OCCAM combined=37 raw=54(liq15+bp10+vol12+px2+tx8+age0+bp1h1+fdv3=51/95) ml=48(adj36 dump52%) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=0.7% volMom=2.17 bp5m=0.56 ageS=52923 liq=$175915
+[SCORE-BREAKDOWN] $VITALY combined=0 raw=42(liq12+bp13+vol6+px-6+tx10+age0+bp1h0+fdv5=40/95) ml=21(adj13 dump79%) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=-5.1% volMom=1.32 bp5m=0.61 ageS=85603 liq=$42380
+[SCORE-BREAKDOWN] $Horseradish combined=33 raw=57(liq15+bp5+vol3+px15+tx10+age0+bp1h1+fdv5=54/95) ml=26(adj16 dump74%) sm=0 wh=0 pen=-4(mc0/age-8/px4/flat0) | drivers: px5m=13.6% volMom=0.73 bp5m=0.51 ageS=39198 liq=$51095
+[SCORE-BREAKDOWN] $ZAYED combined=0 raw=24(liq12+bp0+vol3+px-6+tx6+age0+bp1h3+fdv5=23/95) ml=23(adj14 dump78%) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=-5.0% volMom=0.59 bp5m=0.40 ageS=64903 liq=$22560
+[SCORE-BREAKDOWN] $Bool combined=36 raw=57(liq12+bp0+vol12+px15+tx10+age0+bp1h0+fdv5=54/95) ml=51(adj39 dump49%) sm=0 wh=0 pen=-12(mc-8/age-8/px4/flat0) | drivers: px5m=20.2% volMom=2.12 bp5m=0.44 ageS=24692 liq=$30866
+[SCORE-BREAKDOWN] $FABLE combined=13 raw=28(liq12+bp0+vol12+px-10+tx8+age0+bp1h0+fdv5=27/95) ml=23(adj14 dump78%) sm=0 wh=0 pen=-8(mc-8/age0/px0/flat0) | drivers: px5m=-30.9% volMom=2.33 bp5m=0.03 ageS=7696 liq=$44121
+[SCORE-BREAKDOWN] $skew combined=34 raw=48(liq12+bp10+vol15+px-10+tx10+age4+bp1h0+fdv5=46/95) ml=48(adj36 dump52%) sm=0 wh=0 pen=-8(mc-8/age0/px0/flat0) | drivers: px5m=-11.5% volMom=3.80 bp5m=0.55 ageS=1599 liq=$23659
+[SCORE-BREAKDOWN] $Figgleton combined=0 raw=22(liq10+bp0+vol3+px-10+tx10+age2+bp1h1+fdv5=21/95) ml=19(adj11 dump82%) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=-22.6% volMom=0.51 bp5m=0.48 ageS=2684 liq=$15610
+[SCORE-BREAKDOWN] $hood combined=0 raw=13(liq10+bp0+vol0+px-10+tx6+age0+bp1h1+fdv5=12/95) ml=19(adj11 dump82%) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=-23.4% volMom=0.28 bp5m=0.15 ageS=8659 liq=$11320
+[SCORE-BREAKDOWN] $MeiMei combined=43 raw=63(liq15+bp0+vol15+px15+tx10+age0+bp1h0+fdv5=60/95) ml=51(adj39 dump49%) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=71.6% volMom=3.41 bp5m=0.43 ageS=64168 liq=$54956
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[HELIUS-TAPE] 51xtAh whales=10 netBuy=6 netSell=3 wash=5 bundleSlots=9 BUNDLE (txs=99)
+[HELIUS-TAPE] FfpUuX whales=10 netBuy=6 netSell=2 wash=5 bundleSlots=3 BUNDLE (txs=97)
+[HELIUS-TAPE] hZ5KWo whales=10 netBuy=4 netSell=6 wash=5 bundleSlots=33 BUNDLE (txs=100)
+[SCORE-BREAKDOWN] $MURAD combined=54 raw=58(liq12+bp10+vol3+px10+tx10+age0+bp1h5+fdv5=55/95) ml=58(adj46 dump42%) sm=0 wh=18 pen=-16(mc-8/age-8/px0/flat0) | drivers: px5m=5.0% volMom=0.57 bp5m=0.56 ageS=81853 liq=$29725
+[SCORE-BREAKDOWN] $Vulland combined=28 raw=57(liq12+bp20+vol3+px-1+tx10+age0+bp1h5+fdv5=54/95) ml=66(adj55 dump34%) sm=0 wh=-8 pen=-20(mc0/age-8/px0/flat-12) | drivers: px5m=-0.3% volMom=0.86 bp5m=0.91 ageS=45563 liq=$47282
+[SCORE-BREAKDOWN] $HIM combined=72 raw=64(liq15+bp5+vol12+px15+tx8+age0+bp1h1+fdv5=61/95) ml=51(adj39 dump49%) sm=0 wh=25 pen=-4(mc0/age-8/px4/flat0) | drivers: px5m=17.8% volMom=2.52 bp5m=0.52 ageS=70999 liq=$59156
+[SCORE-BREAKDOWN] $Bool combined=28 raw=57(liq12+bp0+vol12+px15+tx10+age0+bp1h0+fdv5=54/95) ml=51(adj39 dump49%) sm=0 wh=-8 pen=-12(mc-8/age-8/px4/flat0) | drivers: px5m=20.2% volMom=2.12 bp5m=0.44 ageS=24694 liq=$30866
+[DIAG-SCOREWALL] top5 (pre-safety): #1 $HIM score=72 mode=MG bp5m=0.52 px5m=17.76 volMom=2.52 liq=59156 age=70999s mlScore=51 rej=[]  ||  #2 $MURAD score=54 mode=MG bp5m=0.56 px5m=5.05 volMom=0.57 liq=29725 age=81853s mlScore=58 rej=[]  ||  #3 $MeiMei score=43 mode=none bp5m=0.43 px5m=71.58 volMom=3.41 liq=54956 age=64168s mlScore=51 rej=[age > 14400, px5m > 40 (chase), hwrBp5m < 0.55, bp1h < 0.51]  ||  #4 $OCCAM score=37 mode=none bp5m=0.56 px5m=0.65 volMom=2.17 liq=175915 age=52923s mlScore=48 rej=[age > 14400, px5m < 1.2, bp1h < 0.51]  ||  #5 $skew score=34 mode=none bp5m=0.55 px5m=-11.54 volMom=3.80 liq=23659 age=1599s mlScore=48 rej=[score too low, px5m < 1.2, bp1h < 0.51]
+[SAFETY] $HIM rugScore=17794 rugScoreNorm=58 freeze=false mint=false veto=Single holder ownership
+[SAFETY-VETO] $HIM HARD-VETO on risk flag: Single holder ownership
+[PRESCREEN] Dropped top candidate $HIM — rugcheck_veto_single_holder_ownership
+[SCAN] Funnel: seen=1202 -> cutLiq=302 cutVol=666 cutAge=162 cutPrice=0 cutVolZero=0 cutHoneypot=2 cutTooNew=0 | survived=66 deduped=16 scored=15
+[SCAN] Discovery: 15 candidates found.
+[REGIME] Runner regime ON — hotRunners=0, peak5m=71.6%. Entries enabled.
+[SCORE-BREAKDOWN] $MURAD combined=42 raw=58(liq12+bp10+vol3+px10+tx10+age0+bp1h5+fdv5=55/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-16(mc-8/age-8/px0/flat0) | drivers: px5m=5.0% volMom=0.57 bp5m=0.56 ageS=81854 liq=$29725
+[SCORE-LATCH] $MURAD - reconciled degraded entry re-score 36 -> authoritative same-cycle scan 54 (entry pass drops smart-money/whale + re-rolls ML). mode=MG ml=58
+[SCORE_GATE] SKIP $MURAD — Score: 54 (Min: 80) | Mode: MG | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $MeiMei combined=55 raw=63(liq15+bp0+vol15+px15+tx10+age0+bp1h0+fdv5=60/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=67.4% volMom=3.40 bp5m=0.42 ageS=64172 liq=$54978
+[SCORE_GATE] SKIP $MeiMei — Score: 43 (Min: 80) | Mode: none (Reason: age > 14400, px5m > 40 (chase), hwrBp5m < 0.55, bp1h < 0.51) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $OCCAM combined=46 raw=54(liq15+bp10+vol12+px2+tx8+age0+bp1h1+fdv3=51/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=0.7% volMom=2.17 bp5m=0.56 ageS=52927 liq=$175915
+[SCORE_GATE] SKIP $OCCAM — Score: 37 (Min: 80) | Mode: none (Reason: age > 14400, px5m < 1.2, bp1h < 0.51) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $skew combined=37 raw=45(liq12+bp5+vol15+px-8+tx10+age4+bp1h0+fdv5=43/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-8(mc-8/age0/px0/flat0) | drivers: px5m=-7.9% volMom=3.88 bp5m=0.55 ageS=1603 liq=$24146
+[SCORE-LATCH] $skew - reconciled degraded entry re-score 32 -> authoritative same-cycle scan 34 (entry pass drops smart-money/whale + re-rolls ML). mode=none ml=48
+[SCORE_GATE] SKIP $skew — Score: 34 (Min: 80) | Mode: none (Reason: px5m < 1.2, hwrBp5m < 0.55, bp1h < 0.51) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $Horseradish combined=48 raw=52(liq15+bp0+vol3+px15+tx10+age0+bp1h1+fdv5=49/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-4(mc0/age-8/px4/flat0) | drivers: px5m=11.5% volMom=0.73 bp5m=0.48 ageS=39202 liq=$50642
+[SCORE-LATCH] $Horseradish - reconciled degraded entry re-score 30 -> authoritative same-cycle scan 33 (entry pass drops smart-money/whale + re-rolls ML). mode=MG ml=26
+[SCORE_GATE] SKIP $Horseradish — Score: 33 (Min: 80) | Mode: MG | Size: 0.0050 (Min: 0.005)
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[SCORE-BREAKDOWN] $DYM combined=53 raw=57(liq12+bp5+vol6+px15+tx10+age0+bp1h1+fdv5=54/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-4(mc-8/age0/px4/flat0) | drivers: px5m=14.3% volMom=1.02 bp5m=0.55 ageS=9632 liq=$31082
+[SCORE_GATE] SKIP $DYM — Score: 32 (Min: 80) | Mode: MG | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $Vulland combined=31 raw=51(liq12+bp20+vol6+px-10+tx10+age0+bp1h5+fdv5=48/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-20(mc0/age-8/px0/flat-12) | drivers: px5m=-15.1% volMom=1.01 bp5m=0.90 ageS=45566 liq=$46498
+[SCORE_GATE] SKIP $Vulland — Score: 33 (Min: 80) | Mode: HWR | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $Bool combined=46 raw=58(liq12+bp0+vol12+px15+tx10+age0+bp1h1+fdv5=55/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-12(mc-8/age-8/px4/flat0) | drivers: px5m=17.5% volMom=2.10 bp5m=0.43 ageS=24697 liq=$30947
+[SCORE_GATE] SKIP $Bool — Score: 36 (Min: 80) | Mode: MG | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $ALON combined=25 raw=33(liq15+bp0+vol15+px-10+tx6+age0+bp1h0+fdv5=31/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=-9.8% volMom=4.45 bp5m=0.48 ageS=65919 liq=$68159
+[SCORE_GATE] SKIP $ALON — Score: 16 (Min: 80) | Mode: none (Reason: score too low, age > 14400, px5m < 1.2, hwrBp5m < 0.55, bp1h < 0.51) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $FABLE combined=20 raw=28(liq12+bp0+vol12+px-10+tx8+age0+bp1h0+fdv5=27/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-8(mc-8/age0/px0/flat0) | drivers: px5m=-20.7% volMom=2.61 bp5m=0.03 ageS=7701 liq=$43877
+[SCORE_GATE] SKIP $FABLE — Score: 13 (Min: 80) | Mode: none (Reason: score too low, bp5m < 0.05, px5m < 1.2, hwrBp5m < 0.55, bp1h < 0.51) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $TOLY combined=3 raw=31(liq12+bp0+vol3+px2+tx6+age0+bp1h1+fdv5=29/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=0.4% volMom=0.95 bp5m=0.27 ageS=51565 liq=$35912
+[SCORE_GATE] SKIP $TOLY — Score: 0 (Min: 80) | Mode: none (Reason: score too low, age > 14400, px5m < 1.2, hwrBp5m < 0.55) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $VITALY combined=13 raw=41(liq12+bp13+vol6+px-7+tx10+age0+bp1h0+fdv5=39/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=-6.2% volMom=1.32 bp5m=0.61 ageS=85609 liq=$42127
+[SCORE_GATE] SKIP $VITALY — Score: 0 (Min: 80) | Mode: none (Reason: score too low, age > 14400, px5m < 1.2, bp1h < 0.51) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $ZAYED combined=0 raw=23(liq12+bp0+vol0+px-2+tx4+age0+bp1h3+fdv5=22/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=-1.8% volMom=0.49 bp5m=0.42 ageS=64909 liq=$22719
+[SCORE_GATE] SKIP $ZAYED — Score: 0 (Min: 80) | Mode: none (Reason: score too low, age > 14400, px5m < 1.2, hwrBp5m < 0.55) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $Figgleton combined=2 raw=22(liq10+bp0+vol3+px-10+tx10+age2+bp1h1+fdv5=21/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=-25.4% volMom=0.54 bp5m=0.48 ageS=2690 liq=$15324
+[SCORE_GATE] SKIP $Figgleton — Score: 0 (Min: 80) | Mode: none (Reason: score too low, px5m < 1.2, hwrBp5m < 0.55) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $hood combined=4 raw=24(liq10+bp5+vol0+px-6+tx8+age0+bp1h1+fdv5=23/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=-5.6% volMom=0.16 bp5m=0.50 ageS=8665 liq=$11545
+[SCORE_GATE] SKIP $hood — Score: 0 (Min: 80) | Mode: none (Reason: score too low, px5m < 1.2, hwrBp5m < 0.55) | Size: 0.0050 (Min: 0.005)
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[DEBUG] currentBalance: 0.03, isMicroWallet: true
+[SCAN] Micro-Wallet Mode Active (Bal: 0.0300 SOL)
+[FETCHER-PATCH] old-profit funnel active | liq>=1000 vol5m>=500 minAge=0s minSells=2
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[GOLD HUNTER] 🏆 0 signals | LEGENDARY: 0 | HIGH: 0
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[SCANNER-QUEUE] Tracking 0 fast scanner tokens via free API (Waiting for $10k breakout)
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[SRC-XTRA] quality-only union=79 | jupVerified=60 jupTop=50 gkVol=0 (verified-set size=53, offset=21)
+[QUALITY] in=71 pass=67 jupVerified=0 cuts: notVerified=0 tooYoung=4 | flags: REQUIRE_VERIFIED=false MIN_AGE_MIN=5
+[SCORE-BREAKDOWN] $MURAD combined=33 raw=53(liq12+bp10+vol0+px10+tx8+age0+bp1h5+fdv5=50/95) ml=58(adj46 dump42%) sm=0 wh=0 pen=-16(mc-8/age-8/px0/flat0) | drivers: px5m=5.6% volMom=0.43 bp5m=0.56 ageS=81890 liq=$29459
+[SCORE-BREAKDOWN] $Vulland combined=58 raw=72(liq12+bp20+vol6+px10+tx10+age0+bp1h5+fdv5=68/95) ml=70(adj60 dump30%) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=6.5% volMom=1.05 bp5m=0.91 ageS=45600 liq=$48865
+[SCORE-BREAKDOWN] $TOLY combined=0 raw=31(liq12+bp0+vol3+px2+tx6+age0+bp1h1+fdv5=29/95) ml=24(adj15 dump76%) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=1.2% volMom=0.95 bp5m=0.33 ageS=51598 liq=$35959
+[SCORE-BREAKDOWN] $DYM combined=45 raw=62(liq12+bp10+vol6+px15+tx10+age0+bp1h1+fdv5=59/95) ml=48(adj36 dump52%) sm=0 wh=0 pen=-4(mc-8/age0/px4/flat0) | drivers: px5m=15.8% volMom=1.04 bp5m=0.59 ageS=9666 liq=$31980
+[SCORE-BREAKDOWN] $HIM combined=47 raw=64(liq15+bp5+vol12+px15+tx8+age0+bp1h1+fdv5=61/95) ml=51(adj39 dump49%) sm=0 wh=0 pen=-4(mc0/age-8/px4/flat0) | drivers: px5m=16.5% volMom=2.35 bp5m=0.51 ageS=71036 liq=$59127
+[SCORE-BREAKDOWN] $ALON combined=16 raw=34(liq15+bp0+vol15+px-9+tx6+age0+bp1h0+fdv5=32/95) ml=23(adj14 dump78%) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=-8.1% volMom=3.44 bp5m=0.43 ageS=65953 liq=$67596
+[SCORE-BREAKDOWN] $OCCAM combined=23 raw=48(liq15+bp5+vol12+px2+tx8+age0+bp1h1+fdv3=46/95) ml=23(adj14 dump78%) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=0.3% volMom=2.20 bp5m=0.54 ageS=52962 liq=$175133
+[SCORE-BREAKDOWN] $VITALY combined=6 raw=54(liq12+bp13+vol6+px5+tx10+age0+bp1h0+fdv5=51/95) ml=23(adj14 dump77%) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=2.9% volMom=1.42 bp5m=0.60 ageS=85642 liq=$43534
+[SCORE-BREAKDOWN] $Horseradish combined=22 raw=48(liq15+bp0+vol3+px12+tx10+age0+bp1h1+fdv5=46/95) ml=21(adj13 dump79%) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=9.6% volMom=0.75 bp5m=0.47 ageS=39237 liq=$50185
+[SCORE-BREAKDOWN] $HOPE combined=22 raw=52(liq12+bp20+vol3+px2+tx4+age0+bp1h3+fdv5=49/95) ml=60(adj48 dump40%) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=1.3% volMom=0.93 bp5m=0.77 ageS=51260 liq=$40765
+[SCORE-BREAKDOWN] $Bool combined=36 raw=57(liq12+bp0+vol12+px15+tx10+age0+bp1h0+fdv5=54/95) ml=51(adj39 dump49%) sm=0 wh=0 pen=-12(mc-8/age-8/px4/flat0) | drivers: px5m=16.5% volMom=2.18 bp5m=0.42 ageS=24731 liq=$30805
+[SCORE-BREAKDOWN] $FABLE combined=13 raw=28(liq12+bp0+vol12+px-10+tx8+age0+bp1h0+fdv5=27/95) ml=23(adj14 dump78%) sm=0 wh=0 pen=-8(mc-8/age0/px0/flat0) | drivers: px5m=-20.7% volMom=2.61 bp5m=0.03 ageS=7735 liq=$43877
+[SCORE-BREAKDOWN] $skew combined=34 raw=48(liq12+bp10+vol15+px-10+tx10+age4+bp1h0+fdv5=46/95) ml=48(adj36 dump52%) sm=0 wh=0 pen=-8(mc-8/age0/px0/flat0) | drivers: px5m=-18.2% volMom=3.38 bp5m=0.57 ageS=1638 liq=$23751
+[SCORE-BREAKDOWN] $Figgleton combined=0 raw=19(liq10+bp0+vol0+px-10+tx10+age2+bp1h1+fdv5=18/95) ml=19(adj11 dump82%) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=-14.9% volMom=0.43 bp5m=0.46 ageS=2723 liq=$16043
+[SCORE-BREAKDOWN] $hood combined=0 raw=17(liq10+bp0+vol0+px-8+tx8+age0+bp1h1+fdv5=16/95) ml=19(adj11 dump82%) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=-7.2% volMom=0.16 bp5m=0.45 ageS=8698 liq=$11447
+[SCORE-BREAKDOWN] $SRAIL combined=18 raw=34(liq10+bp0+vol0+px12+tx4+age0+bp1h1+fdv5=32/95) ml=28(adj18 dump72%) sm=0 wh=0 pen=-8(mc-8/age0/px0/flat0) | drivers: px5m=7.3% volMom=0.45 bp5m=0.45 ageS=4688 liq=$10561
+[SCORE-BREAKDOWN] $MeiMei combined=43 raw=63(liq15+bp0+vol15+px15+tx10+age0+bp1h0+fdv5=60/95) ml=51(adj39 dump49%) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=76.3% volMom=4.02 bp5m=0.43 ageS=64207 liq=$55699
+[HELIUS-TAPE] 2k8ifE whales=10 netBuy=2 netSell=7 wash=5 bundleSlots=15 BUNDLE (txs=99)
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[HELIUS-TAPE] J23oV9 whales=10 netBuy=5 netSell=5 wash=0 bundleSlots=0 (txs=27)
+[SCORE-BREAKDOWN] $Vulland combined=50 raw=72(liq12+bp20+vol6+px10+tx10+age0+bp1h5+fdv5=68/95) ml=70(adj60 dump30%) sm=0 wh=-8 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=6.5% volMom=1.05 bp5m=0.91 ageS=45605 liq=$48865
+[SCORE-BREAKDOWN] $DYM combined=37 raw=62(liq12+bp10+vol6+px15+tx10+age0+bp1h1+fdv5=59/95) ml=48(adj36 dump52%) sm=0 wh=-8 pen=-4(mc-8/age0/px4/flat0) | drivers: px5m=15.8% volMom=1.04 bp5m=0.59 ageS=9671 liq=$31980
+[SCORE-BREAKDOWN] $HIM combined=72 raw=64(liq15+bp5+vol12+px15+tx8+age0+bp1h1+fdv5=61/95) ml=51(adj39 dump49%) sm=0 wh=25 pen=-4(mc0/age-8/px4/flat0) | drivers: px5m=16.5% volMom=2.35 bp5m=0.51 ageS=71041 liq=$59127
+[SCORE-BREAKDOWN] $Bool combined=36 raw=57(liq12+bp0+vol12+px15+tx10+age0+bp1h0+fdv5=54/95) ml=51(adj39 dump49%) sm=0 wh=0 pen=-12(mc-8/age-8/px4/flat0) | drivers: px5m=16.5% volMom=2.18 bp5m=0.42 ageS=24736 liq=$30805
+[DIAG-SCOREWALL] top5 (pre-safety): #1 $HIM score=72 mode=MG bp5m=0.51 px5m=16.53 volMom=2.35 liq=59127 age=71041s mlScore=51 rej=[]  ||  #2 $Vulland score=50 mode=MG bp5m=0.91 px5m=6.54 volMom=1.05 liq=48865 age=45605s mlScore=70 rej=[]  ||  #3 $MeiMei score=43 mode=none bp5m=0.43 px5m=76.28 volMom=4.02 liq=55699 age=64207s mlScore=51 rej=[age > 14400, px5m > 40 (chase), hwrBp5m < 0.55, bp1h < 0.51]  ||  #4 $DYM score=37 mode=MG bp5m=0.59 px5m=15.78 volMom=1.04 liq=31980 age=9671s mlScore=48 rej=[]  ||  #5 $Bool score=36 mode=MG bp5m=0.42 px5m=16.49 volMom=2.18 liq=30805 age=24736s mlScore=51 rej=[]
+[PRESCREEN] Dropped top candidate $HIM — rugcheck_veto_single_holder_ownership
+[SCAN] Funnel: seen=1202 -> cutLiq=305 cutVol=664 cutAge=157 cutPrice=0 cutVolZero=0 cutHoneypot=5 cutTooNew=0 | survived=67 deduped=17 scored=16
+[SCAN] Discovery: 16 candidates found.
+[REGIME] Runner regime ON — hotRunners=1, peak5m=76.3%. Entries enabled.
+[SCORE-BREAKDOWN] $Vulland combined=43 raw=63(liq12+bp20+vol3+px5+tx10+age0+bp1h5+fdv5=60/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-20(mc0/age-8/px0/flat-12) | drivers: px5m=2.3% volMom=0.95 bp5m=0.92 ageS=45605 liq=$47881
+[SCORE-LATCH] $Vulland - reconciled degraded entry re-score 41 -> authoritative same-cycle scan 50 (entry pass drops smart-money/whale + re-rolls ML). mode=MG ml=70
+[SCORE_GATE] SKIP $Vulland — Score: 50 (Min: 80) | Mode: MG | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $MeiMei combined=55 raw=63(liq15+bp0+vol15+px15+tx10+age0+bp1h0+fdv5=60/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=75.0% volMom=3.91 bp5m=0.43 ageS=64212 liq=$55500
+[SCORE_GATE] SKIP $MeiMei — Score: 43 (Min: 80) | Mode: none (Reason: age > 14400, px5m > 40 (chase), hwrBp5m < 0.55, bp1h < 0.51) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $DYM combined=55 raw=59(liq12+bp10+vol3+px15+tx10+age0+bp1h1+fdv5=56/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-4(mc-8/age0/px4/flat0) | drivers: px5m=12.3% volMom=0.93 bp5m=0.58 ageS=9672 liq=$31499
+[SCORE_GATE] SKIP $DYM — Score: 43 (Min: 80) | Mode: MG | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $Bool combined=45 raw=57(liq12+bp0+vol12+px15+tx10+age0+bp1h0+fdv5=54/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-12(mc-8/age-8/px4/flat0) | drivers: px5m=15.8% volMom=2.25 bp5m=0.42 ageS=24737 liq=$30711
+[SCORE_GATE] SKIP $Bool — Score: 36 (Min: 80) | Mode: MG | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $skew combined=40 raw=48(liq12+bp10+vol15+px-10+tx10+age4+bp1h0+fdv5=46/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-8(mc-8/age0/px0/flat0) | drivers: px5m=-20.4% volMom=3.40 bp5m=0.57 ageS=1644 liq=$23426
+[SCORE_GATE] SKIP $skew — Score: 34 (Min: 80) | Mode: none (Reason: px5m < 1.2, bp1h < 0.51) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $MURAD combined=29 raw=45(liq12+bp0+vol3+px8+tx10+age0+bp1h5+fdv5=43/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-16(mc-8/age-8/px0/flat0) | drivers: px5m=4.8% volMom=0.51 bp5m=0.49 ageS=81896 liq=$29357
+[SCORE-LATCH] $MURAD - reconciled degraded entry re-score 29 -> authoritative same-cycle scan 33 (entry pass drops smart-money/whale + re-rolls ML). mode=none ml=58
+[SCORE_GATE] SKIP $MURAD — Score: 33 (Min: 80) | Mode: none (Reason: score too low, age > 14400, hwrBp5m < 0.55) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $OCCAM combined=37 raw=45(liq15+bp5+vol12+px-1+tx8+age0+bp1h1+fdv3=43/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=-0.1% volMom=2.11 bp5m=0.54 ageS=52968 liq=$174759
+[SCORE-LATCH] $OCCAM - reconciled degraded entry re-score 22 -> authoritative same-cycle scan 23 (entry pass drops smart-money/whale + re-rolls ML). mode=none ml=23
+[SCORE_GATE] SKIP $OCCAM — Score: 23 (Min: 80) | Mode: none (Reason: age > 14400, px5m < 1.2, hwrBp5m < 0.55, bp1h < 0.51) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $Horseradish combined=40 raw=48(liq15+bp0+vol3+px12+tx10+age0+bp1h1+fdv5=46/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=9.3% volMom=0.81 bp5m=0.48 ageS=39243 liq=$50110
+[SCORE_GATE] SKIP $Horseradish — Score: 22 (Min: 80) | Mode: MG | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $HOPE combined=24 raw=52(liq12+bp20+vol3+px2+tx4+age0+bp1h3+fdv5=49/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=1.3% volMom=0.93 bp5m=0.77 ageS=51267 liq=$40765
+[SCORE_GATE] SKIP $HOPE — Score: 22 (Min: 80) | Mode: none (Reason: score too low, age > 14400) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $SRAIL combined=26 raw=34(liq10+bp0+vol0+px12+tx4+age0+bp1h1+fdv5=32/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-8(mc-8/age0/px0/flat0) | drivers: px5m=7.3% volMom=0.45 bp5m=0.45 ageS=4695 liq=$10561
+[SCORE_GATE] SKIP $SRAIL — Score: 18 (Min: 80) | Mode: none (Reason: score too low, hwrBp5m < 0.55) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $ALON combined=26 raw=34(liq15+bp0+vol15+px-9+tx6+age0+bp1h0+fdv5=32/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=-8.1% volMom=3.44 bp5m=0.43 ageS=65960 liq=$67596
+[SCORE_GATE] SKIP $ALON — Score: 16 (Min: 80) | Mode: none (Reason: score too low, age > 14400, px5m < 1.2, hwrBp5m < 0.55, bp1h < 0.51) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $FABLE combined=20 raw=28(liq12+bp0+vol12+px-10+tx8+age0+bp1h0+fdv5=27/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-8(mc-8/age0/px0/flat0) | drivers: px5m=-20.7% volMom=2.68 bp5m=0.02 ageS=7743 liq=$43799
+[SCORE_GATE] SKIP $FABLE — Score: 13 (Min: 80) | Mode: none (Reason: score too low, bp5m < 0.05, px5m < 1.2, hwrBp5m < 0.55, bp1h < 0.51) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $VITALY combined=26 raw=54(liq12+bp13+vol6+px5+tx10+age0+bp1h0+fdv5=51/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=2.9% volMom=1.42 bp5m=0.60 ageS=85650 liq=$43534
+[SCORE_GATE] SKIP $VITALY — Score: 6 (Min: 80) | Mode: none (Reason: score too low, age > 14400, bp1h < 0.51) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $TOLY combined=0 raw=26(liq12+bp0+vol3+px-2+tx6+age0+bp1h1+fdv5=25/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=-1.3% volMom=0.68 bp5m=0.33 ageS=51606 liq=$35965
+[SCORE_GATE] SKIP $TOLY — Score: 0 (Min: 80) | Mode: none (Reason: score too low, age > 14400, px5m < 1.2, hwrBp5m < 0.55) | Size: 0.0050 (Min: 0.005)
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[SCORE-BREAKDOWN] $Figgleton combined=0 raw=19(liq10+bp0+vol0+px-10+tx10+age2+bp1h1+fdv5=18/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=-14.1% volMom=0.45 bp5m=0.47 ageS=2733 liq=$16115
+[SCORE_GATE] SKIP $Figgleton — Score: 0 (Min: 80) | Mode: none (Reason: score too low, px5m < 1.2, hwrBp5m < 0.55) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $hood combined=0 raw=17(liq10+bp0+vol0+px-8+tx8+age0+bp1h1+fdv5=16/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=-7.2% volMom=0.16 bp5m=0.45 ageS=8708 liq=$11447
+[SCORE_GATE] SKIP $hood — Score: 0 (Min: 80) | Mode: none (Reason: score too low, px5m < 1.2, hwrBp5m < 0.55) | Size: 0.0050 (Min: 0.005)
+Browserslist: browsers data (caniuse-lite) is 9 months old. Please run:
+  npx update-browserslist-db@latest
+  Why you should do it regularly: https://github.com/browserslist/update-db#readme
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[DEBUG] currentBalance: 0.03, isMicroWallet: true
+[SCAN] Micro-Wallet Mode Active (Bal: 0.0300 SOL)
+[FETCHER-PATCH] old-profit funnel active | liq>=1000 vol5m>=500 minAge=0s minSells=2
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
 [GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
 [GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
 [GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
 [GOLD HUNTER] 🏆 0 signals | LEGENDARY: 0 | HIGH: 0
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[SCANNER-QUEUE] Tracking 0 fast scanner tokens via free API (Waiting for $10k breakout)
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[SRC-XTRA] quality-only union=79 | jupVerified=60 jupTop=50 gkVol=0 (verified-set size=53, offset=28)
+[QUALITY] in=65 pass=60 jupVerified=0 cuts: notVerified=0 tooYoung=5 | flags: REQUIRE_VERIFIED=false MIN_AGE_MIN=5
+[SCORE-BREAKDOWN] $MURAD combined=24 raw=40(liq12+bp0+vol0+px8+tx8+age0+bp1h5+fdv5=38/95) ml=53(adj41 dump47%) sm=0 wh=0 pen=-16(mc-8/age-8/px0/flat0) | drivers: px5m=4.7% volMom=0.40 bp5m=0.49 ageS=81936 liq=$29290
+[SCORE-BREAKDOWN] $Vulland combined=39 raw=63(liq12+bp20+vol6+px2+tx10+age0+bp1h5+fdv5=60/95) ml=66(adj55 dump34%) sm=0 wh=0 pen=-20(mc0/age-8/px0/flat-12) | drivers: px5m=0.2% volMom=1.05 bp5m=0.91 ageS=45646 liq=$48475
+[SCORE-BREAKDOWN] $DYM combined=29 raw=59(liq12+bp10+vol6+px12+tx10+age0+bp1h1+fdv5=56/95) ml=24(adj15 dump76%) sm=0 wh=0 pen=-8(mc-8/age0/px0/flat0) | drivers: px5m=9.8% volMom=1.01 bp5m=0.57 ageS=9712 liq=$31697
+[SCORE-BREAKDOWN] $HIM combined=45 raw=59(liq15+bp0+vol12+px15+tx8+age0+bp1h1+fdv5=56/95) ml=51(adj39 dump49%) sm=0 wh=0 pen=-4(mc0/age-8/px4/flat0) | drivers: px5m=10.6% volMom=2.00 bp5m=0.33 ageS=71082 liq=$58746
+[SCORE-BREAKDOWN] $ALON combined=7 raw=42(liq15+bp10+vol9+px-3+tx4+age0+bp1h0+fdv5=40/95) ml=21(adj13 dump79%) sm=0 wh=0 pen=-20(mc0/age-8/px0/flat-12) | drivers: px5m=-2.6% volMom=1.68 bp5m=0.56 ageS=65999 liq=$67947
+[SCORE-BREAKDOWN] $OCCAM combined=8 raw=45(liq15+bp5+vol9+px2+tx8+age0+bp1h1+fdv3=43/95) ml=19(adj11 dump82%) sm=0 wh=0 pen=-20(mc0/age-8/px0/flat-12) | drivers: px5m=0.2% volMom=1.91 bp5m=0.53 ageS=53008 liq=$175058
+[SCORE-BREAKDOWN] $VITALY combined=24 raw=62(liq12+bp13+vol6+px12+tx10+age0+bp1h1+fdv5=59/95) ml=29(adj19 dump71%) sm=0 wh=0 pen=-16(mc-8/age-8/px0/flat0) | drivers: px5m=8.8% volMom=1.00 bp5m=0.62 ageS=85688 liq=$42987
+[SCORE-BREAKDOWN] $Horseradish combined=21 raw=45(liq12+bp0+vol3+px12+tx10+age0+bp1h1+fdv5=43/95) ml=21(adj13 dump80%) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=7.9% volMom=0.80 bp5m=0.43 ageS=39283 liq=$49990
+[SCORE-BREAKDOWN] $HOPE combined=22 raw=52(liq12+bp20+vol3+px2+tx4+age0+bp1h3+fdv5=49/95) ml=60(adj48 dump40%) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=1.3% volMom=0.94 bp5m=0.83 ageS=51306 liq=$40765
+[SCORE-BREAKDOWN] $TOLY combined=0 raw=26(liq12+bp0+vol3+px-2+tx6+age0+bp1h1+fdv5=25/95) ml=19(adj11 dump82%) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=-1.1% volMom=0.69 bp5m=0.36 ageS=51644 liq=$35991
+[SCORE-BREAKDOWN] $Bool combined=36 raw=58(liq12+bp0+vol12+px15+tx10+age0+bp1h1+fdv5=55/95) ml=51(adj39 dump49%) sm=0 wh=0 pen=-12(mc-8/age-8/px4/flat0) | drivers: px5m=13.3% volMom=2.13 bp5m=0.40 ageS=24777 liq=$31200
+[SCORE-BREAKDOWN] $FABLE combined=4 raw=36(liq12+bp0+vol6+px5+tx6+age0+bp1h0+fdv5=34/95) ml=19(adj11 dump82%) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=2.8% volMom=1.34 bp5m=0.13 ageS=7781 liq=$44863
+[SCORE-BREAKDOWN] $skew combined=32 raw=45(liq12+bp10+vol12+px-10+tx10+age4+bp1h0+fdv5=43/95) ml=48(adj36 dump52%) sm=0 wh=0 pen=-8(mc-8/age0/px0/flat0) | drivers: px5m=-12.8% volMom=2.94 bp5m=0.58 ageS=1684 liq=$23002
+[SCORE-BREAKDOWN] $Figgleton combined=0 raw=25(liq10+bp0+vol0+px-4+tx10+age2+bp1h1+fdv5=24/95) ml=19(adj11 dump82%) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=-3.9% volMom=0.38 bp5m=0.45 ageS=2769 liq=$16551
+[SCORE-BREAKDOWN] $hood combined=0 raw=15(liq10+bp0+vol0+px-10+tx8+age0+bp1h1+fdv5=14/95) ml=19(adj11 dump82%) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=-12.7% volMom=0.23 bp5m=0.39 ageS=8744 liq=$11041
+[SCORE-BREAKDOWN] $SRAIL combined=23 raw=40(liq10+bp5+vol3+px10+tx4+age0+bp1h1+fdv5=38/95) ml=32(adj21 dump68%) sm=0 wh=0 pen=-8(mc-8/age0/px0/flat0) | drivers: px5m=5.5% volMom=0.55 bp5m=0.50 ageS=4734 liq=$10442
+[SCORE-BREAKDOWN] $MeiMei combined=43 raw=63(liq15+bp0+vol15+px15+tx10+age0+bp1h0+fdv5=60/95) ml=51(adj39 dump49%) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=76.9% volMom=4.31 bp5m=0.45 ageS=64253 liq=$54846
+[HELIUS-TAPE] FfpUuX whales=10 netBuy=7 netSell=2 wash=5 bundleSlots=3 BUNDLE (txs=97)
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[HELIUS-TAPE] hZ5KWo whales=10 netBuy=4 netSell=6 wash=5 bundleSlots=10 BUNDLE (txs=100)
+[SCORE-BREAKDOWN] $Vulland combined=31 raw=63(liq12+bp20+vol6+px2+tx10+age0+bp1h5+fdv5=60/95) ml=66(adj55 dump34%) sm=0 wh=-8 pen=-20(mc0/age-8/px0/flat-12) | drivers: px5m=0.2% volMom=1.05 bp5m=0.91 ageS=45650 liq=$48475
+[SCORE-BREAKDOWN] $HIM combined=70 raw=59(liq15+bp0+vol12+px15+tx8+age0+bp1h1+fdv5=56/95) ml=51(adj39 dump49%) sm=0 wh=25 pen=-4(mc0/age-8/px4/flat0) | drivers: px5m=10.6% volMom=2.00 bp5m=0.33 ageS=71086 liq=$58746
+[SCORE-BREAKDOWN] $Bool combined=36 raw=58(liq12+bp0+vol12+px15+tx10+age0+bp1h1+fdv5=55/95) ml=51(adj39 dump49%) sm=0 wh=0 pen=-12(mc-8/age-8/px4/flat0) | drivers: px5m=13.3% volMom=2.13 bp5m=0.40 ageS=24781 liq=$31200
+[DIAG-SCOREWALL] top5 (pre-safety): #1 $HIM score=70 mode=MG bp5m=0.33 px5m=10.62 volMom=2.00 liq=58746 age=71086s mlScore=51 rej=[]  ||  #2 $MeiMei score=43 mode=none bp5m=0.45 px5m=76.89 volMom=4.31 liq=54846 age=64253s mlScore=51 rej=[age > 14400, px5m > 40 (chase), hwrBp5m < 0.55, bp1h < 0.51]  ||  #3 $Bool score=36 mode=MG bp5m=0.40 px5m=13.25 volMom=2.13 liq=31200 age=24781s mlScore=51 rej=[]  ||  #4 $skew score=32 mode=none bp5m=0.58 px5m=-12.84 volMom=2.94 liq=23002 age=1684s mlScore=48 rej=[score too low, px5m < 1.2, bp1h < 0.51]  ||  #5 $Vulland score=31 mode=HWR bp5m=0.91 px5m=0.23 volMom=1.05 liq=48475 age=45650s mlScore=66 rej=[]
+[SAFETY] $HIM rugScore=17794 rugScoreNorm=58 freeze=false mint=false veto=Single holder ownership
+[SAFETY-VETO] $HIM HARD-VETO on risk flag: Single holder ownership
+[PRESCREEN] Dropped top candidate $HIM — rugcheck_veto_single_holder_ownership
+[SCAN] Funnel: seen=1203 -> cutLiq=311 cutVol=674 cutAge=149 cutPrice=0 cutVolZero=0 cutHoneypot=4 cutTooNew=0 | survived=60 deduped=17 scored=16
+[SCAN] Discovery: 16 candidates found.
+[REGIME] Runner regime ON — hotRunners=0, peak5m=76.9%. Entries enabled.
+[SCORE-BREAKDOWN] $MeiMei combined=55 raw=63(liq15+bp0+vol15+px15+tx10+age0+bp1h0+fdv5=60/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=76.9% volMom=4.31 bp5m=0.45 ageS=64258 liq=$54846
+[SCORE_GATE] SKIP $MeiMei — Score: 43 (Min: 80) | Mode: none (Reason: age > 14400, px5m > 40 (chase), hwrBp5m < 0.55, bp1h < 0.51) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $Bool combined=46 raw=58(liq12+bp0+vol12+px15+tx10+age0+bp1h1+fdv5=55/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-12(mc-8/age-8/px4/flat0) | drivers: px5m=11.2% volMom=2.09 bp5m=0.39 ageS=24782 liq=$30924
+[SCORE_GATE] SKIP $Bool — Score: 36 (Min: 80) | Mode: MG | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $skew combined=37 raw=45(liq12+bp10+vol12+px-10+tx10+age4+bp1h0+fdv5=43/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-8(mc-8/age0/px0/flat0) | drivers: px5m=-10.7% volMom=2.97 bp5m=0.58 ageS=1689 liq=$23274
+[SCORE_GATE] SKIP $skew — Score: 32 (Min: 80) | Mode: none (Reason: px5m < 1.2, bp1h < 0.51) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $Vulland combined=43 raw=63(liq12+bp20+vol6+px2+tx10+age0+bp1h5+fdv5=60/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-20(mc0/age-8/px0/flat-12) | drivers: px5m=0.2% volMom=1.05 bp5m=0.91 ageS=45652 liq=$48475
+[SCORE_GATE] SKIP $Vulland — Score: 39 (Min: 80) | Mode: HWR | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $DYM combined=49 raw=57(liq12+bp10+vol6+px10+tx10+age0+bp1h1+fdv5=54/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-8(mc-8/age0/px0/flat0) | drivers: px5m=6.9% volMom=1.04 bp5m=0.57 ageS=9718 liq=$31284
+[SCORE-LATCH] $DYM - reconciled degraded entry re-score 28 -> authoritative same-cycle scan 29 (entry pass drops smart-money/whale + re-rolls ML). mode=MG ml=24
+[SCORE_GATE] SKIP $DYM — Score: 29 (Min: 80) | Mode: MG | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $MURAD combined=9 raw=37(liq12+bp0+vol0+px5+tx8+age0+bp1h5+fdv5=35/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=1.6% volMom=0.49 bp5m=0.45 ageS=81942 liq=$28855
+[SCORE-LATCH] $MURAD - reconciled degraded entry re-score 11 -> authoritative same-cycle scan 24 (entry pass drops smart-money/whale + re-rolls ML). mode=none ml=53
+[SCORE_GATE] SKIP $MURAD — Score: 24 (Min: 80) | Mode: none (Reason: score too low, age > 14400, hwrBp5m < 0.55) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $VITALY combined=42 raw=58(liq12+bp13+vol6+px8+tx10+age0+bp1h1+fdv5=55/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-16(mc-8/age-8/px0/flat0) | drivers: px5m=4.3% volMom=1.16 bp5m=0.61 ageS=85694 liq=$42093
+[SCORE-LATCH] $VITALY - reconciled degraded entry re-score 22 -> authoritative same-cycle scan 24 (entry pass drops smart-money/whale + re-rolls ML). mode=MG ml=29
+[SCORE_GATE] SKIP $VITALY — Score: 24 (Min: 80) | Mode: MG | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $SRAIL combined=32 raw=40(liq10+bp5+vol3+px10+tx4+age0+bp1h1+fdv5=38/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-8(mc-8/age0/px0/flat0) | drivers: px5m=5.5% volMom=0.55 bp5m=0.50 ageS=4741 liq=$10442
+[SCORE_GATE] SKIP $SRAIL — Score: 23 (Min: 80) | Mode: none (Reason: score too low, hwrBp5m < 0.55) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $HOPE combined=24 raw=52(liq12+bp20+vol3+px2+tx4+age0+bp1h3+fdv5=49/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=1.4% volMom=0.99 bp5m=0.79 ageS=51313 liq=$40757
+[SCORE_GATE] SKIP $HOPE — Score: 22 (Min: 80) | Mode: none (Reason: score too low, age > 14400) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $Horseradish combined=37 raw=45(liq12+bp0+vol3+px12+tx10+age0+bp1h1+fdv5=43/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=7.9% volMom=0.84 bp5m=0.44 ageS=39290 liq=$49989
+[SCORE_GATE] SKIP $Horseradish — Score: 21 (Min: 80) | Mode: MG | Size: 0.0050 (Min: 0.005)
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[SCORE-BREAKDOWN] $OCCAM combined=25 raw=45(liq15+bp5+vol9+px2+tx8+age0+bp1h1+fdv3=43/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-20(mc0/age-8/px0/flat-12) | drivers: px5m=0.1% volMom=1.99 bp5m=0.53 ageS=53015 liq=$174995
+[SCORE_GATE] SKIP $OCCAM — Score: 8 (Min: 80) | Mode: none (Reason: score too low, age > 14400, px5m < 1.2, hwrBp5m < 0.55, bp1h < 0.51) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $ALON combined=7 raw=27(liq15+bp0+vol6+px-4+tx4+age0+bp1h0+fdv5=26/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-20(mc0/age-8/px0/flat-12) | drivers: px5m=-3.7% volMom=1.37 bp5m=0.36 ageS=66007 liq=$67596
+[SCORE-LATCH] $ALON - reconciled degraded entry re-score 0 -> authoritative same-cycle scan 7 (entry pass drops smart-money/whale + re-rolls ML). mode=none ml=21
+[SCORE_GATE] SKIP $ALON — Score: 7 (Min: 80) | Mode: none (Reason: score too low, age > 14400, px5m < 1.2, hwrBp5m < 0.55, bp1h < 0.51) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $FABLE combined=16 raw=36(liq12+bp0+vol6+px5+tx6+age0+bp1h0+fdv5=34/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=2.8% volMom=1.34 bp5m=0.13 ageS=7789 liq=$44863
+[SCORE_GATE] SKIP $FABLE — Score: 4 (Min: 80) | Mode: none (Reason: score too low, hwrBp5m < 0.55, bp1h < 0.51) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $TOLY combined=0 raw=26(liq12+bp0+vol3+px-2+tx6+age0+bp1h1+fdv5=25/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=-1.1% volMom=0.69 bp5m=0.36 ageS=51652 liq=$35991
+[SCORE_GATE] SKIP $TOLY — Score: 0 (Min: 80) | Mode: none (Reason: score too low, age > 14400, px5m < 1.2, hwrBp5m < 0.55) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $Figgleton combined=8 raw=28(liq10+bp0+vol0+px-1+tx10+age2+bp1h1+fdv5=27/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=-0.4% volMom=0.39 bp5m=0.46 ageS=2777 liq=$16850
+[SCORE_GATE] SKIP $Figgleton — Score: 0 (Min: 80) | Mode: none (Reason: score too low, px5m < 1.2, hwrBp5m < 0.55) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $hood combined=0 raw=15(liq10+bp0+vol0+px-10+tx8+age0+bp1h1+fdv5=14/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=-13.5% volMom=0.29 bp5m=0.43 ageS=8752 liq=$10986
+[SCORE_GATE] SKIP $hood — Score: 0 (Min: 80) | Mode: none (Reason: score too low, px5m < 1.2, hwrBp5m < 0.55) | Size: 0.0050 (Min: 0.005)
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[DEBUG] currentBalance: 0.03, isMicroWallet: true
+[SCAN] Micro-Wallet Mode Active (Bal: 0.0300 SOL)
+[FETCHER-PATCH] old-profit funnel active | liq>=1000 vol5m>=500 minAge=0s minSells=2
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[SCANNER-QUEUE] Tracking 0 fast scanner tokens via free API (Waiting for $10k breakout)
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[SRC-XTRA] quality-only union=79 | jupVerified=60 jupTop=50 gkVol=0 (verified-set size=53, offset=35)
+[QUALITY] in=72 pass=68 jupVerified=0 cuts: notVerified=0 tooYoung=4 | flags: REQUIRE_VERIFIED=false MIN_AGE_MIN=5
+[SCORE-BREAKDOWN] $MURAD combined=18 raw=51(liq12+bp5+vol3+px8+tx10+age0+bp1h5+fdv5=48/95) ml=53(adj41 dump47%) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=3.3% volMom=0.50 bp5m=0.51 ageS=81978 liq=$29090
+[SCORE-BREAKDOWN] $Vulland combined=37 raw=60(liq12+bp20+vol6+px-1+tx10+age0+bp1h5+fdv5=57/95) ml=66(adj55 dump34%) sm=0 wh=0 pen=-20(mc0/age-8/px0/flat-12) | drivers: px5m=-0.7% volMom=1.20 bp5m=0.90 ageS=45688 liq=$48236
+[SCORE-BREAKDOWN] $TOLY combined=0 raw=26(liq12+bp0+vol3+px-2+tx6+age0+bp1h1+fdv5=25/95) ml=19(adj11 dump82%) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=-1.1% volMom=0.70 bp5m=0.39 ageS=51686 liq=$35998
+[SCORE-BREAKDOWN] $DYM combined=29 raw=59(liq12+bp10+vol6+px12+tx10+age0+bp1h1+fdv5=56/95) ml=25(adj16 dump75%) sm=0 wh=0 pen=-8(mc-8/age0/px0/flat0) | drivers: px5m=8.3% volMom=1.15 bp5m=0.59 ageS=9754 liq=$31477
+[SCORE-BREAKDOWN] $HIM combined=45 raw=59(liq15+bp0+vol12+px15+tx8+age0+bp1h1+fdv5=56/95) ml=51(adj39 dump49%) sm=0 wh=0 pen=-4(mc0/age-8/px4/flat0) | drivers: px5m=10.4% volMom=2.02 bp5m=0.30 ageS=71124 liq=$58665
+[SCORE-BREAKDOWN] $ALON combined=7 raw=42(liq15+bp10+vol9+px-3+tx4+age0+bp1h0+fdv5=40/95) ml=21(adj13 dump79%) sm=0 wh=0 pen=-20(mc0/age-8/px0/flat-12) | drivers: px5m=-2.6% volMom=1.68 bp5m=0.56 ageS=66041 liq=$67947
+[SCORE-BREAKDOWN] $OCCAM combined=4 raw=36(liq15+bp0+vol9+px-2+tx8+age0+bp1h1+fdv3=34/95) ml=19(adj11 dump82%) sm=0 wh=0 pen=-20(mc0/age-8/px0/flat-12) | drivers: px5m=-1.1% volMom=1.93 bp5m=0.47 ageS=53050 liq=$174944
+[SCORE-BREAKDOWN] $VITALY combined=13 raw=47(liq12+bp16+vol3+px-2+tx10+age0+bp1h1+fdv5=45/95) ml=47(adj35 dump53%) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=-1.3% volMom=0.93 bp5m=0.68 ageS=85730 liq=$41821
+[SCORE-BREAKDOWN] $Horseradish combined=22 raw=48(liq15+bp0+vol3+px12+tx10+age0+bp1h1+fdv5=46/95) ml=21(adj13 dump80%) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=7.3% volMom=0.94 bp5m=0.42 ageS=39325 liq=$50560
+[SCORE-BREAKDOWN] $ZAYED combined=0 raw=23(liq12+bp0+vol3+px-5+tx6+age0+bp1h1+fdv5=22/95) ml=19(adj11 dump82%) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=-4.7% volMom=0.54 bp5m=0.33 ageS=65030 liq=$22499
+[SCORE-BREAKDOWN] $Bool combined=36 raw=58(liq12+bp0+vol12+px15+tx10+age0+bp1h1+fdv5=55/95) ml=51(adj39 dump49%) sm=0 wh=0 pen=-12(mc-8/age-8/px4/flat0) | drivers: px5m=15.2% volMom=2.17 bp5m=0.41 ageS=24819 liq=$31459
+[SCORE-BREAKDOWN] $FABLE combined=4 raw=36(liq12+bp0+vol6+px5+tx6+age0+bp1h0+fdv5=34/95) ml=19(adj11 dump82%) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=2.8% volMom=1.34 bp5m=0.13 ageS=7823 liq=$44863
+[SCORE-BREAKDOWN] $skew combined=34 raw=48(liq12+bp10+vol15+px-10+tx10+age4+bp1h0+fdv5=46/95) ml=48(adj36 dump52%) sm=0 wh=0 pen=-8(mc-8/age0/px0/flat0) | drivers: px5m=-19.1% volMom=3.02 bp5m=0.57 ageS=1726 liq=$22166
+[SCORE-BREAKDOWN] $Figgleton combined=5 raw=38(liq10+bp0+vol0+px8+tx10+age2+bp1h1+fdv5=36/95) ml=21(adj13 dump80%) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=3.0% volMom=0.42 bp5m=0.47 ageS=2811 liq=$17142
+[SCORE-BREAKDOWN] $hood combined=0 raw=15(liq10+bp0+vol0+px-10+tx8+age0+bp1h1+fdv5=14/95) ml=19(adj11 dump82%) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=-13.1% volMom=0.29 bp5m=0.45 ageS=8786 liq=$11012
+[SCORE-BREAKDOWN] $SRAIL combined=0 raw=26(liq10+bp0+vol3+px2+tx4+age0+bp1h1+fdv5=25/95) ml=19(adj11 dump82%) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=0.5% volMom=0.62 bp5m=0.47 ageS=4776 liq=$10192
+[SCORE-BREAKDOWN] $bull combined=17 raw=41(liq12+bp13+vol15+px-10+tx4+age0+bp1h0+fdv5=39/95) ml=15(adj9 dump85%) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=-9.7% volMom=8.50 bp5m=0.60 ageS=75084 liq=$42680
+[SCORE-BREAKDOWN] $MeiMei combined=38 raw=58(liq15+bp0+vol15+px10+tx10+age0+bp1h0+fdv5=55/95) ml=47(adj35 dump53%) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=5.9% volMom=3.15 bp5m=0.48 ageS=64295 liq=$53494
+[HELIUS-TAPE] MsGDyb whales=10 netBuy=2 netSell=6 wash=5 bundleSlots=4 BUNDLE (txs=86)
+[HELIUS-TAPE] J23oV9 whales=10 netBuy=5 netSell=4 wash=1 bundleSlots=0 (txs=24)
+[SCORE-BREAKDOWN] $Vulland combined=29 raw=60(liq12+bp20+vol6+px-1+tx10+age0+bp1h5+fdv5=57/95) ml=66(adj55 dump34%) sm=0 wh=-8 pen=-20(mc0/age-8/px0/flat-12) | drivers: px5m=-0.7% volMom=1.20 bp5m=0.90 ageS=45691 liq=$48236
+[SCORE-BREAKDOWN] $HIM combined=70 raw=59(liq15+bp0+vol12+px15+tx8+age0+bp1h1+fdv5=56/95) ml=51(adj39 dump49%) sm=0 wh=25 pen=-4(mc0/age-8/px4/flat0) | drivers: px5m=10.4% volMom=2.02 bp5m=0.30 ageS=71127 liq=$58665
+[SCORE-BREAKDOWN] $Bool combined=42 raw=58(liq12+bp0+vol12+px15+tx10+age0+bp1h1+fdv5=55/95) ml=51(adj39 dump49%) sm=0 wh=6 pen=-12(mc-8/age-8/px4/flat0) | drivers: px5m=15.2% volMom=2.17 bp5m=0.41 ageS=24822 liq=$31459
+[SCORE-BREAKDOWN] $MeiMei combined=30 raw=58(liq15+bp0+vol15+px10+tx10+age0+bp1h0+fdv5=55/95) ml=47(adj35 dump53%) sm=0 wh=-8 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=5.9% volMom=3.15 bp5m=0.48 ageS=64298 liq=$53494
+[DIAG-SCOREWALL] top5 (pre-safety): #1 $HIM score=70 mode=MG bp5m=0.30 px5m=10.37 volMom=2.02 liq=58665 age=71127s mlScore=51 rej=[]  ||  #2 $Bool score=42 mode=MG bp5m=0.41 px5m=15.17 volMom=2.17 liq=31459 age=24822s mlScore=51 rej=[]  ||  #3 $skew score=34 mode=none bp5m=0.57 px5m=-19.05 volMom=3.02 liq=22166 age=1726s mlScore=48 rej=[score too low, px5m < 1.2, bp1h < 0.51]  ||  #4 $MeiMei score=30 mode=none bp5m=0.48 px5m=5.93 volMom=3.15 liq=53494 age=64298s mlScore=47 rej=[score too low, age > 14400, hwrBp5m < 0.55, bp1h < 0.51]  ||  #5 $Vulland score=29 mode=none bp5m=0.90 px5m=-0.74 volMom=1.20 liq=48236 age=45691s mlScore=66 rej=[score too low, age > 14400, px5m < 1.2]
+[PRESCREEN] Dropped top candidate $HIM — rugcheck_veto_single_holder_ownership
+[SCAN] Funnel: seen=1201 -> cutLiq=313 cutVol=656 cutAge=157 cutPrice=0 cutVolZero=0 cutHoneypot=3 cutTooNew=0 | survived=68 deduped=18 scored=17
+[SCAN] Discovery: 17 candidates found.
+[REGIME] Cold feed — standing down on new entries (hotRunners=0/2 @≥12% & $300 & bp0.55, peak5m=15.2% < 35%). Open positions still managed.
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[GOLD HUNTER] 🏆 0 signals | LEGENDARY: 0 | HIGH: 0
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[DEBUG] currentBalance: 0.03, isMicroWallet: true
+[SCAN] Micro-Wallet Mode Active (Bal: 0.0300 SOL)
+[FETCHER-PATCH] old-profit funnel active | liq>=1000 vol5m>=500 minAge=0s minSells=2
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[SCANNER-QUEUE] Tracking 0 fast scanner tokens via free API (Waiting for $10k breakout)
+[SRC-XTRA] quality-only union=79 | jupVerified=60 jupTop=50 gkVol=0 (verified-set size=53, offset=42)
+[QUALITY] in=70 pass=66 jupVerified=0 cuts: notVerified=0 tooYoung=4 | flags: REQUIRE_VERIFIED=false MIN_AGE_MIN=5
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[SCORE-BREAKDOWN] $MURAD combined=5 raw=29(liq12+bp0+vol0+px-2+tx8+age0+bp1h5+fdv5=28/95) ml=49(adj37 dump51%) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=-1.8% volMom=0.46 bp5m=0.48 ageS=82018 liq=$29018
+[SCORE-BREAKDOWN] $Vulland combined=58 raw=72(liq12+bp20+vol6+px10+tx10+age0+bp1h5+fdv5=68/95) ml=70(adj60 dump30%) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=5.6% volMom=1.19 bp5m=0.89 ageS=45728 liq=$49160
+[SCORE-BREAKDOWN] $DYM combined=46 raw=65(liq12+bp13+vol6+px15+tx10+age0+bp1h1+fdv5=62/95) ml=48(adj36 dump52%) sm=0 wh=0 pen=-4(mc-8/age0/px4/flat0) | drivers: px5m=13.8% volMom=1.10 bp5m=0.60 ageS=9794 liq=$31863
+[SCORE-BREAKDOWN] $HIM combined=1 raw=31(liq15+bp0+vol3+px-1+tx6+age0+bp1h1+fdv5=29/95) ml=19(adj11 dump82%) sm=0 wh=0 pen=-20(mc0/age-8/px0/flat-12) | drivers: px5m=-0.6% volMom=0.68 bp5m=0.21 ageS=71164 liq=$58520
+[SCORE-BREAKDOWN] $ALON combined=0 raw=29(liq15+bp0+vol9+px-5+tx4+age0+bp1h0+fdv5=28/95) ml=19(adj11 dump82%) sm=0 wh=0 pen=-20(mc0/age-8/px0/flat-12) | drivers: px5m=-4.5% volMom=1.93 bp5m=0.47 ageS=66081 liq=$67172
+[SCORE-BREAKDOWN] $bull combined=17 raw=41(liq12+bp13+vol15+px-10+tx4+age0+bp1h0+fdv5=39/95) ml=15(adj9 dump85%) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=-9.7% volMom=8.50 bp5m=0.60 ageS=75124 liq=$42680
+[SCORE-BREAKDOWN] $OCCAM combined=19 raw=39(liq15+bp0+vol12+px-2+tx8+age0+bp1h1+fdv3=37/95) ml=23(adj14 dump78%) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=-1.4% volMom=2.10 bp5m=0.46 ageS=53090 liq=$174706
+[SCORE-BREAKDOWN] $VITALY combined=13 raw=48(liq12+bp16+vol3+px-1+tx10+age0+bp1h1+fdv5=46/95) ml=47(adj35 dump53%) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=-0.9% volMom=0.97 bp5m=0.67 ageS=85770 liq=$41906
+[SCORE-BREAKDOWN] $Horseradish combined=31 raw=55(liq15+bp0+vol6+px15+tx10+age0+bp1h1+fdv5=52/95) ml=23(adj14 dump77%) sm=0 wh=0 pen=-4(mc0/age-8/px4/flat0) | drivers: px5m=16.6% volMom=1.46 bp5m=0.47 ageS=39365 liq=$52704
+[SCORE-BREAKDOWN] $ZAYED combined=0 raw=25(liq12+bp0+vol3+px-3+tx6+age0+bp1h1+fdv5=24/95) ml=19(adj11 dump82%) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=-2.9% volMom=0.61 bp5m=0.36 ageS=65070 liq=$22576
+[SCORE-BREAKDOWN] $Bool combined=19 raw=48(liq12+bp0+vol6+px12+tx10+age0+bp1h1+fdv5=46/95) ml=34(adj23 dump66%) sm=0 wh=0 pen=-16(mc-8/age-8/px0/flat0) | drivers: px5m=8.0% volMom=1.10 bp5m=0.46 ageS=24859 liq=$31586
+[SCORE-BREAKDOWN] $FABLE combined=6 raw=39(liq12+bp0+vol6+px8+tx6+age0+bp1h0+fdv5=37/95) ml=21(adj13 dump80%) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=3.9% volMom=1.42 bp5m=0.32 ageS=7863 liq=$45370
+[SCORE-BREAKDOWN] $skew combined=33 raw=47(liq12+bp10+vol12+px-8+tx10+age4+bp1h0+fdv5=45/95) ml=48(adj36 dump52%) sm=0 wh=0 pen=-8(mc-8/age0/px0/flat0) | drivers: px5m=-7.1% volMom=2.34 bp5m=0.56 ageS=1766 liq=$21800
+[SCORE-BREAKDOWN] $Figgleton combined=42 raw=56(liq10+bp10+vol0+px15+tx10+age2+bp1h1+fdv5=53/95) ml=48(adj36 dump52%) sm=0 wh=0 pen=-4(mc-8/age0/px4/flat0) | drivers: px5m=18.5% volMom=0.40 bp5m=0.56 ageS=2851 liq=$18093
+[SCORE-BREAKDOWN] $SRAIL combined=0 raw=19(liq10+bp0+vol3+px-5+tx4+age0+bp1h1+fdv5=18/95) ml=19(adj11 dump82%) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=-4.7% volMom=0.55 bp5m=0.38 ageS=4816 liq=$10192
+[SCORE-BREAKDOWN] $hood combined=0 raw=28(liq8+bp10+vol3+px-10+tx10+age0+bp1h1+fdv5=27/95) ml=21(adj13 dump79%) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=-28.6% volMom=0.73 bp5m=0.58 ageS=8826 liq=$9983
+[SCORE-BREAKDOWN] $MeiMei combined=38 raw=58(liq15+bp0+vol15+px10+tx10+age0+bp1h0+fdv5=55/95) ml=47(adj35 dump53%) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=6.9% volMom=3.30 bp5m=0.49 ageS=64335 liq=$53754
+[HELIUS-TAPE] hZ5KWo whales=10 netBuy=5 netSell=5 wash=5 bundleSlots=14 BUNDLE (txs=100)
+[HELIUS-TAPE] 2k8ifE whales=10 netBuy=4 netSell=6 wash=5 bundleSlots=22 BUNDLE (txs=100)
+[HELIUS-TAPE] AtKpnM whales=10 netBuy=3 netSell=4 wash=5 bundleSlots=6 BUNDLE (txs=97)
+[SCORE-BREAKDOWN] $Vulland combined=58 raw=72(liq12+bp20+vol6+px10+tx10+age0+bp1h5+fdv5=68/95) ml=70(adj60 dump30%) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=5.6% volMom=1.19 bp5m=0.89 ageS=45730 liq=$49160
+[SCORE-BREAKDOWN] $DYM combined=38 raw=65(liq12+bp13+vol6+px15+tx10+age0+bp1h1+fdv5=62/95) ml=48(adj36 dump52%) sm=0 wh=-8 pen=-4(mc-8/age0/px4/flat0) | drivers: px5m=13.8% volMom=1.10 bp5m=0.60 ageS=9796 liq=$31863
+[SCORE-BREAKDOWN] $Figgleton combined=34 raw=56(liq10+bp10+vol0+px15+tx10+age2+bp1h1+fdv5=53/95) ml=48(adj36 dump52%) sm=0 wh=-8 pen=-4(mc-8/age0/px4/flat0) | drivers: px5m=18.5% volMom=0.40 bp5m=0.56 ageS=2853 liq=$18093
+[SCORE-BREAKDOWN] $MeiMei combined=30 raw=58(liq15+bp0+vol15+px10+tx10+age0+bp1h0+fdv5=55/95) ml=47(adj35 dump53%) sm=0 wh=-8 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=6.9% volMom=3.30 bp5m=0.49 ageS=64337 liq=$53754
+[DIAG-SCOREWALL] top5 (pre-safety): #1 $Vulland score=58 mode=MG bp5m=0.89 px5m=5.59 volMom=1.19 liq=49160 age=45730s mlScore=70 rej=[]  ||  #2 $DYM score=38 mode=MG bp5m=0.60 px5m=13.83 volMom=1.10 liq=31863 age=9796s mlScore=48 rej=[]  ||  #3 $Figgleton score=34 mode=none bp5m=0.56 px5m=18.54 volMom=0.40 liq=18093 age=2853s mlScore=48 rej=[score too low]  ||  #4 $skew score=33 mode=none bp5m=0.56 px5m=-7.06 volMom=2.34 liq=21800 age=1766s mlScore=48 rej=[score too low, px5m < 1.2, bp1h < 0.51]  ||  #5 $Horseradish score=31 mode=none bp5m=0.47 px5m=16.58 volMom=1.46 liq=52704 age=39365s mlScore=23 rej=[score too low, age > 14400, hwrBp5m < 0.55]
+[SAFETY] $Vulland rugScore=1 rugScoreNorm=1 freeze=false mint=false veto=none
+[SCAN] Funnel: seen=1202 -> cutLiq=312 cutVol=646 cutAge=170 cutPrice=0 cutVolZero=0 cutHoneypot=4 cutTooNew=0 | survived=66 deduped=17 scored=17
+[SCAN] Discovery: 17 candidates found.
+[REGIME] Runner regime ON — hotRunners=2, peak5m=18.5%. Entries enabled.
+[SCORE-BREAKDOWN] $Vulland combined=61 raw=69(liq12+bp20+vol6+px8+tx10+age0+bp1h5+fdv5=66/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=4.2% volMom=1.30 bp5m=0.88 ageS=45732 liq=$48847
+[SCORE-LATCH] $Vulland - reconciled degraded entry re-score 56 -> authoritative same-cycle scan 58 (entry pass drops smart-money/whale + re-rolls ML). mode=MG ml=70
+[SCORE_GATE] SKIP $Vulland — Score: 58 (Min: 80) | Mode: MG | Size: 0.0050 (Min: 0.005)
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[SCORE-BREAKDOWN] $DYM combined=58 raw=62(liq12+bp10+vol6+px15+tx10+age0+bp1h1+fdv5=59/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-4(mc-8/age0/px4/flat0) | drivers: px5m=10.1% volMom=1.25 bp5m=0.60 ageS=9798 liq=$31336
+[SCORE_GATE] SKIP $DYM — Score: 45 (Min: 80) | Mode: MG | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $Figgleton combined=52 raw=56(liq10+bp10+vol0+px15+tx10+age2+bp1h1+fdv5=53/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-4(mc-8/age0/px4/flat0) | drivers: px5m=18.5% volMom=0.40 bp5m=0.56 ageS=2856 liq=$18093
+[SCORE_GATE] SKIP $Figgleton — Score: 42 (Min: 80) | Mode: MG | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $skew combined=40 raw=48(liq12+bp5+vol12+px-2+tx10+age4+bp1h0+fdv5=46/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-8(mc-8/age0/px0/flat0) | drivers: px5m=-1.8% volMom=2.53 bp5m=0.54 ageS=1771 liq=$22415
+[SCORE_GATE] SKIP $skew — Score: 34 (Min: 80) | Mode: none (Reason: px5m < 1.2, hwrBp5m < 0.55, bp1h < 0.51) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $Horseradish combined=44 raw=52(liq15+bp0+vol6+px12+tx10+age0+bp1h1+fdv5=49/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=8.3% volMom=1.12 bp5m=0.46 ageS=39370 liq=$50790
+[SCORE-LATCH] $Horseradish - reconciled degraded entry re-score 25 -> authoritative same-cycle scan 31 (entry pass drops smart-money/whale + re-rolls ML). mode=MG ml=23
+[SCORE_GATE] SKIP $Horseradish — Score: 31 (Min: 80) | Mode: MG | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $MeiMei combined=52 raw=60(liq15+bp0+vol15+px12+tx10+age0+bp1h0+fdv5=57/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=9.3% volMom=3.27 bp5m=0.49 ageS=64340 liq=$54356
+[SCORE_GATE] SKIP $MeiMei — Score: 39 (Min: 80) | Mode: MG | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $OCCAM combined=31 raw=39(liq15+bp0+vol12+px-2+tx8+age0+bp1h1+fdv3=37/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=-1.4% volMom=2.19 bp5m=0.48 ageS=53096 liq=$174695
+[SCORE_GATE] SKIP $OCCAM — Score: 19 (Min: 80) | Mode: none (Reason: score too low, age > 14400, px5m < 1.2, hwrBp5m < 0.55, bp1h < 0.51) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $Bool combined=30 raw=46(liq12+bp0+vol6+px10+tx10+age0+bp1h1+fdv5=44/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-16(mc-8/age-8/px0/flat0) | drivers: px5m=6.1% volMom=1.14 bp5m=0.45 ageS=24865 liq=$31301
+[SCORE-LATCH] $Bool - reconciled degraded entry re-score 18 -> authoritative same-cycle scan 19 (entry pass drops smart-money/whale + re-rolls ML). mode=none ml=34
+[SCORE_GATE] SKIP $Bool — Score: 19 (Min: 80) | Mode: none (Reason: score too low, age > 14400, hwrBp5m < 0.55, bp1h < 0.51) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $bull combined=33 raw=41(liq12+bp13+vol15+px-10+tx4+age0+bp1h0+fdv5=39/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-8(mc0/age-8/px0/flat0) | drivers: px5m=-9.7% volMom=8.50 bp5m=0.60 ageS=75130 liq=$42680
+[SCORE_GATE] SKIP $bull — Score: 17 (Min: 80) | Mode: none (Reason: score too low, age > 14400, px5m < 1.2, bp1h < 0.51) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $VITALY combined=20 raw=48(liq12+bp16+vol6+px-4+tx10+age0+bp1h1+fdv5=46/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=-3.0% volMom=1.05 bp5m=0.66 ageS=85776 liq=$41446
+[SCORE_GATE] SKIP $VITALY — Score: 13 (Min: 80) | Mode: none (Reason: score too low, age > 14400, px5m < 1.2) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $FABLE combined=19 raw=39(liq12+bp0+vol6+px8+tx6+age0+bp1h0+fdv5=37/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=3.9% volMom=1.42 bp5m=0.32 ageS=7869 liq=$45370
+[SCORE_GATE] SKIP $FABLE — Score: 6 (Min: 80) | Mode: none (Reason: score too low, hwrBp5m < 0.55, bp1h < 0.51) | Size: 0.0050 (Min: 0.005)
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[SCORE-BREAKDOWN] $MURAD combined=1 raw=29(liq12+bp0+vol0+px-4+tx10+age0+bp1h5+fdv5=28/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=-4.0% volMom=0.48 bp5m=0.45 ageS=82025 liq=$28686
+[SCORE_GATE] SKIP $MURAD — Score: 5 (Min: 80) | Mode: none (Reason: score too low, age > 14400, px5m < 1.2, hwrBp5m < 0.55) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $HIM combined=11 raw=31(liq15+bp0+vol3+px-1+tx6+age0+bp1h1+fdv5=29/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-20(mc0/age-8/px0/flat-12) | drivers: px5m=-0.6% volMom=0.68 bp5m=0.21 ageS=71171 liq=$58520
+[SCORE_GATE] SKIP $HIM — Score: 1 (Min: 80) | Mode: none (Reason: score too low, age > 14400, px5m < 1.2, hwrBp5m < 0.55) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $ALON combined=9 raw=29(liq15+bp0+vol9+px-5+tx4+age0+bp1h0+fdv5=28/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-20(mc0/age-8/px0/flat-12) | drivers: px5m=-4.5% volMom=1.93 bp5m=0.47 ageS=66088 liq=$67172
+[SCORE_GATE] SKIP $ALON — Score: 0 (Min: 80) | Mode: none (Reason: score too low, age > 14400, px5m < 1.2, hwrBp5m < 0.55, bp1h < 0.51) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $ZAYED combined=0 raw=25(liq12+bp0+vol3+px-3+tx6+age0+bp1h1+fdv5=24/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-28(mc-8/age-8/px0/flat-12) | drivers: px5m=-2.9% volMom=0.61 bp5m=0.36 ageS=65077 liq=$22576
+[SCORE_GATE] SKIP $ZAYED — Score: 0 (Min: 80) | Mode: none (Reason: score too low, age > 14400, px5m < 1.2, hwrBp5m < 0.55) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $SRAIL combined=0 raw=19(liq10+bp0+vol3+px-5+tx4+age0+bp1h1+fdv5=18/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=-4.7% volMom=0.55 bp5m=0.38 ageS=4824 liq=$10192
+[SCORE_GATE] SKIP $SRAIL — Score: 0 (Min: 80) | Mode: none (Reason: score too low, px5m < 1.2, hwrBp5m < 0.55) | Size: 0.0050 (Min: 0.005)
+[SCORE-BREAKDOWN] $hood combined=8 raw=28(liq8+bp10+vol3+px-10+tx10+age0+bp1h1+fdv5=27/95) ml=n/a(adjn/a dumpn/a) sm=0 wh=0 pen=-20(mc-8/age0/px0/flat-12) | drivers: px5m=-29.4% volMom=0.73 bp5m=0.56 ageS=8834 liq=$9923
+[SCORE_GATE] SKIP $hood — Score: 0 (Min: 80) | Mode: none (Reason: score too low, liq < 10000, px5m < 1.2) | Size: 0.0050 (Min: 0.005)
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[DEBUG] currentBalance: 0.03, isMicroWallet: true
+[SCAN] Micro-Wallet Mode Active (Bal: 0.0300 SOL)
+[FETCHER-PATCH] old-profit funnel active | liq>=1000 vol5m>=500 minAge=0s minSells=2
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[GOLD HUNTER] 🏆 0 signals | LEGENDARY: 0 | HIGH: 0
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed
+[GMGN-DEBUG] signal poll: 50 type-11/12 signal(s) parsed

@@ -471,7 +471,7 @@ let engineSettings = {
                           // tokens; with the age cap that can't happen. 5min is enough for market reset.
   partialTpRatio: 0.5, // old profitable // old profitable 
   partialTpThreshold: 5, // BANKING-FIX: lowered 100 → 5. On a 0.03 SOL micro wallet with 0.005 SOL position, the old 100% threshold never fired (memecoins peak +12-15% then reverse). Partial at +5% banks half the bag on the way up, securing a real fill before DYNAMIC_TRAIL arms at +12%. Each partial adds ~0.2% wallet growth; compound gains vs zero partials.
-  partialTpCostMargin: 4,        // PAPER-TEST(cost-relative): profit cushion in % added on top of the modeled round-trip cost when computing the effective partial-TP trigger. effectivePartialTp = max(partialTpThreshold, modeledRoundTrip + this). Keeps the partial from firing until it nets real profit above the trade's actual exit cost.
+  partialTpCostMargin: 1,        // BANK-THE-PEAK FIX(2026-07-01): 4->1. Now added on top of EXIT-only cost (was full round-trip). Keeps effective partial trigger at the +5% base for 25k+ pools so half the bag banks on the way up. // PAPER-TEST(cost-relative): profit cushion in % added on top of the modeled round-trip cost when computing the effective partial-TP trigger. effectivePartialTp = max(partialTpThreshold, modeledRoundTrip + this). Keeps the partial from firing until it nets real profit above the trade's actual exit cost.
 
   // -- Sizing Strategy (Calibrated for 1000x compounding) --
   minPositionSize: 0.005, // UPGRADE: Reduced to 100 INR (0.015 SOL) to give 3 bullets.
@@ -3394,6 +3394,29 @@ async function runScanCycle() {
         }
       }
       
+      // --- SAME-CYCLE SCORE RECONCILIATION (root-cause fix 2026-07-01) --------------------------
+      // ROOT CAUSE of the zero-entry session: the scan pass scores each candidate with the FULL
+      // signal set (batch ML + Helius smart-money/whale tape: scoreToken(sp, mlPredictions[idx], .., __sm))
+      // and stores it as candidate.score. The entry re-score just above calls scoreToken(pair, null, ..)
+      // WITHOUT smart-money (wh=0) and re-rolls ML synchronously (getMLPrediction frequently returns
+      // null => ml=n/a), producing a strictly-degraded score. Live proof: $Vulland scan combined=92
+      // mode=MG, entry re-score=70 => SCORE_GATE SKIP; every qualified token died the same way => 0 trades.
+      // Reconcile UP to the authoritative same-cycle scan values (the exact numbers DIAG-SCOREWALL logs).
+      // This is the SAME max(fresh, discovery) pattern already used for 5m activity above; it does NOT
+      // loosen anything -- every hard safety veto and the entry-confirmation (rollover) gate below still
+      // run per-tick on the reconciled scoring. Disable via SCORE_LATCH=false.
+      const _scanScore = (typeof (candidate as any).score === "number") ? (candidate as any).score : null;
+      if (String(process.env.SCORE_LATCH ?? "true").toLowerCase() !== "false" && _scanScore != null && _scanScore > scoring.combinedScore) {
+        const _prevEntryScore = scoring.combinedScore;
+        scoring = {
+          ...scoring,
+          combinedScore: _scanScore,
+          mlScore: (typeof (candidate as any).mlScore === "number") ? (candidate as any).mlScore : scoring.mlScore,
+          qualifiedMode: (candidate as any).qualifiedMode ?? scoring.qualifiedMode,
+        };
+        console.log(`[SCORE-LATCH] $${candidate.tokenSymbol} - reconciled degraded entry re-score ${_prevEntryScore} -> authoritative same-cycle scan ${_scanScore} (entry pass drops smart-money/whale + re-rolls ML). mode=${scoring.qualifiedMode ?? "none"} ml=${scoring.mlScore ?? "n/a"}`);
+      }
+      
       scoring.sizeSol = Math.max(cycleMinSize, scoring.sizeSol);
 
       // AI-TUNE(2026-06-24j/k): PAPER-ONLY exploration lane to prevent strategy starvation.
@@ -4855,7 +4878,14 @@ async function checkOpenPositions() {
         // $29k pool) — that exceeds the +12% peak, so the partial could never fire on exactly the token
         // class this is built for. We use the raw round-trip + an explicit profit margin instead.
         const _partialRtCosts = calcTransactionCosts(pair?.liquidity?.usd ?? 0, parseFloat(trade.amount || "0") * engineSettings.partialTpRatio);
-        const effectivePartialTpThreshold = Math.max(engineSettings.partialTpThreshold, _partialRtCosts.totalRoundTripPct + engineSettings.partialTpCostMargin);
+        // BANK-THE-PEAK FIX(2026-07-01): the partial sells HALF and only incurs an EXIT cost — the entry
+        // cost is already sunk — so gating on the full round-trip (entry+exit) double-counted the sunk
+        // entry and pushed the effective trigger to ~7.8% on a $30k pool. Real coins peaked +5-6% and the
+        // partial NEVER fired (0 partials across $QUOTA/$FABLE), so every winner round-tripped to a loss.
+        // Gate on EXIT-only cost + margin instead; the base partialTpThreshold (+5%) still floors it so the
+        // half-bag is banked on the way UP (proactive) before the reactive breakeven floor can be gapped.
+        const _partialExitCostPct = _partialRtCosts.exitSlippagePct + _partialRtCosts.exitFeePct;
+        const effectivePartialTpThreshold = Math.max(engineSettings.partialTpThreshold, _partialExitCostPct + engineSettings.partialTpCostMargin);
         if (!partialTpTaken.has(trade.id) && partialTpFailures < 3 && pnlPct >= effectivePartialTpThreshold && pnlPct < dynamicTP) {
           const sizeSol = parseFloat(trade.amount);
           const partialSize = sizeSol * engineSettings.partialTpRatio;
