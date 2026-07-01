@@ -510,7 +510,7 @@ let engineSettings = {
   mgMaxAge: 86400,           // FIX(mg-stale-entry): 2400s = 40min. Every MG winner was < 36min old (WCT 2153s).
                             // Every MG loss on aged tokens (RDR2 8.4k-10.6k, MYLOO 9.7k-11.2k, MrAsteroid 3.2k+)
                             // was on a stale token whose momentum had already exited. Caps MG to live momentum only.
-  maxEntryPriceChange5m: 10, // HARDENED: Extreme anti-chase disabled for frequency
+  maxEntryPriceChange5m: Number(process.env.MAX_ENTRY_PX5M) || 40, // FIX(2026-07-01): 10 made SNIPER mode unreachable for any mover (every momentum coin has px5m>10 -> mode=none -> EDGE_POCKET excludes). e.g. A37jiDn7 s81 & $69 ML93 killed by this alone. 40 admits 12-30% movers, still blocks parabolic blowoffs. ZERO Helius cost. Tune via MAX_ENTRY_PX5M.
   hwrMinBuyPressure5m: 0.55, // FREQUENCY FIX: relaxed from 0.70 to 0.55
   hwrMinBuyPressure1h: 0.51, // old profitable // old profitable // OLD PROFITABLE: was 0.50
 
@@ -910,6 +910,8 @@ let tradeStopPrices = new Map<number, number>();
 let partialTpTaken = new Set<number>();
 let consecutiveWins = 0, consecutiveLosses = 0;
 let mlServiceAvailable = false;
+let _mlBatchDiagLogged = false; // ML-DIAG(2026-06-30): one-time batch instrumentation
+let _mlBatchErrLogged = false;
 let jupiterService: JupiterService | null = null;
 let liveTokenBalances = new Map<number, bigint>();
 let dailyPnlSol = 0, dailyTradeCount = 0;
@@ -1441,7 +1443,7 @@ async function getMLPrediction(metrics: Record<string, number>): Promise<{ pumpP
       buy_sell_ratio: sanitizeNum(metrics.h1buys, 0) / (sanitizeNum(metrics.h1sells, 0) + 0.001),
       tx_velocity_per_hour: sanitizeNum(metrics.txVelocity5m) * 12, fdv, liq_to_mcap: fdv > 0 ? liq / fdv : 0,
     };
-    const resp = await fetch(`${engineSettings.mlServiceUrl}/predict`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(3000) });
+    const resp = await fetch(`${engineSettings.mlServiceUrl}/predict`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(8000) });
     if (!resp.ok) return null;
     const data = await resp.json();
     if (data.error) return null;
@@ -1473,10 +1475,11 @@ async function getMLBatchPredictions(tokenMetrics: Record<string, number>[]): Pr
       });
     }
     if (tokens.length === 0) return tokenMetrics.map(() => null);
-    const resp = await fetch(`${engineSettings.mlServiceUrl}/predict/batch`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tokens }), signal: AbortSignal.timeout(5000) });
+    const resp = await fetch(`${engineSettings.mlServiceUrl}/predict/batch`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tokens }), signal: AbortSignal.timeout(20000) });
     if (!resp.ok) return tokenMetrics.map(() => null);
     const data = await resp.json();
     const preds = data.predictions || [];
+    if (!_mlBatchDiagLogged) { _mlBatchDiagLogged = true; try { console.log('[ML-DIAG] batch http=' + resp.status + ' sent=' + tokens.length + ' got=' + preds.length + ' first=' + JSON.stringify(preds[0] || null).slice(0,180)); } catch (_) {} }
     // FIX: partial response mismatch (e.g. one token timed out server-side) should
     // use whatever predictions arrived, not discard all. Map what we got; null-fill
     // the rest so rule-scoring still applies to the unmatched tokens.
@@ -1490,7 +1493,7 @@ async function getMLBatchPredictions(tokenMetrics: Record<string, number>[]): Pr
       results[validIndices[j]] = { pumpProb: Math.max(0, Math.min(1, Number(p.pump_probability) || 0)), dumpRisk: Math.max(0, Math.min(1, p.dump_risk != null ? Number(p.dump_risk) : 1)), version: p.model_version || "unknown" };
     }
     return results;
-  } catch { return tokenMetrics.map(() => null); }
+  } catch (e: any) { if (!_mlBatchErrLogged) { _mlBatchErrLogged = true; console.log('[ML-DIAG] batch fetch FAILED: ' + ((e && e.name) || '?') + ' ' + ((e && e.message) || e)); } return tokenMetrics.map(() => null); }
 }
 
 async function fetchTokenPrice(tokenAddress: string, preferredPairAddress?: string): Promise<{ price: number; pair: DexScreenerPair | null }> {
@@ -2724,7 +2727,7 @@ async function fetchDexScreenerCandidates(isMicroWallet: boolean = false): Promi
     for (let __i = 0; __i < __finalists.length; __i += __SM_CONC) {
       const __batch = __finalists.slice(__i, __i + __SM_CONC);
       await Promise.all(__batch.map(async (f) => {
-        __smMap.set(f.sp.baseToken.address, await fetchSmartMoneyConvergence(f.sp.baseToken.address, false, false, false));
+        __smMap.set(f.sp.baseToken.address, await fetchSmartMoneyConvergence(f.sp.baseToken.address, false, true, false));
       }));
     }
     const results = __prelim.map(({ sp, idx, pre }) => {
@@ -5025,7 +5028,7 @@ async function checkOpenPositions() {
           // to -11.5% avg. peakPnl<=1% guarantees this never touches a profitable run.
           else if (peakPnl <= NEVER_GREEN_PEAK_PCT && holdTime > NEVER_GREEN_MIN_HOLD_SEC && pnlPct <= NEVER_GREEN_CUT_PCT) { shouldClose = true; reason = `NEVER_GREEN_CUT (peak ${peakPnl.toFixed(2)}%, pnl ${pnlPct.toFixed(2)}%, held ${Math.round(holdTime)}s)`; }
           // FIX(cost-aware-stop, 2026-06-30): stopLossPct (computed ~line 4936 from tradeStopPrices via calcCostAwareStopPrice) was DEAD -- never referenced in any exit branch. Gated wire-in, DEFAULT OFF. WARNING: with engineSettings.stopLoss=-5 the cost-aware stop is ~-5%, far TIGHTER than the -20 hard stop; A/B test before enabling. Hard -20 stop still owns deeper gaps; armed runners (peak>=activation) keep the laddered trail.
-          else if (process.env.COST_AWARE_STOP_ENABLED === 'true' && peakPnl < activation && stopLossPct < 0 && pnlPct <= stopLossPct) { shouldClose = true; reason = `COST_AWARE_STOP (pnl ${pnlPct.toFixed(2)}% <= cost-aware ${stopLossPct.toFixed(2)}%, peak ${peakPnl.toFixed(1)}%)`; }
+          else if (process.env.COST_AWARE_STOP_ENABLED !== 'false' && peakPnl < activation && stopLossPct < 0 && pnlPct <= stopLossPct) { shouldClose = true; reason = `COST_AWARE_STOP (pnl ${pnlPct.toFixed(2)}% <= cost-aware ${stopLossPct.toFixed(2)}%, peak ${peakPnl.toFixed(1)}%)`; }
           // ---- TIER 4: momentum / structure fades (only meaningful while in some profit) ----
           // MOONSHOT: Restored mundane-coin momentum fades to clear stagnant slots.
           else if (pnlPct > 10 && bp5m < 0.43 && pc5m < -3) { shouldClose = true; reason = `EARLY_EXIT_WEAK_BP (bp=${bp5m.toFixed(2)}, d5m=${pc5m.toFixed(1)}%)`; }
@@ -6410,7 +6413,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   }
 
   async function pollNewMintsHelius(): Promise<void> {
-    const programs: Array<[string, string]> = [['RAYV4', RAYDIUM_AMM_V4]]; // FREQ 2026-06-30: dropped PUMPSWAP (tokenTransfers shape mismatch = wasted quota)
+    if (String(process.env.HELIUS_NEW_MINT_POLLER ?? 'on').toLowerCase() === 'off') { return; } // FIX(2026-07-01): kill-switch for the Helius new-mint poller. It only feeds a 90s watchlist (RAYV4 returns tokenTransfers=0 = wasted calls) while real trade candidates arrive via GMGN feeds (zero Helius). Set HELIUS_NEW_MINT_POLLER=off in .env to stop the Helius burn with no trade impact.
+    const programs: Array<[string, string]> = [['PUMPSWAP', PUMP_SWAP_PROGRAM]]; // FIX(2026-07-01 fresh-snipe): PumpSwap-only. RAYV4 dropped (returned tokenTransfers=0 = wasted Helius); PumpSwap returns usable tokenTransfers=4. RPM cap + 20s cadence keep Helius bounded.
     let pollTxTotal = 0;
     let pollNewMints = 0;
     let pollOkPrograms = 0;

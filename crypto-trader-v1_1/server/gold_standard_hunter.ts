@@ -156,7 +156,7 @@ const CFG = {
   CHAIN: 'sol' as const,
 
   // === LAYER 3: Quality Thresholds (widened net — score still filters) ===
-  MIN_LIQUIDITY_USD:    10_000,   // FREQ(2026-06-29): 15K->10K. Let score handle borderline liq.
+  MIN_LIQUIDITY_USD:    25_000,   // FREQ(2026-06-29): 15K->10K. Let score handle borderline liq.
   MIN_HOLDER_COUNT:     200,      // FREQ(2026-06-29): 300->200. More tokens enter scoring; low holders get negative score.
   MAX_HOLDER_COUNT:     5_000,    // sweet spot top
   MIN_MARKET_CAP:       50_000,   // FREQ(2026-06-29): 100K->50K. Catch early runners before they hit 100K.
@@ -542,15 +542,42 @@ export async function scoreToken(
   source: GoldSignal['source'],
   extra?: Partial<GoldSignal>
 ): Promise<GoldSignal | null> {
-  const [gmgnData, dexData] = await Promise.all([
+  let [gmgnData, dexData] = await Promise.all([
     fetchGmgnInfo(mint),
     fetchDexPair(mint),
   ]);
+
+  // FRESH-SOURCE FIX(2026-07-01): gmgn-cli `token info` fails/lags for the freshest pump.fun
+  // mints — they launch faster than GMGN indexes them (confirmed by repeated
+  // '[GMGN] error: Command failed: gmgn-cli token info ...pump'). The old
+  // `if (!gmgnData) return null` SILENTLY DROPPED every fresh coin at the source, so only
+  // aged/indexed tokens ever survived. When gmgn info is missing but DexScreener has the pair
+  // with real liquidity, synthesize a NEUTRAL token-info (no fabricated gmgn bonuses) and let
+  // goldScore run on REAL dex data (liq/mcap/age/buyRatio/volAccel/capEff). Fresh launches now
+  // survive to scoring; the bot's own scorer + safety layer still make the final entry call.
+  let _dexOnlyFresh = false;
+  if (!gmgnData) {
+    if (!dexData || (dexData.liquidity?.usd ?? 0) < CFG.MIN_LIQUIDITY_USD) return null;
+    _dexOnlyFresh = true;
+    const _createdSec = dexData.pairCreatedAt ? Math.floor(dexData.pairCreatedAt / 1000) : Math.floor(Date.now() / 1000);
+    gmgnData = {
+      address: mint,
+      holder_count: 0,
+      creation_timestamp: _createdSec,
+      launchpad_platform: '',
+      dev: { creator_address: '', creator_open_count: 10, creator_token_status: 'none' as any, top_10_holder_rate: 0 },
+      stat: { rat_trader_amount_rate: -1, top_bundler_trader_percentage: 0.10, top_entrapment_trader_percentage: 0, fresh_wallet_rate: 0 },
+      price: {},
+      link: {},
+      security: { is_honeypot: false },
+    } as unknown as GmgnTokenInfo;
+  }
 
   if (!gmgnData) return null;
 
   const signals: string[] = [];
   const score = goldScore(gmgnData, dexData, signals);
+  if (_dexOnlyFresh) signals.unshift('⚡ FRESH dex-only source (gmgn not indexed yet)');
 
   if (score < 0) return null; // Hard rejected
 
@@ -1021,5 +1048,3 @@ export async function runHunter(): Promise<GoldSignal[]> {
 
   return allResults;
 }
-
-
