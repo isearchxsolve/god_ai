@@ -1565,7 +1565,7 @@ async function fetchTokenPriceForExit(tokenAddress: string): Promise<{ price: nu
 // Time-tested entry edge — enter where proven-profitable wallets are
 // already accumulating. Reuses the existing BIRDEYE_API_KEY.
 // Endpoint: GET /defi/v2/tokens/top_traders (documented; x-chain: solana)
-// ─────────────────────────────────────────�����─�����────────────────────
+// ─────────────────────────────────────────�������─�����────────────────────
 interface SmartMoneySignal { count: number; netBuyers: number; topRealizedPnl: number; whaleCount: number; whaleNetBuyers: number; whaleNetSellers: number; washSuspects: number; source?: "birdeye" | "free" | "helius"; }
 // ── BIRDEYE MULTI-KEY ROTATION SYSTEM (AI-FIX 2026-06-24) ──────────────────�����─���������────
 // Birdeye free-tier keys have a daily CU limit (~1000 CU). A single key runs out mid-session
@@ -2249,8 +2249,14 @@ function objectiveNetEvPct(liqUsd: number, sizeSol: number, solPriceUsd = cached
   // Conviction scales expected capture. Calibrated so the ONLY empirically-
   // positive pocket (SNIPER/score>=80 at ~$25k liq = +3.06%/trade realized,
   // n=63) clears the gate, while the documented-negative 70-79 band does not.
-  const conviction = Math.max(0, Math.min(1.2, (score - 70) / 20)); // 0 @ s70 -> 1 @ s90
-  const captureMult = 0.7 + 1.3 * conviction;
+  // [FIX D1 — Framework v3] captureMult capped at 1.0.
+  // DEFECT: old formula (0.7 + 1.3 * clamp) reached 2.26 at score=100 — physically
+  // impossible (cannot capture > 100% of a price move). At score=90, liq=$8k:
+  //   old: captureMult=2.0 → f(x)=2.0*5%-6.6%=+3.4% → ENTERS (wrong)
+  //   new: captureMult=1.0 → f(x)=1.0*5%-6.6%=-1.6% → SKIPS  (correct)
+  // New range: [0.70, 1.00]. score≤70→0.70, score=90→1.00, score=100→1.00 (hard cap).
+  const conviction = Math.max(0, Math.min(1.0, (score - 70) / 20)); // 0 @ s70 -> 1.0 @ s90, capped
+  const captureMult = 0.7 + 0.3 * conviction; // range [0.70, 1.00] — physically bounded
   const grossCapturePct = peakPct * captureMult;
   const netEvPct = grossCapturePct - costs.totalRoundTripPct;
   return { peakPct, grossCapturePct, rtCostPct: costs.totalRoundTripPct, netEvPct };
