@@ -75,8 +75,8 @@ async def predict_single(request: Request):
         return result
     except Exception as e:
         return JSONResponse(status_code=200, content={
-            "pump_probability": 0.5,
-            "dump_risk": 0.5,
+            "pump_probability": 0.0,
+            "dump_risk": 1.0,
             "model_version": predictor.version,
             "error": str(e)
         })
@@ -92,7 +92,7 @@ async def predict_batch(request: Request):
                 result = predictor.predict(features.sanitized_dict())
                 results.append(result)
             except Exception:
-                results.append({"pump_probability": 0.5, "dump_risk": 0.5, "model_version": predictor.version})
+                results.append({"pump_probability": 0.0, "dump_risk": 1.0, "model_version": predictor.version})
         return {"predictions": results}
     except Exception as e:
         return JSONResponse(status_code=200, content={"predictions": [], "error": str(e)})

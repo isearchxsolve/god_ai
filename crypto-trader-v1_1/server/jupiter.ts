@@ -483,7 +483,8 @@ export class JupiterService {
 
       try {
         const outAmount = BigInt(quote.outAmount);
-        const minOut = (outAmount * BigInt(10000 - slippageBps)) / 10000n;
+        const safeSlippageBps = Math.min(slippageBps, 9999);
+        const minOut = (outAmount * BigInt(10000 - safeSlippageBps)) / 10000n;
 
         const swapBody: Record<string, any> = {
           quoteResponse: quote,

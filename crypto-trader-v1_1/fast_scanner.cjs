@@ -58,7 +58,7 @@ async function dexscreenerPass(mint) {
         const best = sol.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
         const liq = best.liquidity?.usd || 0;
         const vol = best.volume?.h24 || 0;
-        const ageH = (Date.now() - (best.pairCreatedAt || Date.now())) / 3600000;
+        const ageH = best.pairCreatedAt ? (Date.now() - best.pairCreatedAt) / 3600000 : 99999;
         const ratio = liq > 0 ? vol / liq : 0;
         if (liq < MIN_LP_USD)      return { pass: false, reason: `liq $${liq.toFixed(0)} < $${MIN_LP_USD}` };
         if (ageH < MIN_AGE_HOURS)  return { pass: false, reason: `age ${ageH.toFixed(1)}h < ${MIN_AGE_HOURS}h` };

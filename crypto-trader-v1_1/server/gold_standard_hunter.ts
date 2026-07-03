@@ -156,10 +156,10 @@ const CFG = {
   CHAIN: 'sol' as const,
 
   // === LAYER 3: Quality Thresholds (widened net — score still filters) ===
-  MIN_LIQUIDITY_USD:    25_000,   // FREQ(2026-06-29): 15K->10K. Let score handle borderline liq.
-  MIN_HOLDER_COUNT:     200,      // FREQ(2026-06-29): 300->200. More tokens enter scoring; low holders get negative score.
+  MIN_LIQUIDITY_USD:    3_000,    // FREQ(2026-07-03): 25K->3K to catch extreme early 1000x runners
+  MIN_HOLDER_COUNT:     50,       // FREQ(2026-07-03): 200->50 for early pump.fun trenches
   MAX_HOLDER_COUNT:     5_000,    // sweet spot top
-  MIN_MARKET_CAP:       50_000,   // FREQ(2026-06-29): 100K->50K. Catch early runners before they hit 100K.
+  MIN_MARKET_CAP:       8_000,    // FREQ(2026-07-03): 50K->8K to unlock 1000x mathematical upside
   MAX_MARKET_CAP:     1_000_000,
 
   // === LAYER 4: Timing ===
@@ -343,7 +343,7 @@ export function goldScore(
   } else if (liq >= 10_000) {
     score += 5;  signals.push(`Liquidity $${(liq/1000).toFixed(0)}K [low, +5]`);
   } else {
-    score -= 10; signals.push(`Liquidity $${liq.toFixed(0)} [DANGER <$10K, -10]`);
+    score += 0; signals.push(`Liquidity $${liq.toFixed(0)} [TRENCHES <$10K, +0]`);
   }
 
   const mcap = dex?.marketCap ?? dex?.fdv ?? 0;
@@ -351,6 +351,8 @@ export function goldScore(
     score += 10; signals.push(`MCap $${(mcap/1000).toFixed(0)}K [78% moon, +10]`);
   } else if (mcap >= 10_000 && mcap < 100_000) {
     score += 6;  signals.push(`MCap $${(mcap/1000).toFixed(0)}K [safe entry, +6]`);
+  } else if (mcap > 0 && mcap < 10_000) {
+    score += 10; signals.push(`MCap $${(mcap/1000).toFixed(1)}K [1000x MOONSHOT POTENTIAL, +10]`);
   }
 
   // ── LAYER 4: Timing precision (max +30 pts) ────────────────────────────────
@@ -559,7 +561,7 @@ export async function scoreToken(
   if (!gmgnData) {
     if (!dexData || (dexData.liquidity?.usd ?? 0) < CFG.MIN_LIQUIDITY_USD) return null;
     _dexOnlyFresh = true;
-    const _createdSec = dexData.pairCreatedAt ? Math.floor(dexData.pairCreatedAt / 1000) : Math.floor(Date.now() / 1000);
+    const _createdSec = dexData.pairCreatedAt ? Math.floor(dexData.pairCreatedAt / 1000) : 0;
     gmgnData = {
       address: mint,
       holder_count: 0,

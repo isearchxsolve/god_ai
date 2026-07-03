@@ -65,7 +65,7 @@ export function evaluateTokenSafetyPreflight(
     };
   }
 
-  const ageSeconds = (input.now - (input.pairCreatedAt || input.now)) / 1000;
+  const ageSeconds = input.pairCreatedAt ? (input.now - input.pairCreatedAt) / 1000 : 99999;
   const minSells =
     ageSeconds < 120 ? 2 : ageSeconds < 300 ? 5 : ageSeconds < 900 ? 8 : 10;
 

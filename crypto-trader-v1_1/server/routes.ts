@@ -2867,13 +2867,13 @@ async function checkTokenSafety(tokenAddress: string, pair: DexScreenerPair, gol
   // Requiring deep liquidity pushes the price-impact component of round-trip cost under ~3%,
   // so a paper "winner" can actually be crystallized instead of being held forever by the cost gate.
   // Tunable via ENTRY_MIN_LIQ_USD; default $25,000. // AI-TUNE(2026-06-28): default 100000 -> 25000. NEEDLE-MOVER: the live $40k floor was the dominant no-trade cause — nearly all fresh runners (CLIVE/ORANGIE/Cedric/MVLL/SBF/drooling) sit in the $15k-$36k band, were scored top-5, then killed by liquidity_below_entry_floor; only stale large-caps cleared $40k and either scored too low or were vetoed. $25k = documented old-profitable floor, still above the BioCraft $21k disaster line. NOTE: the running .env still sets ENTRY_MIN_LIQ_USD=40000 — change it to 25000 (or remove the line) for this to take effect at runtime.
-  const ENTRY_MIN_LIQ_USD = Number(process.env.ENTRY_MIN_LIQ_USD) || 25000;
+  const ENTRY_MIN_LIQ_USD = Number(process.env.ENTRY_MIN_LIQ_USD) || 3000; // Aligned with gold_standard_hunter moonshot config
   if (liq < ENTRY_MIN_LIQ_USD) return { safe: false, reason: `liquidity_below_entry_floor($${Math.round(liq)} < $${ENTRY_MIN_LIQ_USD})` };
   const m5sells = pair.txns?.m5?.sells || 0;
   // AGE-SCALED honeypot gate: brand-new launches legitimately have few sells in their first
   // minutes, so a flat `<10` floor blocked most SNIPER-age candidates before RugCheck ran.
   // Scale required sells with pair age (a true 0-sell honeypot is still caught at every age).
-  const _ageSecSells = (Date.now() - (pair.pairCreatedAt || Date.now())) / 1000;
+  const _ageSecSells = pair.pairCreatedAt ? (Date.now() - pair.pairCreatedAt) / 1000 : 99999;
   const _minSells = _ageSecSells < 120 ? 2 : _ageSecSells < 300 ? 5 : _ageSecSells < 900 ? 8 : 10;
   if (m5sells < _minSells) return { safe: false, reason: `insufficient_sell_activity_honeypot_risk(${m5sells}/${_minSells}@${Math.round(_ageSecSells)}s)` };
 
