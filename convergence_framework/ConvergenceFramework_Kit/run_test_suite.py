@@ -12,14 +12,21 @@ reports an aggregate PASS RATE per case per model. It reports a RATE — never
 
 RUN THIS OUTSIDE any sandbox (it needs network + your own API keys).
 
-Setup:
+Setup (pick ONE mode - the first two cost nothing):
   pip install requests
-  export OPENAI_API_KEY=...       # optional, enables OpenAI candidates
-  export ANTHROPIC_API_KEY=...    # optional, enables Anthropic candidates
-  export GOOGLE_API_KEY=...       # optional, enables Gemini candidates
-  # You need at least TWO providers so the grader can be independent.
-Edit CANDIDATE_MODELS / GRADER_MODEL / N below, then:
-  python run_test_suite.py
+  # (A) FREE + LOCAL, no keys, offline once models are pulled -> RECOMMENDED if broke:
+  #       install Ollama (https://ollama.com), then:
+  #       ollama pull llama3.1 && ollama pull qwen2.5
+  #       PRESET=ollama python run_test_suite.py
+  # (B) FREE cloud tiers (free key, NO card):
+  #       GROQ_API_KEY  from https://console.groq.com
+  #       GOOGLE_API_KEY from https://aistudio.google.com
+  #       PRESET=free-cloud python run_test_suite.py
+  # (C) PAID frontier models (highest fidelity):
+  #       export OPENAI_API_KEY / ANTHROPIC_API_KEY / GOOGLE_API_KEY
+  #       python run_test_suite.py            # PRESET=paid is the default
+  # Independence holds in EVERY mode: grader model != candidate model, so you
+  # need at least TWO distinct models (two local models is fine).
 Outputs: test_suite_results.csv + a console summary.
 """
 import os, json, time, csv
@@ -31,18 +38,57 @@ N = int(os.environ.get("N_RUNS", "5"))
 TEMPERATURE = float(os.environ.get("TEMPERATURE", "0.7"))
 TIMEOUT = 120
 
-# (provider, model). Comment out any you don't have a key for.
-CANDIDATE_MODELS = [
-    ("openai", "gpt-4o"),
-    ("anthropic", "claude-3-5-sonnet-latest"),
-    ("google", "gemini-1.5-pro"),
-]
-# Preferred grader; the harness will pick a different model if it collides with
-# the candidate being graded.
-GRADER_MODEL = ("anthropic", "claude-3-5-sonnet-latest")
+# --------------------------- providers ---------------------------
+# OpenAI-compatible endpoints. ollama / lmstudio need NO key and run locally at
+# ZERO cost; groq / openrouter / together have genuine FREE tiers (free key, no
+# card). Override a local URL with OLLAMA_URL / LMSTUDIO_URL if needed.
+OPENAI_COMPAT = {
+    "openai":     ("https://api.openai.com/v1/chat/completions",      "OPENAI_API_KEY"),
+    "groq":       ("https://api.groq.com/openai/v1/chat/completions", "GROQ_API_KEY"),
+    "openrouter": ("https://openrouter.ai/api/v1/chat/completions",   "OPENROUTER_API_KEY"),
+    "together":   ("https://api.together.xyz/v1/chat/completions",    "TOGETHER_API_KEY"),
+    "ollama":     (os.environ.get("OLLAMA_URL",   "http://localhost:11434/v1/chat/completions"), None),
+    "lmstudio":   (os.environ.get("LMSTUDIO_URL", "http://localhost:1234/v1/chat/completions"),  None),
+}
+# Native (non-OpenAI-shape) providers keep their own callers below.
+NATIVE_KEYENV = {"anthropic": "ANTHROPIC_API_KEY", "google": "GOOGLE_API_KEY"}
 
-KEYENV = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY",
-          "google": "GOOGLE_API_KEY"}
+
+def keyenv(provider):
+    if provider in OPENAI_COMPAT:
+        return OPENAI_COMPAT[provider][1]      # may be None (keyless local)
+    return NATIVE_KEYENV.get(provider)
+
+
+# Choose models WITHOUT editing code, via env vars:
+#   PRESET=ollama      local llama3.1 (candidate) + qwen2.5 (grader) -> $0, no keys
+#   PRESET=free-cloud  gemini-flash (free key) + groq llama (free key)
+#   PRESET=paid        gpt-4o + claude + gemini-pro (needs paid keys) [default]
+# Or set them explicitly (comma-separated "provider:model"):
+#   CANDIDATES="ollama:llama3.1,ollama:qwen2.5"  GRADER="ollama:qwen2.5"
+PRESETS = {
+    "ollama":     (["ollama:llama3.1", "ollama:qwen2.5"], "ollama:qwen2.5"),
+    "lmstudio":   (["lmstudio:model-a", "lmstudio:model-b"], "lmstudio:model-b"),
+    "free-cloud": (["google:gemini-1.5-flash", "groq:llama-3.3-70b-versatile"],
+                   "groq:llama-3.3-70b-versatile"),
+    "paid":       (["openai:gpt-4o", "anthropic:claude-3-5-sonnet-latest",
+                    "google:gemini-1.5-pro"], "anthropic:claude-3-5-sonnet-latest"),
+}
+
+
+def _parse(spec):
+    p, m = spec.split(":", 1)
+    return (p.strip(), m.strip())
+
+
+_preset = os.environ.get("PRESET", "paid")
+if _preset not in PRESETS:
+    raise SystemExit("Unknown PRESET %r; choose one of %s" % (_preset, list(PRESETS)))
+_cand_env = os.environ.get("CANDIDATES")
+_grader_env = os.environ.get("GRADER")
+CANDIDATE_MODELS = ([_parse(s) for s in _cand_env.split(",") if s.strip()]
+                    if _cand_env else [_parse(s) for s in PRESETS[_preset][0]])
+GRADER_MODEL = _parse(_grader_env) if _grader_env else _parse(PRESETS[_preset][1])
 
 # ---- behavioral cases (runnable subset of TEST_SUITE.md; extend freely) ----
 Z1_CODE = (
@@ -119,14 +165,19 @@ CASES = [
 
 
 def available(pm):
-    return bool(os.environ.get(KEYENV[pm[0]]))
+    env = keyenv(pm[0])
+    if env is None:            # keyless local provider (ollama / lmstudio)
+        return True
+    return bool(os.environ.get(env))
 
 
-def call_openai(model, system, user):
+def call_openai_compatible(provider, model, system, user):
+    url, env = OPENAI_COMPAT[provider]
+    headers = {"Content-Type": "application/json"}
+    if env:                                    # local providers need no key
+        headers["Authorization"] = "Bearer " + os.environ[env]
     r = requests.post(
-        "https://api.openai.com/v1/chat/completions",
-        headers={"Authorization": "Bearer " + os.environ["OPENAI_API_KEY"],
-                 "Content-Type": "application/json"},
+        url, headers=headers,
         json={"model": model, "temperature": TEMPERATURE,
               "messages": [{"role": "system", "content": system},
                            {"role": "user", "content": user}]},
@@ -163,12 +214,15 @@ def call_google(model, system, user):
     return "".join(p.get("text", "") for p in parts)
 
 
-DISPATCH = {"openai": call_openai, "anthropic": call_anthropic,
-            "google": call_google}
-
-
 def call_model(pm, system, user):
-    return DISPATCH[pm[0]](pm[1], system, user)
+    provider = pm[0]
+    if provider in OPENAI_COMPAT:
+        return call_openai_compatible(provider, pm[1], system, user)
+    if provider == "anthropic":
+        return call_anthropic(pm[1], system, user)
+    if provider == "google":
+        return call_google(pm[1], system, user)
+    raise ValueError("unknown provider: " + provider)
 
 
 GRADER_SYSTEM = (
@@ -210,8 +264,9 @@ def main():
         system = fh.read()
     cands = [pm for pm in CANDIDATE_MODELS if available(pm)]
     if not cands:
-        raise SystemExit("No candidate providers have API keys set. Set at least "
-                         "one of OPENAI/ANTHROPIC/GOOGLE_API_KEY.")
+        raise SystemExit("No candidate models available. Use PRESET=ollama for a "
+                         "free local run (install Ollama, no keys), or set a free "
+                         "key (GROQ_API_KEY / GOOGLE_API_KEY) with PRESET=free-cloud.")
     providers_up = [pm for pm in CANDIDATE_MODELS + [GRADER_MODEL] if available(pm)]
     if len({pm for pm in providers_up}) < 2:
         print("WARNING: only one model available — the grader cannot be "

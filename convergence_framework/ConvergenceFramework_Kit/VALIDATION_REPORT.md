@@ -1,3 +1,8 @@
+# STATUS: UNVALIDATED - REASONING ONLY (Validation: PENDING)
+Defects and fixes here were found by STATIC REASONING. None of the rule additions (H1-H14, profiles) have been empirically tested against real model behavior; whether they raise or (via the capacity ceiling) LOWER actual adherence is UNMEASURED. This is a Discovery-phase artifact. Validation requires an external multi-model run (run_test_suite.py). Treating it as completed validation would be the self-grading / oracle-validity failure (H10) this framework warns against.
+
+---
+
 # Validation Report — Honest Dry-Run of the Convergence Framework
 
 Scope: a design-review + worked-case dry-run of the two system prompts against
@@ -153,3 +158,46 @@ real-money/production actions MORE necessary, not less, plus a tested kill-switc
 RESULT: runtime access changes HOW validation runs, not WHAT counts as valid. The
 human shrinks to two irreducible roles: independent final judge, and authorizer of
 irreversible actions.
+
+## Discovery/Validation boundary (post-mortem correction)
+
+OBSERVATION: a careful reader misread zero-runtime discipline as "never run /
+verify 100% from specification." That ambiguity is itself a framework defect — it
+inverts H8/H12/the Runtime Validity Gate and re-commits the oracle error in
+reverse (trusting a spec-model of reality over reality; a validation whose only
+oracle is one's own reasoning = self-grading, violating H10 independence).
+
+VALID sub-findings accepted: Phase 0 too-narrow objective (premature
+"convergence"); Scan/Fix overlap (patching inline instead of record-all-then-fix);
+mocking that hid real tail behavior.
+
+FIX: added a DISCOVERY vs VALIDATION clarification — zero-runtime governs
+DISCOVERY (find defects by reasoning, don't run-and-patch); VALIDATION requires
+empirical confirmation / fault injection for any empirical claim. Added the D{N}
+defect-record format (record all in Discovery before fixing; an empty Validation
+field for an empirical claim is itself a defect). Added test case DV1.
+
+NOTE: static analysis finds bugs cheaply and should be used first; it does NOT
+discharge an empirical claim. "Enumerate statically, then fault-inject to confirm."
+
+## The structural adherence gap (why no agent follows the framework fully)
+
+ROOT: the framework is prose executed BY the model it constrains — no independent
+enforcer. A stochastic agent (H4), fighting its own trained sycophancy prior, over
+a long horizon, against an open world (Rice), self-policing with the same weights
+that cause the drift, cannot reach 100% adherence. Compounding: per-step adherence
+<100% multiplies over many steps.
+
+SELF-CRITIQUE: adding rules (H7-H14, profiles, formats) raises the ceiling of what
+is COVERED but can LOWER adherence via the CAPACITY CEILING — a model applies only
+so many constraints per step, so more prose dilutes attention. This file's growth
+is an instance of the failure it warns about.
+
+RESOLUTION: (1) split rules into MECHANICAL (enforce in the external, deterministic
+gate — the only parts that can approach full enforcement) vs DISPOSITIONAL (honesty,
+exhaustive reasoning) which cannot be mechanically enforced; (2) catch residual
+dispositional drift with an INDEPENDENT reviewer (grader != author, or human),
+since errors are correlated within one model but broken by independence; (3)
+COMPRESS point-of-use rules — a shorter prompt that is followed beats a longer one
+that is not. Target: high floor + external gate + independent review + bounded
+blast radius (H14), not unreachable 100%.

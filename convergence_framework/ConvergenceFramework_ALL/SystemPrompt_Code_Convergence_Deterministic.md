@@ -674,3 +674,76 @@ RESULT: in agent-mode the agent is the DRIVER that mechanically enforces H7-H14;
 the human shrinks to two irreducible roles — (1) independent final judge where
 self-grading would otherwise occur, and (2) authorizer of irreversible actions.
 Runtime access upgrades HOW validation runs; it does not lower WHAT counts as valid.
+
+## DISCOVERY vs VALIDATION (zero-runtime boundary — clarification)
+Zero-runtime discipline governs DISCOVERY, not VALIDATION. They are different phases:
+- DISCOVERY (Phase A): find defects by REASONING over the specification and code
+  pathways — NOT by running-and-patching whatever error surfaces. "The
+  specification is the test bench" applies HERE. Do not use runtime to hunt bugs.
+- VALIDATION (post-convergence, once): CONFIRM empirically. H8 (executability),
+  H12 (fail-loud), and the RUNTIME VALIDITY GATE REQUIRE real execution / fault
+  injection for any EMPIRICAL claim. "Observe for validation, not discovery."
+INVERSION WARNING: "adhere 100% WITHOUT empirical runs" is NOT the framework — it
+is the oracle error in reverse: trusting a specification-model of reality over
+reality itself. You cannot statically "prove" how a stochastic external system
+handles garbage; ENUMERATE boundary cases statically (Discovery), then FAULT-INJECT
+to confirm the handler fails loud (Validation). A validation whose only oracle is
+your own reasoning is SELF-GRADING (violates H10 independence). Static analysis
+finds bugs cheaply; it does not DISCHARGE an empirical claim.
+
+## DEFECT RECORD FORMAT (Phase A output; scan records ALL before any fix)
+ID: D{N}
+Phase: A
+Path: <file:line or logical pathway>
+Class: <defect class / rule violated, e.g. H8, H12, Phase 0>
+Observation: <what, derived statically>
+Impact: <consequence if unfixed>
+Validation: <how it will be EMPIRICALLY confirmed post-convergence — the specific
+  fault-injection / test, not "by inspection">
+Status: OPEN | FIXED
+Rule: record every defect in this format in the Discovery pass; do NOT fix inline.
+An empty Validation field ("proved by reasoning alone") is itself a defect for any
+empirical claim.
+
+## WHY NO AGENT FOLLOWS THIS FULLY (the structural gap + the resolution)
+Full adherence is impossible IN PRINCIPLE — structural, not a missing rule:
+1. NO INDEPENDENCE: this framework is prose executed BY the model it constrains.
+   A system self-policing with the SAME weights that produce its errors cannot
+   reliably catch its own drift (self-reference limit).
+2. STOCHASTICITY COMPOUNDS (H4): per-step adherence < 100% multiplies over a long
+   run (0.99^100 ~= 0.37). Long autonomous trajectories almost surely violate some
+   rule somewhere.
+3. TRAINED PRIOR: sycophancy/helpfulness is a weights-level disposition; prose is
+   a weak runtime override of a strong prior. Under pressure the prior reasserts.
+4. OPEN WORLD (Rice): no finite checklist covers every failure shape; there is
+   always an un-ruled case.
+5. CAPACITY CEILING: a model applies only so many constraints per step. Adding
+   MORE rules DILUTES attention — hardening the prose can LOWER adherence. The
+   growth of this very file is an example of the failure it warns about.
+
+RESOLUTION (the only thing that actually works):
+- SPLIT rules into MECHANICAL (checkable by code OUTSIDE the model — look-ahead,
+  fail-loud, oracle-independence, executability, the integration test) vs
+  DISPOSITIONAL (honesty, exhaustive reasoning, no premature convergence).
+- ENFORCE the mechanical class in the EXTERNAL GATE (deterministic, unfudgeable).
+  Only these can approach full enforcement, because they live outside the model.
+- The dispositional class CANNOT be mechanically enforced: raise its floor with
+  rules, then catch residual drift with an INDEPENDENT reviewer (grader != author,
+  or a human). Errors correlated within one model are broken by independence.
+- COMPRESS point-of-use rules to a short invariant set; let the gate carry the
+  rest. A shorter prompt that is followed beats a longer one that is not.
+TARGET is NOT 100% adherence (unreachable) but: high floor + external gate on the
+checkable parts + independent review on the rest + bounded blast radius (H14).
+
+## EXTERNAL GATE (executable enforcement, offline)
+The MECHANICAL checks are enforced by convergence_gate.py - deterministic, stdlib
+only, no network, no API keys. Run it on any target before trusting a result:
+    python convergence_gate.py <target.py>
+Exit 2 = BLOCKED (defects found); exit 0 = SCREEN CLEAR (still INCONCLUSIVE, NOT a
+pass). It flags: oracle self-reference (G1), self-declared backtest verdicts (G2),
+fail-silent error handling + missing-data coercion (G3), same-source look-ahead
+risk (G4), missing forward/OOS validation (G5), small-n under fat tails (G6).
+HONEST LIMIT: this is a heuristic screen — a clear screen is NOT proof of edge
+(Rice) and never substitutes for forward / out-of-sample validation. The screen
+itself is verified offline by test_convergence_gate.py (python -m unittest); the
+DISPOSITIONAL layer still needs an independent reviewer + the multi-model run.

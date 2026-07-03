@@ -512,3 +512,44 @@ itself instead of deferring it.
 Result: the agent is the driver enforcing H7-H14; the human shrinks to (1)
 independent final judge and (2) authorizer of irreversible actions. Runtime access
 changes HOW validation runs, not WHAT counts as valid.
+
+## DISCOVERY vs VALIDATION (zero-runtime boundary — clarification)
+Zero-runtime governs DISCOVERY, not VALIDATION.
+- DISCOVERY (Phase A): find defects by reasoning over the spec/pathways, not by
+  running-and-patching. "The specification is the test bench" applies here.
+- VALIDATION (post-convergence, once): confirm empirically. H8, H12, and the
+  Runtime Validity Gate REQUIRE real execution / fault injection for any empirical
+  claim. "Observe for validation, not discovery."
+INVERSION WARNING: "verify 100% WITHOUT empirical runs" is NOT the framework — it
+is the oracle error in reverse (trusting a spec-model of reality over reality). You
+cannot statically prove how a stochastic external system handles garbage;
+enumerate boundaries statically, then FAULT-INJECT to confirm fail-loud. A
+validation whose only oracle is your own reasoning is self-grading (violates H10).
+
+DEFECT RECORD FORMAT (Phase A; record ALL before fixing):
+ID: D{N} | Phase: A | Path: <file:line/pathway> | Class: <rule violated> |
+Observation: <static finding> | Impact: <consequence> | Validation: <specific
+empirical confirmation post-convergence> | Status: OPEN|FIXED.
+An empty Validation field for an empirical claim is itself a defect.
+
+## WHY NO AGENT FOLLOWS THIS FULLY (structural gap + resolution)
+Impossible in principle, not a missing rule: (1) NO INDEPENDENCE — prose executed
+by the model it constrains cannot reliably self-police with the same weights that
+cause the drift; (2) STOCHASTICITY COMPOUNDS (H4) — per-step adherence <100%
+multiplies over a long run; (3) TRAINED PRIOR — sycophancy is weights-level; prose
+is a weak override; (4) OPEN WORLD (Rice) — no finite checklist covers every case;
+(5) CAPACITY CEILING — more rules dilute attention, so hardening the prose can
+LOWER adherence.
+RESOLUTION: split rules into MECHANICAL (enforce in the external gate — unfudgeable)
+vs DISPOSITIONAL (raise floor, then catch residual drift with an INDEPENDENT
+reviewer: grader != author, or a human). COMPRESS point-of-use rules; let the gate
+carry the rest. Target = high floor + external gate + independent review + bounded
+blast radius, NOT 100% adherence (unreachable).
+
+## EXTERNAL GATE (executable, offline)
+Mechanical checks are enforced by convergence_gate.py (deterministic, stdlib, no
+network): python convergence_gate.py <target>. Exit 2 = BLOCKED; exit 0 = SCREEN
+CLEAR = INCONCLUSIVE (not a pass). Flags oracle self-reference, self-declared
+verdicts, fail-silent handling, look-ahead risk, missing forward validation,
+small-n. Heuristic only: a clear screen is not proof of edge and never replaces
+forward/OOS validation. Verified offline by test_convergence_gate.py.
