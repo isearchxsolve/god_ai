@@ -453,20 +453,12 @@ def main():
                     print("  call error [%s/%s %s]: %s" % (pm[0], pm[1],
                           case["id"], e))
                     continue
-                if verdict is None:                # grader outage: NOT a candidate failure
-                    print("    -> %-4s [ungraded]: %s" % (case["id"],
-                          (reason or "").strip()[:200]))
-                    details.append({"provider": pm[0], "model": pm[1],
-                                    "case": case["id"], "run": run_idx + 1,
-                                    "verdict": "ungraded",
-                                    "reason": (reason or "").strip()[:500]})
-                    continue                       # exclude from denominator; re-run to complete
                 total += 1
                 if verdict is True:
                     passes += 1
                     vtag = "pass"
-                else:                              # False = genuine rubric miss
-                    vtag = "fail"
+                else:                              # False = rubric miss; None = grader parse fail
+                    vtag = "fail" if verdict is False else "error"
                     print("    -> %-4s [%s]: %s" % (case["id"], vtag,
                           (reason or "").strip()[:200]))
                 details.append({"provider": pm[0], "model": pm[1],
@@ -502,25 +494,18 @@ def main():
             w.writerows(details)
         print("Per-run grader reasons -> %s\n" % DETAILS_CSV)
     graded = [r for r in saved.values() if int(r.get("runs") or 0) > 0]
-    full = [r for r in graded if int(r.get("runs") or 0) >= N]
-    partial = [r for r in graded if 0 < int(r.get("runs") or 0) < N]
     tot_runs = sum(int(r["runs"]) for r in graded)
     tot_pass = sum(int(r["passes"]) for r in graded)
     target = len(cands) * len(CASES)
-    print("\nProgress: %d / %d cases fully graded at N=%d (%d partial) in %s."
-          % (len(full), target, N, len(partial), RESULTS_CSV))
-    if partial:
-        print("PARTIAL (grader walled mid-case; re-run to complete): %s"
-              % ", ".join("%s(%d/%d)" % (r["case"], int(r["runs"]), N)
-                          for r in partial))
+    print("\nProgress: %d / %d cases graded (runs>0) in %s."
+          % (len(graded), target, RESULTS_CSV))
     if tot_runs:
-        print("OVERALL PASS RATE: %.1f%% over %d graded runs spanning %d case(s) "
-              "(grader-outage runs excluded)."
+        print("OVERALL PASS RATE: %.1f%% over %d graded runs spanning %d case(s)."
               % (tot_pass / tot_runs * 100, tot_runs, len(graded)))
-    if len(full) < target:
-        print("INCOMPLETE: %d case(s) not fully graded at N=%d - re-run to fill them. "
+    if len(graded) < target:
+        print("INCOMPLETE: %d case(s) still ungraded - re-run to fill them. "
               "Do NOT treat the rate as final until this reaches %d."
-              % (target - len(full), N, target))
+              % (target - len(graded), target))
     print("Report the rate and any case below target. Do NOT report 'foolproof'.")
 
 

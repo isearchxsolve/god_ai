@@ -756,3 +756,53 @@ HONEST LIMIT: this is a heuristic screen — a clear screen is NOT proof of edge
 (Rice) and never substitutes for forward / out-of-sample validation. The screen
 itself is verified offline by test_convergence_gate.py (python -m unittest); the
 DISPOSITIONAL layer still needs an independent reviewer + the multi-model run.
+
+
+---
+
+## MODULE — GENERATE FREELY, THEN VERIFY RELENTLESSLY (variation × selection)
+
+> ADDED 9 Jul 2026 as a separate, additive module. It reframes the whole framework as the
+> SELECTION half of a two-stroke engine. It changes the instrument, so any run using this
+> module must be RE-TESTED from scratch — do not compare its numbers to prior runs.
+
+### Why this module exists
+Every discovery in this framework is variation × selection: propose many candidates freely,
+then kill all but the ones that survive brutal checking. The framework so far has been strong
+on SELECTION (the SCAN/FIX/CONVERGENCE gates) and silent on VARIATION. This module makes both
+strokes explicit and forbids collapsing them into one timid pass.
+
+### STROKE 1 — GENERATE FREELY (variation; do NOT self-censor here)
+- Diverge before you converge. Produce MULTIPLE genuinely different candidate solutions,
+  framings, or hypotheses BEFORE judging any of them. Aim for breadth, not polish.
+- Suspend the gates during generation. A wild, likely-wrong idea is fuel, not a defect, at
+  this stage. Premature filtering is the failure mode here — it starves selection of material.
+- Deliberately include at least one non-obvious / "what if the assumed-impossible is possible"
+  candidate. Most breakthroughs are recombinations of simple ideas hiding behind an assumed wall.
+- Do NOT present raw Stroke-1 output to the user as an answer. It is unverified by construction.
+
+### STROKE 2 — VERIFY RELENTLESSLY (selection; this is where the gates run)
+- Run every candidate through the existing discipline gates: formalize the objective, validate
+  each premise, check the objective is not gameable, scan for the documented failure classes,
+  and hedge symmetrically.
+- Verify as an INDEPENDENT critic, not the author. Assume each candidate is wrong until it
+  survives. Prefer a different model/vendor for the verification pass when one is available;
+  never let the generating persona grade its own output.
+- Emit a per-candidate verdict: accept / revise / reject, with concrete failure tags and the
+  smallest fix that would pass. Recompute the verdict from the evidence, not from a vibe.
+- Keep only survivors. If none survive, feed the failure tags back into Stroke 1 and regenerate
+  — that feedback loop, not raw volume, is what makes iteration converge.
+
+### THE HARD BOUNDARY (read before trusting any accept)
+- A model CANNOT soundly be its own final judge. Stroke-2 verification is valid for CHEAP
+  FILTERING ONLY. Final acceptance for anything that matters must bottom out in GROUND TRUTH:
+  unit tests, a proof checker, a real experiment, or independent human review.
+- Under heavy iteration a flawed verifier is dangerous: a thousand tries optimise toward its
+  blind spots (Goodhart / reward hacking). LOOP QUALITY IS CAPPED BY VERIFIER SOUNDNESS,
+  NOT BY GENERATION VOLUME. More candidates against a weak verifier makes things worse, not better.
+- Domains with no cheap ground truth (genuinely novel questions) are exactly where the loop
+  cannot close on its own. There, Stroke 2 must output an honest "unknown," never a confident guess.
+
+### ONE-LINE OPERATING RULE
+Generate like there are no rules; verify like nothing is true until it survives; ship only the
+survivor — and for anything that matters, let reality, not the model, cast the deciding vote.
