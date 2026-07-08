@@ -29,14 +29,19 @@ Setup (pick ONE mode - the first two cost nothing):
   # need at least TWO distinct models (two local models is fine).
 Outputs: test_suite_results.csv + a console summary.
 """
-import os, json, time, csv
+import os, json, time, csv, re
 import requests
 
 SYSTEM_PROMPT_FILE = os.environ.get(
     "PROMPT_FILE", "SystemPrompt_Code_Convergence_Deterministic.md")
 N = int(os.environ.get("N_RUNS", "5"))
 TEMPERATURE = float(os.environ.get("TEMPERATURE", "0.7"))
-TIMEOUT = 120
+TIMEOUT = int(os.environ.get("TIMEOUT", "180"))   # per-request seconds; 11k-token prompts on large models can exceed 120s -> ReadTimeout
+MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "5"))
+# Global min seconds between ANY two API requests -> keeps free-tier RPM in check.
+# Free Gemini/OpenRouter tiers allow ~15 req/min; 4s spacing stays comfortably under.
+MIN_REQUEST_INTERVAL = float(os.environ.get("MIN_REQUEST_INTERVAL", "4.0"))
+_last_request_ts = [0.0]
 
 # --------------------------- providers ---------------------------
 # OpenAI-compatible endpoints. ollama / lmstudio need NO key and run locally at
@@ -47,6 +52,19 @@ OPENAI_COMPAT = {
     "groq":       ("https://api.groq.com/openai/v1/chat/completions", "GROQ_API_KEY"),
     "openrouter": ("https://openrouter.ai/api/v1/chat/completions",   "OPENROUTER_API_KEY"),
     "together":   ("https://api.together.xyz/v1/chat/completions",    "TOGETHER_API_KEY"),
+    "cerebras":   (os.environ.get("CEREBRAS_URL", "https://api.cerebras.ai/v1/chat/completions"), "CEREBRAS_API_KEY"),
+    # Mistral La Plateforme free "Experiment" tier: ~1B tokens/MONTH, 256K context (no
+    # per-call context wall), global ~1 req/sec cap, no card (SMS verify), API data NOT
+    # used for training. Big enough that the 11k prompt never trips a per-minute wall.
+    "mistral":    (os.environ.get("MISTRAL_URL", "https://api.mistral.ai/v1/chat/completions"), "MISTRAL_API_KEY"),
+    # DeepSeek V4 (OpenAI-compatible). Frontier quality; concurrency-based limits
+    # (v4-pro 500 / v4-flash 2500) not RPM/RPD/TPM, so a sequential harness never
+    # walls. Models: deepseek-v4-pro (flagship reasoning), deepseek-v4-flash (fast).
+    "deepseek":   (os.environ.get("DEEPSEEK_URL", "https://api.deepseek.com/v1/chat/completions"), "DEEPSEEK_API_KEY"),
+    # Cloudflare Workers AI: OpenAI-compat endpoint is scoped to your account id.
+    # Set CLOUDFLARE_ACCOUNT_ID (or override the whole URL via CLOUDFLARE_URL) + CLOUDFLARE_API_TOKEN.
+    "cloudflare": (os.environ.get("CLOUDFLARE_URL") or ("https://api.cloudflare.com/client/v4/accounts/%s/ai/v1/chat/completions" % os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")), "CLOUDFLARE_API_TOKEN"),
+    "github":     (os.environ.get("GITHUB_MODELS_URL", "https://models.github.ai/inference/chat/completions"), "GITHUB_TOKEN"),
     "ollama":     (os.environ.get("OLLAMA_URL",   "http://localhost:11434/v1/chat/completions"), None),
     "lmstudio":   (os.environ.get("LMSTUDIO_URL", "http://localhost:1234/v1/chat/completions"),  None),
 }
@@ -71,6 +89,15 @@ PRESETS = {
     "lmstudio":   (["lmstudio:model-a", "lmstudio:model-b"], "lmstudio:model-b"),
     "free-cloud": (["google:gemini-1.5-flash", "groq:llama-3.3-70b-versatile"],
                    "groq:llama-3.3-70b-versatile"),
+    # Cerebras-only: 60k TPM / 1M tok/day, fits the 11k prompt. Candidate and grader
+    # are DIFFERENT Cerebras models (harness requires candidate != grader), which keeps
+    # cross-family grader independence while staying entirely on one provider/key.
+    "free-max":   (["cerebras:gpt-oss-120b"], "cerebras:zai-glm-4.7"),
+    # Mistral free tier: 256K context fits the 11k prompt with room to spare, ~1B tok/month
+    # (effectively unlimited here), throttled only by ~1 req/sec -> steady, no 429 storms.
+    "mistral-free": (["mistral:mistral-large-latest"], "mistral:mistral-small-latest"),
+    # Frontier candidate that won't wall, judged by a cross-vendor grader (valid oracle).
+    "deepseek-free": (["deepseek:deepseek-v4-pro"], "google:gemini-2.5-flash"),
     "paid":       (["openai:gpt-4o", "anthropic:claude-3-5-sonnet-latest",
                     "google:gemini-1.5-pro"], "anthropic:claude-3-5-sonnet-latest"),
 }
@@ -88,7 +115,12 @@ _cand_env = os.environ.get("CANDIDATES")
 _grader_env = os.environ.get("GRADER")
 CANDIDATE_MODELS = ([_parse(s) for s in _cand_env.split(",") if s.strip()]
                     if _cand_env else [_parse(s) for s in PRESETS[_preset][0]])
-GRADER_MODEL = _parse(_grader_env) if _grader_env else _parse(PRESETS[_preset][1])
+# GRADER accepts MULTIPLE comma-separated models: the first is the PRIMARY grader,
+# the rest are FALLBACKS tried in order if the primary errors or walls (e.g. a free
+# tier's daily 429) mid-run, so one provider's cap can never stall a whole run.
+_grader_spec = _grader_env if _grader_env else PRESETS[_preset][1]
+GRADER_MODELS = [_parse(s) for s in _grader_spec.split(",") if s.strip()]
+GRADER_MODEL = GRADER_MODELS[0]                 # primary (kept for warnings/messages)
 
 # ---- behavioral cases (runnable subset of TEST_SUITE.md; extend freely) ----
 Z1_CODE = (
@@ -171,45 +203,103 @@ def available(pm):
     return bool(os.environ.get(env))
 
 
+def _retry_after_seconds(resp):
+    ra = resp.headers.get("Retry-After")
+    if ra:
+        try:
+            return float(ra)
+        except ValueError:
+            pass
+    try:
+        err = resp.json().get("error", {})
+        meta = err.get("metadata", {})           # OpenRouter nests it here
+        for k in ("retry_after_seconds_raw", "retry_after_seconds"):
+            if meta.get(k) is not None:
+                return float(meta[k])
+        for d in err.get("details", []):         # Google RetryInfo, e.g. "20s"
+            if "RetryInfo" in str(d.get("@type", "")) and d.get("retryDelay"):
+                try:
+                    return float(str(d["retryDelay"]).rstrip("s"))
+                except ValueError:
+                    pass
+    except Exception:
+        pass
+    return None
+
+
+def post_json(url, headers, payload):
+    """POST with automatic backoff on 429/5xx, honoring Retry-After.
+
+    Free tiers (OpenRouter, Groq, Gemini) throttle constantly; without this a
+    single transient 429 would silently drop a run. Retryable limits are waited
+    out; a hard limit:0 quota simply exhausts the retries and raises."""
+    delay = 2.0
+    resp = None
+    for attempt in range(MAX_RETRIES + 1):
+        gap = MIN_REQUEST_INTERVAL - (time.time() - _last_request_ts[0])
+        if gap > 0:                             # pace ALL calls (incl. retries)
+            time.sleep(gap)
+        _last_request_ts[0] = time.time()
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=TIMEOUT)
+        except requests.exceptions.RequestException as e:  # conn reset/drop, timeout, DNS
+            if attempt == MAX_RETRIES:
+                raise
+            wait = min(delay, 65.0) + 0.5
+            print("    [retry %d/%d] network error (%s); waiting %.1fs"
+                  % (attempt + 1, MAX_RETRIES, type(e).__name__, wait))
+            time.sleep(wait)
+            delay = min(delay * 2, 65.0)
+            continue
+        if resp.status_code == 429 or 500 <= resp.status_code < 600:
+            if attempt == MAX_RETRIES:
+                break
+            wait = _retry_after_seconds(resp) or delay
+            wait = min(wait, 65.0) + 0.5        # cap high enough to clear a 60s RPM window
+            print("    [retry %d/%d] HTTP %d; waiting %.1fs"
+                  % (attempt + 1, MAX_RETRIES, resp.status_code, wait))
+            time.sleep(wait)
+            delay = min(delay * 2, 65.0)
+            continue
+        resp.raise_for_status()
+        return resp
+    resp.raise_for_status()
+    return resp
+
+
 def call_openai_compatible(provider, model, system, user):
     url, env = OPENAI_COMPAT[provider]
     headers = {"Content-Type": "application/json"}
     if env:                                    # local providers need no key
         headers["Authorization"] = "Bearer " + os.environ[env]
-    r = requests.post(
-        url, headers=headers,
-        json={"model": model, "temperature": TEMPERATURE,
-              "messages": [{"role": "system", "content": system},
-                           {"role": "user", "content": user}]},
-        timeout=TIMEOUT)
-    r.raise_for_status()
+    r = post_json(
+        url, headers,
+        {"model": model, "temperature": TEMPERATURE,
+         "messages": [{"role": "system", "content": system},
+                      {"role": "user", "content": user}]})
     return r.json()["choices"][0]["message"]["content"]
 
 
 def call_anthropic(model, system, user):
-    r = requests.post(
+    r = post_json(
         "https://api.anthropic.com/v1/messages",
-        headers={"x-api-key": os.environ["ANTHROPIC_API_KEY"],
-                 "anthropic-version": "2023-06-01",
-                 "content-type": "application/json"},
-        json={"model": model, "max_tokens": 4096, "temperature": TEMPERATURE,
-              "system": system,
-              "messages": [{"role": "user", "content": user}]},
-        timeout=TIMEOUT)
-    r.raise_for_status()
+        {"x-api-key": os.environ["ANTHROPIC_API_KEY"],
+         "anthropic-version": "2023-06-01",
+         "content-type": "application/json"},
+        {"model": model, "max_tokens": 4096, "temperature": TEMPERATURE,
+         "system": system,
+         "messages": [{"role": "user", "content": user}]})
     return "".join(p.get("text", "") for p in r.json()["content"])
 
 
 def call_google(model, system, user):
     url = ("https://generativelanguage.googleapis.com/v1beta/models/"
            + model + ":generateContent?key=" + os.environ["GOOGLE_API_KEY"])
-    r = requests.post(
-        url, headers={"Content-Type": "application/json"},
-        json={"system_instruction": {"parts": [{"text": system}]},
-              "contents": [{"role": "user", "parts": [{"text": user}]}],
-              "generationConfig": {"temperature": TEMPERATURE}},
-        timeout=TIMEOUT)
-    r.raise_for_status()
+    r = post_json(
+        url, {"Content-Type": "application/json"},
+        {"system_instruction": {"parts": [{"text": system}]},
+         "contents": [{"role": "user", "parts": [{"text": user}]}],
+         "generationConfig": {"temperature": TEMPERATURE}})
     parts = r.json()["candidates"][0]["content"]["parts"]
     return "".join(p.get("text", "") for p in parts)
 
@@ -233,30 +323,66 @@ GRADER_SYSTEM = (
 )
 
 
-def pick_grader(candidate_pm):
-    # Independent grader: never the same model as the candidate.
-    if GRADER_MODEL != candidate_pm and available(GRADER_MODEL):
-        return GRADER_MODEL
-    for pm in CANDIDATE_MODELS + [GRADER_MODEL]:
-        if pm != candidate_pm and available(pm):
-            return pm
-    return None
+def pick_graders(candidate_pm):
+    # Independent graders in PRIORITY order: never the same model as the
+    # candidate. Primary grader first, then its declared fallbacks, then any
+    # other available model as a last resort. De-duplicated, order-preserving.
+    ordered, seen = [], set()
+    for pm in GRADER_MODELS + CANDIDATE_MODELS:
+        if pm == candidate_pm or pm in seen or not available(pm):
+            continue
+        seen.add(pm)
+        ordered.append(pm)
+    return ordered
 
 
-def grade(candidate_pm, case, response):
-    grader = pick_grader(candidate_pm)
-    if grader is None:
-        return None, "no independent grader available (add a 2nd provider key)"
-    user = ("TASK:\n" + case["prompt"] + "\n\nPASS RUBRIC:\n" + case["rubric"]
-            + "\n\nCANDIDATE RESPONSE:\n" + response
-            + "\n\nReturn ONLY the JSON verdict.")
-    raw = call_model(grader, GRADER_SYSTEM, user)
+def _parse_verdict(raw):
+    """Extract (verdict, reason) from a grader's raw text; (None, err) if hopeless."""
     try:
         s = raw[raw.index("{"): raw.rindex("}") + 1]
         v = json.loads(s)
         return bool(v.get("pass")), str(v.get("reason", ""))
     except Exception:
+        # Grader emitted malformed JSON (e.g. unescaped quotes inside "reason").
+        # Salvage the verdict from the pass boolean instead of dropping the run.
+        m = re.search(r'"pass"\s*:\s*(true|false)', raw, re.IGNORECASE)
+        if m:
+            passed = m.group(1).lower() == "true"
+            rm = re.search(r'"reason"\s*:\s*"(.*)', raw, re.DOTALL)
+            reason = rm.group(1).strip().rstrip('"}').strip()[:300] if rm else ""
+            return passed, "[salvaged] " + reason
         return None, "unparseable grader output: " + repr(raw[:160])
+
+
+def grade(candidate_pm, case, response):
+    graders = pick_graders(candidate_pm)
+    if not graders:
+        return None, "no independent grader available (add a 2nd provider key)"
+    user = ("TASK:\n" + case["prompt"] + "\n\nPASS RUBRIC:\n" + case["rubric"]
+            + "\n\nCANDIDATE RESPONSE:\n" + response
+            + "\n\nReturn ONLY the JSON verdict.")
+    last_err = "no grader produced a verdict"
+    for i, grader in enumerate(graders):
+        nxt = graders[i + 1] if i + 1 < len(graders) else None
+        try:
+            raw = call_model(grader, GRADER_SYSTEM, user)
+        except Exception as e:                     # this grader walled/errored out
+            last_err = "grader %s:%s failed: %s" % (grader[0], grader[1], e)
+            if nxt:
+                print("    [grader fallback] %s:%s unavailable (%s) -> trying %s:%s"
+                      % (grader[0], grader[1], type(e).__name__, nxt[0], nxt[1]))
+            continue
+        verdict, reason = _parse_verdict(raw)
+        if verdict is None:                        # unparseable -> let next grader try
+            last_err = reason
+            if nxt:
+                print("    [grader fallback] %s:%s unparseable -> trying %s:%s"
+                      % (grader[0], grader[1], nxt[0], nxt[1]))
+            continue
+        if i > 0:                                  # record which fallback graded it
+            reason = "[graded by %s:%s] %s" % (grader[0], grader[1], reason)
+        return verdict, reason
+    return None, last_err
 
 
 def main():
@@ -267,42 +393,134 @@ def main():
         raise SystemExit("No candidate models available. Use PRESET=ollama for a "
                          "free local run (install Ollama, no keys), or set a free "
                          "key (GROQ_API_KEY / GOOGLE_API_KEY) with PRESET=free-cloud.")
-    providers_up = [pm for pm in CANDIDATE_MODELS + [GRADER_MODEL] if available(pm)]
+    providers_up = [pm for pm in CANDIDATE_MODELS + GRADER_MODELS if available(pm)]
     if len({pm for pm in providers_up}) < 2:
         print("WARNING: only one model available — the grader cannot be "
               "independent. Add a 2nd provider key for a valid test.\n")
-    rows = []
+    cand_providers = {pm[0] for pm in cands}
+    if GRADER_MODEL[0] in cand_providers:
+        print("WARNING: grader provider '%s' is the SAME VENDOR as the candidate. "
+              "Same-vendor grading is WEAK independence and can inflate or deflate "
+              "results (a model is a lenient judge of its own family). Prefer a "
+              "cross-vendor grader, e.g. GRADER=google:gemini-2.5-flash.\n"
+              % GRADER_MODEL[0])
+    if len(GRADER_MODELS) > 1:
+        print("Grader fallback chain: %s (a later grader auto-takes over if an "
+              "earlier one walls or errors mid-run).\n"
+              % " -> ".join("%s:%s" % g for g in GRADER_MODELS))
+    RESULTS_CSV = "test_suite_results.csv"
+    DETAILS_CSV = "test_suite_details.csv"         # per-run grader reasons (diagnosis)
+    FIELDS = ["provider", "model", "case", "runs", "passes", "pass_rate_pct"]
+    DETAIL_FIELDS = ["provider", "model", "case", "run", "verdict", "reason"]
+    saved = {}                                     # (provider, model, case) -> row
+    details = []                                   # per-run verdict+reason rows
+    if os.path.exists(RESULTS_CSV):                # RESUME: load prior progress
+        with open(RESULTS_CSV, newline="", encoding="utf-8") as fh:
+            for r in csv.DictReader(fh):
+                saved[(r["provider"], r["model"], r["case"])] = r
+        n_done = sum(1 for r in saved.values() if int(r.get("runs") or 0) >= N)
+        if n_done:
+            print("Resuming: %d case(s) already complete at N=%d -> skipping.\n"
+                  % (n_done, N))
+
+    def flush():
+        with open(RESULTS_CSV, "w", newline="", encoding="utf-8") as fh:
+            w = csv.DictWriter(fh, fieldnames=FIELDS)
+            w.writeheader()
+            w.writerows(saved.values())
+
+    stop_after = int(os.environ.get("STOP_AFTER_FAILS", "3"))
+    consec_fail = 0
+    stop = False
     for pm in cands:
+        if stop:
+            break
         for case in CASES:
+            key = (pm[0], pm[1], case["id"])
+            prev = saved.get(key)
+            # Only skip a case that ACTUALLY has N graded runs. Stale runs=0 rows
+            # (from an interrupted/older run) are NOT complete -> re-attempt them.
+            if prev is not None and int(prev.get("runs") or 0) >= N:
+                print("[%s/%s] %-4s cached (%s%%)" % (pm[0], pm[1], case["id"],
+                      prev.get("pass_rate_pct", "")))
+                continue
             passes = total = 0
-            for _ in range(N):
+            for run_idx in range(N):
                 try:
                     resp = call_model(pm, system, case["prompt"])
+                    verdict, reason = grade(pm, case, resp)
                 except Exception as e:
                     print("  call error [%s/%s %s]: %s" % (pm[0], pm[1],
                           case["id"], e))
                     continue
-                verdict, reason = grade(pm, case, resp)
+                if verdict is None:                # grader outage: NOT a candidate failure
+                    print("    -> %-4s [ungraded]: %s" % (case["id"],
+                          (reason or "").strip()[:200]))
+                    details.append({"provider": pm[0], "model": pm[1],
+                                    "case": case["id"], "run": run_idx + 1,
+                                    "verdict": "ungraded",
+                                    "reason": (reason or "").strip()[:500]})
+                    continue                       # exclude from denominator; re-run to complete
                 total += 1
                 if verdict is True:
                     passes += 1
-                time.sleep(1)
-            rate = (passes / total * 100) if total else float("nan")
+                    vtag = "pass"
+                else:                              # False = genuine rubric miss
+                    vtag = "fail"
+                    print("    -> %-4s [%s]: %s" % (case["id"], vtag,
+                          (reason or "").strip()[:200]))
+                details.append({"provider": pm[0], "model": pm[1],
+                                "case": case["id"], "run": run_idx + 1,
+                                "verdict": vtag,
+                                "reason": (reason or "").strip()[:500]})
+            if total == 0:                         # quota/network death: DON'T save -> retried next run
+                consec_fail += 1
+                print("[%s/%s] %-4s SKIPPED (all calls failed - will retry next run)"
+                      % (pm[0], pm[1], case["id"]))
+                if consec_fail >= stop_after:
+                    print("\nStopping early: %d cases in a row failed - free quota "
+                          "looks exhausted for now." % consec_fail)
+                    print("Progress is SAVED. Re-run later (quota resets daily) or "
+                          "with a fresh-project key to resume where you left off.")
+                    stop = True
+                    break
+                continue
+            consec_fail = 0
+            rate = passes / total * 100
             print("[%s/%s] %-4s pass %d/%d (%.0f%%)" % (pm[0], pm[1], case["id"],
                   passes, total, rate))
-            rows.append({"provider": pm[0], "model": pm[1], "case": case["id"],
-                         "runs": total, "passes": passes,
-                         "pass_rate_pct": round(rate, 1) if total else ""})
-    with open("test_suite_results.csv", "w", newline="", encoding="utf-8") as fh:
-        w = csv.DictWriter(fh, fieldnames=["provider", "model", "case", "runs",
-                                           "passes", "pass_rate_pct"])
-        w.writeheader()
-        w.writerows(rows)
-    tot_runs = sum(r["runs"] for r in rows)
-    tot_pass = sum(r["passes"] for r in rows)
+            saved[key] = {"provider": pm[0], "model": pm[1], "case": case["id"],
+                          "runs": total, "passes": passes,
+                          "pass_rate_pct": round(rate, 1)}
+            flush()                                # CHECKPOINT after every case
+
+    flush()
+    if details:                                    # dump per-run grader reasons for diagnosis
+        with open(DETAILS_CSV, "w", newline="", encoding="utf-8") as fh:
+            w = csv.DictWriter(fh, fieldnames=DETAIL_FIELDS)
+            w.writeheader()
+            w.writerows(details)
+        print("Per-run grader reasons -> %s\n" % DETAILS_CSV)
+    graded = [r for r in saved.values() if int(r.get("runs") or 0) > 0]
+    full = [r for r in graded if int(r.get("runs") or 0) >= N]
+    partial = [r for r in graded if 0 < int(r.get("runs") or 0) < N]
+    tot_runs = sum(int(r["runs"]) for r in graded)
+    tot_pass = sum(int(r["passes"]) for r in graded)
+    target = len(cands) * len(CASES)
+    print("\nProgress: %d / %d cases fully graded at N=%d (%d partial) in %s."
+          % (len(full), target, N, len(partial), RESULTS_CSV))
+    if partial:
+        print("PARTIAL (grader walled mid-case; re-run to complete): %s"
+              % ", ".join("%s(%d/%d)" % (r["case"], int(r["runs"]), N)
+                          for r in partial))
     if tot_runs:
-        print("\nOVERALL PASS RATE: %.1f%% over %d runs -> test_suite_results.csv"
-              % (tot_pass / tot_runs * 100, tot_runs))
+        print("OVERALL PASS RATE: %.1f%% over %d graded runs spanning %d case(s) "
+              "(grader-outage runs excluded)."
+              % (tot_pass / tot_runs * 100, tot_runs, len(graded)))
+    if len(full) < target:
+        print("INCOMPLETE: %d case(s) not fully graded at N=%d - re-run to fill them. "
+              "Do NOT treat the rate as final until this reaches %d."
+              % (target - len(full), N, target))
     print("Report the rate and any case below target. Do NOT report 'foolproof'.")
 
 

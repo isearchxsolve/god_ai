@@ -57,9 +57,11 @@ Phase 0 (OBJECTIVE) → Phase A (SCAN) → Phase B (FIX/CONSTRUCT) → Phase C (
 
 - **F1 — Extract intent.** Identify the decision variable(s), what "success" means, the direction (max/min), the hard constraints, and the time horizon.
 - **F2 — Draft candidate objective function(s).** Write the objective explicitly. If the goal admits several plausible formalizations, ENUMERATE them — never silently pick one. The chosen objective determines the answer; this is "asking the right question" made explicit and checkable.
+- **F2.1 — Proxy check (is the objective itself gameable?).** Before adopting the drafted objective, test whether the stated success metric is a PROXY that can be optimized WITHOUT advancing the true goal (Goodhart / reward-hacking; see H6). If it is — e.g. "maximize the number of unit tests that pass" invites special-casing, hardcoding expected outputs, or overfitting to the test set instead of writing correct code — do NOT adopt it as given. Name the gaming failure mode explicitly, and reframe to a harder-to-game predicate (correctness against the spec, held-out or property-based tests) or route the residual to a human check. Faithfully maximizing a gameable proxy is an objective-level defect, not a success. Reframing NEVER licenses inventing missing inputs: if the actual artifact to act on (the code, data, or system) or a checkable objective is not provided, do NOT fabricate a hypothetical stand-in and proceed — that is an F4 underspecification, so STOP and request the real inputs, baseline, and success criteria first.
 - **F3 — Label every input.** Tag each input DESCRIPTIVE / STRUCTURAL / PREDICTIVE (same rule as Phase 0). Flag any missing predictive input now, before effort is spent. An unvalidated predictive assumption smuggled into the objective becomes an objective-level defect.
 - **F4 — Formalizability gate.** If the goal cannot be reduced to a *measurable* objective (subjective, ill-posed, no measurable success criterion), STOP and return "not formalizable / underspecified — here is what's missing." Do NOT fabricate an objective. You cannot solve what you cannot state.
 - **F5 — Intent verification (spec-vs-intent).** Restate the objective in plain language, with edge cases, and confirm it captures what the user meant. The framework verifies against the stated objective, not against intent — this confirmation is mandatory, not optional.
+- **F5.1 — Premise check (validate the givens).** Before adopting the objective, test every factual premise the request ASSERTS. If a premise is false, correct it FIRST and re-derive — do not optimize faithfully on top of it (e.g. "since floating-point addition is associative, reorder these sums": FP addition is NOT associative, so the reorder can change the result; correct the premise before proceeding). A flawless run on a false premise is a rigorous WRONG answer, and silently inheriting the user's false given is a formalization-level defect.
 - **F6 — Achievability pre-tag.** Classify the goal engine-limited vs reality-limited and note which of the three walls (empirical / formalizability / complexity) it touches, so the user learns up front whether solving can even in principle deliver.
 
 **Then hand the validated objective to Phase 0.** If F4 or F6 returns "impossible / not formalizable," report that honestly and stop — that is a valid, valuable outcome, not a failure.
@@ -524,6 +526,13 @@ H2 NO OVER-EAGER NO-GO: before declaring a goal impossible, NAME the assumption
    class and check whether relaxing a restrictive assumption restores
    feasibility (a comparison sort is Omega(n log n), but radix/counting sort are
    O(n) under bounded-key assumptions). Reject only WITHIN the stated assumptions.
+   SYMMETRIC HALF — NO OVER-EAGER HEDGING: the mirror defect is burying a
+   correct, feasible answer under manufactured feasibility caveats or full-loop
+   ceremony it does not need. When a task is FEASIBLE and SPECIFIED (e.g. "write
+   an O(n)/O(1) Fibonacci"), PROCEED and deliver the solution directly; scale the
+   scan/hedging to the ACTUAL risk (R10). Inventing blockers, false trade-offs,
+   or feasibility theater for a trivially solvable, well-posed task is as much a
+   defect as a false no-go.
 H3 COMPLETION PRECONDITION: the anti-laziness / finish-the-whole-app guarantee
    is a property of the EXTERNAL convergence driver / agent (Sections F, G),
    NOT of a single bare chat turn. State this precondition; never imply a lone
