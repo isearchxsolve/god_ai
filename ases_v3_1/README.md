@@ -2,7 +2,7 @@
 
 > **The first closed-loop multi-agent system for freelance automation that actually executes, tests, and delivers real code.**
 
-> **v2.6** — HITL safety gate · Redis prompt cache · Self-improving memory layer · Complete n8n orchestrator
+> **v2.6** — HITL safety gate · Redis prompt cache · Self-improving memory layer · Complete n8n orchestrator · **3 TDD Gates (Smoke + Syntax + Integration E2E)**
 
 ---
 
@@ -27,6 +27,33 @@ Every piece of code is:
 
 ---
 
+## TDD Gates — Continuous Quality Assurance
+
+**Three gates, zero flakiness, all mocks — run locally or in CI:**
+
+```bash
+# Windows
+run_tdd_gates.bat all
+
+# Unix/macOS/Linux
+./run_tdd_gates.sh all
+
+# Individual gates
+run_tdd_gates.bat smoke
+run_tdd_gates.bat syntax
+run_tdd_gates.bat integration
+```
+
+| Gate | Tests | Time | What It Catches |
+|------|-------|------|-----------------|
+| **Smoke** | 3 | ~2s | Module imports, FastAPI app construction, lifespan mocks |
+| **Syntax** | 3 | ~5s | **Byte-compile (authoritative)** + ruff lint (advisory) |
+| **Integration E2E** | 6 | ~12s | Full `dev_generate_code` pipeline with **ALL externals mocked** (OpenAI, Docker, Postgres, Redis, GitHub, Vercel) |
+
+**Total:** 215 tests across 22 files, **61% coverage**, all green ✅
+
+---
+
 ## What's Fixed (vs Original Workflow)
 
 | Problem | Original | ASES |
@@ -42,7 +69,7 @@ Every piece of code is:
 | **Error handling** | None | Retry, circuit breaker, dead letter |
 | **Multi-tenant** | None | Full tenant isolation + billing |
 | **Prompt caching** | None | Redis cache, 20–35% token savings |
-| **Memory / learning** | None | code_patterns table, self-improves each job |
+| **Memory / learning** | None | `code_patterns` table, self-improves each job |
 | **HITL safety** | Puppeteer auto-fires | Two-stage inline keyboard approval gate |
 | **n8n orchestrator** | Sheets + fake tests | PostgreSQL + real Docker sandbox calls |
 
@@ -68,6 +95,9 @@ docker compose up -d
 curl -X POST https://yourdomain.com/api/dev-task \
   -H "Content-Type: application/json" \
   -d '{"action":"generate_code","task":"Build auth API","tech_stack":"Node.js + Express"}'
+
+# 5. Run TDD gates (validates everything works)
+cd .. && run_tdd_gates.bat all
 ```
 
 ---
@@ -92,9 +122,19 @@ ases/
 │   └── nginx.conf         # Reverse proxy + SSL
 ├── database/
 │   └── init.sql           # PostgreSQL schema + indexes
+├── tests/
+│   ├── test_integration_e2e.py    # 6 E2E tests (ALL externals mocked)
+│   ├── test_smoke_gate.py         # 3 smoke tests
+│   ├── test_syntax_gate.py        # 3 syntax tests
+│   ├── test_main.py               # Route tests
+│   └── ... (16 more test files)
 ├── n8n_orchestrator.json  # Clean n8n workflow (orchestration only)
 ├── ases_architecture.md   # Full architecture document
 ├── DEPLOYMENT.md          # Step-by-step production guide
+├── TDD_GATES_DOCUMENTATION.md  # Full gate documentation
+├── pytest.ini            # Pytest config
+├── run_tdd_gates.bat      # Windows gate runner
+├── run_tdd_gates.sh       # Unix gate runner
 ├── .env.example           # Configuration template
 └── README.md              # This file
 ```
@@ -153,6 +193,72 @@ for iteration in range(1, 6):
 - **Auto-cleanup**: Sandboxes destroyed after 10 minutes
 - **Path sanitization**: Prevents directory traversal
 - **Token budget**: Hard stop at 50K tokens per task
+
+---
+
+## CI/CD Pipeline
+
+**GitHub Actions** (`.github/workflows/tdd-gates.yml`):
+
+```yaml
+# Triggers: push/PR to main, develop
+jobs:
+  smoke_gate:      # < 30s
+  syntax_gate:     # < 60s
+  integration_gate: # < 3min (full pipeline with mocks)
+  coverage:        # HTML + XML artifacts
+  docker_build:    # main branch only
+```
+
+---
+
+## Documentation
+
+- **Full TDD Gates Documentation:** [TDD_GATES_DOCUMENTATION.md](TDD_GATES_DOCUMENTATION.md)
+- **Architecture & Patterns:** `AGENTS.md` (workspace root)
+- **Deployment Guide:** `DEPLOYMENT.md`
+- **Architecture Doc:** `ases_architecture.md`
+
+---
+
+## Requirements
+
+```bash
+# Required
+OPENAI_API_KEY=sk-...
+GITHUB_TOKEN=ghp_...
+
+# Optional
+VERCEL_TOKEN=...
+TELEGRAM_BOT_TOKEN=...
+UPWORK_RSS_URL=...
+SENDGRID_API_KEY=...
+```
+
+---
+
+## Dev Commands
+
+```bash
+# Start dev stack
+docker compose -f docker-compose.dev.yml up -d
+
+# View logs
+docker compose logs -f agent
+
+# Health check
+curl http://localhost:8000/health
+# {"status": "healthy", "version": "2.0.0"}
+
+# Submit dev task
+curl -X POST http://localhost:8000/dev-task \
+  -H "x-tenant-id: default" -H "x-api-key: YOUR_KEY" \
+  -d '{"action":"generate_code","task":"Build REST API","tech_stack":"Node.js + Express"}'
+
+# Poll result
+curl -H "x-tenant-id: default" -H "x-api-key: YOUR_KEY" \
+  http://localhost:8000/jobs/{execution_id}
+```
 
 ---
 

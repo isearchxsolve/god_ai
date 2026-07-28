@@ -631,7 +631,28 @@ async def _dev_pipeline(
     config,
     execution_id: str,
 ) -> dict:
-    from parser import extract_files
+    if os.getenv('ASES_V5_PARALLEL_CODER') == '1':
+        from agent_service.parallel_coder import main as parallel_coder_main
+
+    if os.getenv('ASES_V5_MUTATION') == '1':
+        from agent_service.mutant_tester import check_mutation_coverage as mutant_tester_check
+
+    if os.getenv('ASES_V5_PERF_BUDGET') == '1':
+        from agent_service.perf_budget import enforce_perf_budget
+
+    if os.getenv('ASES_V5_SBOM') == '1':
+        from agent_service.sbom_gate import generate_sbom
+
+    if os.getenv('ASES_V5_SPECULATIVE') == '1':
+        from agent_service.speculative_exec import run_speculative
+
+    if os.getenv('ASES_V5_KG') == '1':
+        from agent_service.knowledge_graph import store_pattern, retrieve_pattern
+
+    if os.getenv('ASES_V5_TELEMETRY') == '1':
+        from agent_service.telemetry_mesh import wrap_span, export_traces
+
+
     from sandbox import create_sandbox, cleanup_sandbox, run_command, write_file, commit_to_github, get_test_command
     from tools import calculate_cost
     from billing import BillingFence, BillingLimitError

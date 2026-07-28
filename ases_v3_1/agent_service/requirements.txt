@@ -40,3 +40,7 @@ psutil>=5.9.0
 # Static analysis
 ruff>=0.4.0
 pip-audit>=2.7.0
+
+# Visual + Interaction review (Playwright browser automation)
+# Install browsers after pip install: `playwright install chromium`
+playwright>=1.40.0
