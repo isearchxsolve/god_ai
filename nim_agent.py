@@ -751,7 +751,7 @@ class Provider:
         self.model_id = model_id
         self.daily_limit = daily_limit
         self.bucket = TokenBucket(rpm=rpm, burst=1, min_gap=min_gap)
-        self.client = OpenAI(base_url=base_url, api_key=api_key, timeout=120) if HAS_OPENAI else None
+        self.client = OpenAI(base_url=base_url, api_key=api_key, timeout=300) if HAS_OPENAI else None
         self._day = None
         self._daily_count = 0
         self.cooldown_until = 0.0
@@ -1493,7 +1493,7 @@ class NIMClient:
         self.auto_stage = True
         self.last_stage = None
         self.project_dir = project_dir
-        self.max_tool_rounds = 30
+        self.max_tool_rounds = 300
         self.max_auto_continues = 2  # how many times to auto-continue past a round-limit cutoff before stopping and asking the user
 
         # Token/context tracking — separate from the RPM bucket above.
@@ -1503,8 +1503,8 @@ class NIMClient:
         # conversation's context window is getting.
         self.token_meter = TokenMeter(tpm=profile.get("tpm"))
         self.context_window = profile.get("context_window", DEFAULT_CONTEXT_WINDOW)
-        self.compact_threshold = 0.75   # compact once context is this full
-        self.compact_keep_recent = 12   # always keep this many recent messages verbatim
+        self.compact_threshold = 0.5    # compact once context is this full
+        self.compact_keep_recent = 8    # always keep this many recent messages verbatim
 
         # Provider pool: NVIDIA is always primary; OpenRouter's free
         # models join automatically as fallback capacity if
@@ -1542,6 +1542,12 @@ class NIMClient:
                 self.last_stage = session.get("last_detected_stage")
                 print(f"  {C.BGREEN}✓ Restored{C.RESET}\n")
                 self._rebuild_system()
+                # A resumed session can carry a large message history.
+                # Check compaction immediately instead of waiting for
+                # the in-loop threshold check on round 1 — otherwise
+                # the very first request after resume sends the full
+                # uncompacted history, which is slow and timeout-prone.
+                self.maybe_compact()
                 return
             else:
                 delete_session(self.profile["name"], self.project_dir)
