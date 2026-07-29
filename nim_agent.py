@@ -623,6 +623,80 @@ class TokenBucket:
                     f"adaptive:{cur}/{target} | {max(0, int(self.rpm) - used)} left | gap:{gap:.1f}s")
 
 # ───────────────────────────────────────────
+# TOKEN METER (TPM + tok/s + CONTEXT WINDOW)
+# ───────────────────────────────────────────
+DEFAULT_CONTEXT_WINDOW = 128_000  # fallback if a model doesn't specify one
+
+def estimate_tokens(text: Optional[str]) -> int:
+    """Cheap, provider-agnostic estimate (~4 chars/token for English-ish
+    text). Good enough for pacing/compaction decisions; real usage
+    counts (when the API returns them) are used to correct it."""
+    if not text:
+        return 0
+    return max(1, len(text) // 4)
+
+
+class TokenMeter:
+    """Tracks token throughput the same way TokenBucket tracks request
+    counts: a sliding 60s window for TPM, plus a short window for
+    instantaneous tokens/sec. RPM alone under-describes real load —
+    a single fat request can blow a provider's TPM cap (or your own
+    context budget) while never coming close to the RPM ceiling.
+
+    This is purely observational/advisory right now (it doesn't block
+    requests the way TokenBucket does), but it's what /limits reports
+    and what drives compaction decisions.
+    """
+    def __init__(self, tpm: Optional[float] = None):
+        self.tpm_limit = tpm  # None = unknown/unbounded, just observe
+        self.lock = threading.Lock()
+        self.window = deque()      # (monotonic_ts, tokens) for the last 60s -> TPM
+        self.recent = deque()      # (monotonic_ts, tokens) for the last 5s -> tok/s
+        self.total_prompt = 0
+        self.total_completion = 0
+
+    def _prune(self):
+        now = time.monotonic()
+        while self.window and self.window[0][0] < now - 60.0:
+            self.window.popleft()
+        while self.recent and self.recent[0][0] < now - 5.0:
+            self.recent.popleft()
+
+    def record(self, prompt_tokens: int, completion_tokens: int):
+        with self.lock:
+            now = time.monotonic()
+            total = max(0, prompt_tokens) + max(0, completion_tokens)
+            self.window.append((now, total))
+            self.recent.append((now, total))
+            self.total_prompt += max(0, prompt_tokens)
+            self.total_completion += max(0, completion_tokens)
+            self._prune()
+
+    def tpm(self) -> int:
+        with self.lock:
+            self._prune()
+            return sum(t for _, t in self.window)
+
+    def tokens_per_sec(self) -> float:
+        with self.lock:
+            self._prune()
+            if not self.recent:
+                return 0.0
+            span = max(0.5, time.monotonic() - self.recent[0][0])
+            return sum(t for _, t in self.recent) / span
+
+    def stats(self) -> str:
+        tpm = self.tpm()
+        tps = self.tokens_per_sec()
+        if self.tpm_limit:
+            pct = f" ({tpm / self.tpm_limit * 100:.0f}% of {int(self.tpm_limit)})"
+        else:
+            pct = ""
+        return (f"{tpm} TPM{pct} | {tps:.0f} tok/s | "
+                f"lifetime: {self.total_prompt}in/{self.total_completion}out")
+
+
+# ───────────────────────────────────────────
 # MULTI-PROVIDER POOL (rotate across free sources)
 # ───────────────────────────────────────────
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
@@ -1413,6 +1487,16 @@ class NIMClient:
         self.project_dir = project_dir
         self.max_tool_rounds = 30
 
+        # Token/context tracking — separate from the RPM bucket above.
+        # RPM tells you if you're sending too many *requests*; this
+        # tells you if you're sending too many *tokens* (TPM ceilings
+        # are commonly tighter than RPM ones) and how full the
+        # conversation's context window is getting.
+        self.token_meter = TokenMeter(tpm=profile.get("tpm"))
+        self.context_window = profile.get("context_window", DEFAULT_CONTEXT_WINDOW)
+        self.compact_threshold = 0.75   # compact once context is this full
+        self.compact_keep_recent = 12   # always keep this many recent messages verbatim
+
         # Provider pool: NVIDIA is always primary; OpenRouter's free
         # models join automatically as fallback capacity if
         # OPENROUTER_API_KEY is set in the environment. Each provider
@@ -1503,6 +1587,71 @@ class NIMClient:
         self.messages = [m for m in self.messages if m.get("role") != "system"]
         self.messages.insert(0, {"role": "system", "content": "\n".join(parts)})
 
+    def context_tokens(self) -> int:
+        """Estimated token size of the full message history right now."""
+        return sum(estimate_tokens(self._msg_text(m)) for m in self.messages)
+
+    def context_pct(self) -> float:
+        return self.context_tokens() / max(1, self.context_window)
+
+    @staticmethod
+    def _msg_text(m: Dict) -> str:
+        parts = [m.get("content") or ""]
+        for tc in (m.get("tool_calls") or []):
+            fn = tc.get("function", {})
+            parts.append(fn.get("name", "") + (fn.get("arguments") or ""))
+        return " ".join(parts)
+
+    def maybe_compact(self):
+        """Compact the conversation once it crosses compact_threshold of
+        the model's context window, instead of waiting to hit a hard
+        context-length error mid-task. Keeps the system prompt and the
+        most recent `compact_keep_recent` messages verbatim; folds
+        everything older into a single summary message.
+
+        This is deliberately cheap (no extra API call): it's a
+        structural compaction, not an LLM-generated summary. Good
+        enough to keep a long-running agent loop alive; swap in a
+        real summarization call here later if you want higher-fidelity
+        compaction.
+        """
+        if self.context_pct() < self.compact_threshold:
+            return False
+
+        system_msgs = [m for m in self.messages if m.get("role") == "system"]
+        rest = [m for m in self.messages if m.get("role") != "system"]
+
+        if len(rest) <= self.compact_keep_recent:
+            return False  # nothing meaningful to fold away
+
+        old, recent = rest[:-self.compact_keep_recent], rest[-self.compact_keep_recent:]
+
+        # Summarize what's being dropped well enough to keep the agent
+        # oriented (who said what, which tools ran) without the full
+        # verbatim payload weighing down the context.
+        lines = []
+        for m in old:
+            role = m.get("role", "?")
+            if role == "tool":
+                snippet = (m.get("content") or "")[:150].replace("\n", " ")
+                lines.append(f"- tool[{m.get('name','?')}] -> {snippet}")
+            else:
+                snippet = (m.get("content") or "")[:150].replace("\n", " ")
+                if snippet:
+                    lines.append(f"- {role}: {snippet}")
+        summary = (
+            f"[Compacted {len(old)} earlier messages to stay under the "
+            f"context budget.]\n" + "\n".join(lines[-60:])  # cap summary size too
+        )
+
+        before = self.context_tokens()
+        self.messages = system_msgs + [{"role": "system", "content": summary}] + recent
+        after = self.context_tokens()
+        print(f"\n  {C.BYELLOW}{I['pkg']} [Compact]{C.RESET} {C.DIM}"
+              f"{len(old)} messages folded — context ~{before} -> ~{after} tokens "
+              f"({self.context_pct()*100:.0f}% of {self.context_window}){C.RESET}\n")
+        return True
+
     def set_goal(self, goal: str):
         self.goal = goal
         self._rebuild_system()
@@ -1586,6 +1735,10 @@ class NIMClient:
         model = self.get_model()  # profile's selected model — only used to decide default thinking behavior below; the actual model id used on the wire comes from whichever provider serves each attempt
 
         for round_num in range(self.max_tool_rounds):
+            self.maybe_compact()
+
+            prompt_tokens_est = self.context_tokens()
+
             base_payload = {
                 "messages": self.messages,
                 "max_tokens": 4096,
@@ -1674,6 +1827,11 @@ class NIMClient:
                 return
 
             print("", flush=True)
+
+            completion_tokens_est = estimate_tokens(full_content) + estimate_tokens(full_reasoning)
+            for tc in tool_calls:
+                completion_tokens_est += estimate_tokens(tc.get("arguments", ""))
+            self.token_meter.record(prompt_tokens_est, completion_tokens_est)
 
             if tool_calls:
                 assistant_msg = {"role": "assistant", "content": full_content or None}
@@ -1829,6 +1987,7 @@ def help_text():
   {C.BYELLOW}/profile add{C.RESET}        {C.DIM}Add a new profile interactively{C.RESET}
   {C.BYELLOW}/profile remove <id>{C.RESET}  {C.DIM}Remove a profile{C.RESET}
   {C.BYELLOW}/rpm [value]{C.RESET}        {C.DIM}Show or set RPM limit for current profile{C.RESET}
+  {C.BYELLOW}/limits{C.RESET}             {C.DIM}Show RPM, TPM, tok/s, and context window usage{C.RESET}
   {C.BYELLOW}/keys{C.RESET}               {C.DIM}Show key status for all profiles{C.RESET}
   {C.BYELLOW}/help{C.RESET}               {C.DIM}This help{C.RESET}
   {C.BYELLOW}/exit{C.RESET}               {C.DIM}Exit (auto-saves){C.RESET}
@@ -1973,6 +2132,14 @@ def main():
                         err(f"Profile [{pid}] not found.")
                 else:
                     warn("Usage: /profile list | /profile add | /profile remove <id>")
+            elif user_input.startswith("/limits"):
+                ctx_pct = agent.context_pct() * 100
+                ctx_color = C.BGREEN if ctx_pct < 60 else C.BYELLOW if ctx_pct < agent.compact_threshold*100 else C.BRED
+                print(f"\n  {C.BOLD}Rate & Resource Limits{C.RESET}")
+                print(f"  {C.DIM}RPM      {C.RESET}{agent.bucket.stats()}")
+                print(f"  {C.DIM}Tokens   {C.RESET}{agent.token_meter.stats()}")
+                print(f"  {C.DIM}Context  {C.RESET}{ctx_color}{agent.context_tokens()} / {agent.context_window} tokens "
+                      f"({ctx_pct:.0f}%){C.RESET} {C.DIM}(compacts at {int(agent.compact_threshold*100)}%){C.RESET}\n")
             elif user_input.startswith("/rpm"):
                 parts = user_input.split()
                 if len(parts) >= 2:
