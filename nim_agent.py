@@ -1174,10 +1174,18 @@ class FileTools:
     def write(self, path: str, content: str) -> str:
         try:
             target = self._safe(path)
+            if target.exists() and target.is_dir():
+                return (f"{I['cross']} {C.BRED}[ERR]{C.RESET} '{path}' is an existing "
+                         f"directory, not a file — pick a file name inside it, e.g. "
+                         f"'{path.rstrip('/')}/{Path(path).name or 'file.txt'}'")
             target.parent.mkdir(parents=True, exist_ok=True)
             with open(target, "w", encoding="utf-8") as f:
                 f.write(content)
             return f"{I['check']} {C.BGREEN}[OK]{C.RESET} Written: {C.BOLD}{C.BWHITE}{path}{C.RESET} {C.DIM}({len(content)} chars){C.RESET}"
+        except PermissionError as e:
+            return (f"{I['cross']} {C.BRED}[ERR]{C.RESET} Permission denied writing '{path}': {e}. "
+                     f"Common causes: the path points to a directory, the file is open/locked "
+                     f"in another program, or the process lacks write access to this location.")
         except Exception as e:
             return f"{I['cross']} {C.BRED}[ERR]{C.RESET} {e}"
 
@@ -1486,6 +1494,7 @@ class NIMClient:
         self.last_stage = None
         self.project_dir = project_dir
         self.max_tool_rounds = 30
+        self.max_auto_continues = 2  # how many times to auto-continue past a round-limit cutoff before stopping and asking the user
 
         # Token/context tracking — separate from the RPM bucket above.
         # RPM tells you if you're sending too many *requests*; this
@@ -1703,7 +1712,21 @@ class NIMClient:
                 return result
             except Exception as e:
                 err_str = str(e).lower()
-                is_429 = "429" in err_str or "too many requests" in err_str or "rate limit" in err_str
+                # Not every provider/proxy returns a plain HTTP 429.
+                # gRPC-style backends (Vertex, some local worker pools)
+                # raise "ResourceExhausted" with a "local total request
+                # limit reached (N/M)" message instead — same meaning
+                # (too much concurrent/queued load), different words.
+                # Treat both as the same signal so we back off and
+                # rotate providers instead of raising a raw traceback.
+                is_429 = (
+                    "429" in err_str or "too many requests" in err_str
+                    or "rate limit" in err_str or "rate_limit" in err_str
+                    or "resourceexhausted" in err_str.replace(" ", "")
+                    or "resource exhausted" in err_str
+                    or "quota" in err_str
+                    or "worker local total request limit" in err_str
+                )
 
                 if is_429:
                     # The server received and counted this request
@@ -1734,14 +1757,48 @@ class NIMClient:
         self.messages.append({"role": "user", "content": user_message})
         model = self.get_model()  # profile's selected model — only used to decide default thinking behavior below; the actual model id used on the wire comes from whichever provider serves each attempt
 
+        continuations_left = self.max_auto_continues
+        while True:
+            finished = self._run_rounds(thinking)
+            if finished or continuations_left <= 0:
+                if not finished:
+                    print(f"\n{C.BRED}{I['stop']} [ROUND LIMIT]{C.RESET} Hit {self.max_tool_rounds} tool-call "
+                          f"rounds without finishing, and auto-continue is exhausted for this task. "
+                          f"State is saved — send another message (e.g. 'continue') to keep going.\n", flush=True)
+                    self.save_state()
+                return
+            # Silent death was the actual bug users hit: the loop just
+            # stopped with no explanation. Instead: tell the user, then
+            # automatically feed the model a "continue" turn so a task
+            # that's genuinely still in progress doesn't just die.
+            continuations_left -= 1
+            print(f"\n{C.BYELLOW}{I['refresh']} [AUTO-CONTINUE]{C.RESET} Hit {self.max_tool_rounds} rounds — "
+                  f"continuing automatically ({continuations_left} auto-continue(s) left)...\n", flush=True)
+            self.save_state()
+            self.messages.append({"role": "user", "content": "Continue exactly where you left off."})
+
+    def _run_rounds(self, thinking: bool = True) -> bool:
+        """Runs up to max_tool_rounds of the tool-calling loop. Returns
+        True if the model produced a final (non-tool-call) answer,
+        False if the round budget ran out mid-task."""
         for round_num in range(self.max_tool_rounds):
             self.maybe_compact()
 
             prompt_tokens_est = self.context_tokens()
+            # Don't blindly ask for a fixed 4096 completion tokens —
+            # if the context is already most of the way to the model's
+            # window, that request can push a call over the edge and
+            # trigger a hard context-length error instead of a clean
+            # response. Cap the ask to what's actually left, with a
+            # sane floor so short completions never get starved.
+            remaining_ctx = self.context_window - prompt_tokens_est
+            dynamic_max_tokens = max(512, min(4096, remaining_ctx - 512))
+
+            print(f"{C.DIM}  [round {round_num+1}/{self.max_tool_rounds}]{C.RESET}", flush=True)
 
             base_payload = {
                 "messages": self.messages,
-                "max_tokens": 4096,
+                "max_tokens": dynamic_max_tokens,
                 "temperature": 0.2,
                 "stream": True,
                 "tools": TOOLS_SCHEMA,
@@ -1824,7 +1881,7 @@ class NIMClient:
 
             except Exception as e:
                 print(f"\n{I['cross']} {C.BRED}[ERR]{C.RESET} {e}", flush=True)
-                return
+                return True  # don't auto-continue into a repeat of a hard error
 
             print("", flush=True)
 
@@ -1855,8 +1912,7 @@ class NIMClient:
                     print(f"{C.BYELLOW}{I['tools']} [Tool]{C.RESET} {C.BOLD}{C.BWHITE}{name}{C.RESET}({C.DIM}{json.dumps(args)}{C.RESET})")
                     print(f"{C.BYELLOW}{H*50}{C.RESET}\n", flush=True)
                     result = execute_tool(self.tools, name, args)
-                    if len(result) > 8000:
-                        result = result[:4000] + "\n... [truncated] ...\n" + result[-4000:]
+                    result = self._truncate_tool_result(result)
                     print(result[:500] + ("\n..." if len(result) > 500 else ""), flush=True)
 
                     self.messages.append({
@@ -1865,10 +1921,34 @@ class NIMClient:
                         "name": name,
                         "content": result,
                     })
+
+                # Checkpoint after every round, not just at REPL exit —
+                # a crash or Ctrl-C mid-task otherwise loses everything
+                # this round's tool calls just did, even though it's
+                # already sitting in self.messages in memory.
+                self.save_state()
                 continue
             else:
                 self.messages.append({"role": "assistant", "content": full_content})
-                break
+                return True
+        return False  # ran out of rounds without a final answer
+
+    def _truncate_tool_result(self, result: str) -> str:
+        """Cap a tool result's size against how much context budget is
+        actually left, instead of a fixed char count. A fixed cap
+        either wastes headroom on a near-empty context or, on a
+        nearly-full one, still leaves too little room for the model's
+        own next response — this scales with what's really available.
+        """
+        remaining_tokens = max(0, self.context_window - self.context_tokens())
+        # Never let one tool result eat more than ~40% of what's left,
+        # and keep sane absolute floor/ceiling so tiny or huge windows
+        # both behave reasonably.
+        budget_chars = int(max(2000, min(16000, remaining_tokens * 0.4 * 4)))
+        if len(result) > budget_chars:
+            half = budget_chars // 2
+            result = result[:half] + f"\n... [truncated {len(result) - budget_chars} chars] ...\n" + result[-half:]
+        return result
 
     def _http_chat(self, payload: Dict, provider: "Provider") -> tuple:
         req = urllib.request.Request(
