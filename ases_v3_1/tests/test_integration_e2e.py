@@ -121,7 +121,7 @@ def _common_dev_specs(pool, **overrides):
         "design_store": ("design_agent.store_design_spec_vector",
                          dict(new=AsyncMock())),
         "has_frontend": ("visual_reviewer._has_frontend", dict(return_value=False)),
-        "extract": ("parser.extract_files",
+        "extract": ("agent_loop.extract_files",
                     dict(return_value=[{"path": "fake.js",
                                         "content": "placeholder"}])),
         "mk_sandbox": ("sandbox.create_sandbox",

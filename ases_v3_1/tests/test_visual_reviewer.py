@@ -235,13 +235,10 @@ def mock_sandbox_deps():
         yield {"run_command": run_cmd, "write_file": write_file}
 
 
-def __successful_screenshot():
+def _successful_screenshot():
     """Helper: run_command side_effect that returns success for any command."""
     def side_effect(sandbox_id, cmd, timeout=None):
-        result = MagicMock()
-        result.success = True
-        result.stderr = ""
-        return result
+        return {"success": True, "stdout": "", "stderr": "", "returncode": 0}
     return side_effect
 
 
@@ -290,11 +287,9 @@ class TestVisualReviewerFullFlow:
         """Screenshot capture fails → skip with reason."""
         mock_sandbox_deps["run_command"].side_effect = _successful_screenshot()
         # Override: screenshot capture returns failure
-        fail_result = MagicMock()
-        fail_result.success = False
-        fail_result.stderr = "playwright not installed"
+        fail_result = {"success": False, "stdout": "", "stderr": "playwright not installed", "returncode": 1}
         mock_sandbox_deps["run_command"].side_effect = [
-            MagicMock(success=True, stderr=""),  # dev server
+            {"success": True, "stdout": "", "stderr": "", "returncode": 0},  # dev server
             fail_result,  # screenshot capture
         ]
 
@@ -373,6 +368,7 @@ class TestVisualReviewerFullFlow:
 
     @pytest.mark.asyncio
     async def test_rejects_when_vision_finds_issues(self, mock_sandbox_deps):
+        import json
         """Vision returns approved=False with issues → issues_text populated."""
         mock_sandbox_deps["run_command"].side_effect = _successful_screenshot()
 
@@ -387,7 +383,6 @@ class TestVisualReviewerFullFlow:
         ))]
         fake_response.usage = MagicMock(prompt_tokens=200, completion_tokens=80)
 
-        import json
         with patch("visual_reviewer._read_sandbox_file_b64", return_value=fake_b64), \
              patch("openai.AsyncOpenAI") as mock_openai_cls:
             mock_client = MagicMock()
@@ -476,7 +471,7 @@ class TestVisualReviewerFullFlow:
     async def test_html_stack_skips_dev_server(self, mock_sandbox_deps):
         """HTML stack has dev_cmd=None → no dev server start, direct screenshot."""
         # Only the screenshot run_command should fire (not dev server)
-        shot_result = MagicMock(success=True, stderr="")
+        shot_result = {"success": True, "stdout": "", "stderr": "", "returncode": 0}
         mock_sandbox_deps["run_command"].return_value = shot_result
 
         fake_response = MagicMock()
