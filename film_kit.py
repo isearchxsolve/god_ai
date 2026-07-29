@@ -43,6 +43,7 @@ import textwrap
 import time
 import urllib.parse
 import urllib.request
+from collections import deque
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -165,6 +166,51 @@ class TokenBucket:
         self.rpm = max(2.0, self.rpm * 0.5)
 
 
+class TokenMeter:
+    """Lightweight TPM/tok-s observer — no compaction logic needed
+    here (this pipeline never accumulates a growing message history,
+    each pool.chat() call is a fresh, short, fixed-size prompt), but
+    it shares the same NVIDIA/OpenRouter quota as nim_agent.py, and a
+    max_tokens=2000 call can still eat into a TPM cap even at low RPM.
+    This just makes that visible."""
+    def __init__(self):
+        self.window = deque()  # (monotonic_ts, tokens) for the last 60s
+        self.total_prompt = 0
+        self.total_completion = 0
+
+    def _prune(self):
+        now = time.monotonic()
+        while self.window and self.window[0][0] < now - 60.0:
+            self.window.popleft()
+
+    def record(self, prompt_tokens: int, completion_tokens: int):
+        now = time.monotonic()
+        self.window.append((now, prompt_tokens + completion_tokens))
+        self.total_prompt += max(0, prompt_tokens)
+        self.total_completion += max(0, completion_tokens)
+        self._prune()
+
+    def tpm(self) -> int:
+        self._prune()
+        return sum(t for _, t in self.window)
+
+    def stats(self) -> str:
+        return (f"{self.tpm()} TPM | lifetime: "
+                f"{self.total_prompt}in/{self.total_completion}out tokens")
+
+
+def estimate_tokens(text: Optional[str]) -> int:
+    """Cheap ~4-chars/token estimate — the OpenAI-compatible endpoints
+    used here don't reliably return usage counts, so this is close
+    enough for pacing visibility."""
+    if not text:
+        return 0
+    return max(1, len(text) // 4)
+
+
+TOKEN_METER = TokenMeter()
+
+
 class Provider:
     def __init__(self, name, base_url, api_key, model_id, rpm=20.0):
         self.name, self.base_url, self.model_id = name, base_url, model_id
@@ -204,7 +250,14 @@ class ProviderPool:
                     model=p.model_id, messages=messages,
                     temperature=temperature, max_tokens=max_tokens,
                 )
-                return resp.choices[0].message.content
+                content = resp.choices[0].message.content
+                usage = getattr(resp, "usage", None)
+                if usage:
+                    TOKEN_METER.record(usage.prompt_tokens, usage.completion_tokens)
+                else:
+                    prompt_est = sum(estimate_tokens(m.get("content")) for m in messages)
+                    TOKEN_METER.record(prompt_est, estimate_tokens(content))
+                return content
             except Exception as e:
                 last_exc = e
                 msg = str(e).lower()
@@ -482,6 +535,7 @@ def step_script(proj: Project, pool: ProviderPool, num_scenes: int):
     proj.scenes = generate_script(pool, proj.idea, num_scenes, proj.style)
     proj.save()
     ok(f"Got {len(proj.scenes)} scenes.")
+    info(f"Tokens: {TOKEN_METER.stats()}")
     for s in proj.scenes:
         print(f"  {C.DIM}[{s.index}]{C.RESET} {C.BWHITE}{s.narration}{C.RESET}")
 
