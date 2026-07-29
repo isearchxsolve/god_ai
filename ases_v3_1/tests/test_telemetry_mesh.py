@@ -121,7 +121,8 @@ def test_span_duration_properties():
     mesh = _make_mesh()
     mesh.start_trace("t1")
     sp = mesh.start_span("t1", "op")
-    time.sleep(0.01)
+    # Sleep longer than Windows timer resolution (~15.6ms) to ensure monotonic clock ticks
+    time.sleep(0.05)
     mesh.end_span("t1", sp.span_id)
     assert sp.duration_ns > 0
     assert sp.duration_ms > 0
