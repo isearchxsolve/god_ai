@@ -21,6 +21,7 @@ import urllib.request
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Dict, List, Optional
+import threading
 
 import nest_asyncio
 nest_asyncio.apply()
@@ -127,13 +128,13 @@ def step_script(proj: Project, pool: ProviderPool, num_scenes: int):
 def step_images(proj: Project):
     print(f"\n  {C.ACCENT}── Rendering Base Frames (Pollinations FLUX) {C.R}")
     POLLINATIONS_KEY = os.environ.get("POLLINATIONS_KEY", "") 
-    headers = {"User-Agent": "Mozilla/5.0", "Referer": "[https://pollinations.ai/](https://pollinations.ai/)"}
+    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://pollinations.ai/"}
     if POLLINATIONS_KEY: headers["Authorization"] = f"Bearer {POLLINATIONS_KEY}"
 
     for s in proj.scenes:
         out = proj.dir / "images" / f"scene_{s.index:02}.jpg"
         q = urllib.parse.quote(s.visual_prompt, safe="")
-        url = f"[https://gen.pollinations.ai/image/](https://gen.pollinations.ai/image/){q}?width=1280&height=720&nologo=true&seed={proj.seed}&model=flux"
+        url = f"https://gen.pollinations.ai/image/{q}?width=1280&height=720&nologo=true&seed={proj.seed}&model=flux"
         
         success = False
         for attempt in range(4):
@@ -164,7 +165,7 @@ def step_voice(proj: Project):
 def step_clips_cosmos(proj: Project, pool: ProviderPool):
     print(f"\n  {C.ACCENT}── Generating Physics-Aware Video (NVIDIA Cosmos NIM) {C.R}")
     bucket = TokenBucket(rpm=3.0, min_gap=5.0)
-    endpoint = "[https://integrate.api.nvidia.com/v1/videos/cosmos](https://integrate.api.nvidia.com/v1/videos/cosmos)" # Standard NVIDIA NIM endpoint path
+    endpoint = "https://integrate.api.nvidia.com/v1/videos/cosmos" # Standard NVIDIA NIM endpoint path
     
     for s in proj.scenes:
         out_video = proj.dir / "clips" / f"_raw_{s.index:02}.mp4"
@@ -218,9 +219,9 @@ def step_clips_cosmos(proj: Project, pool: ProviderPool):
 
 def step_clips_upscale(proj: Project):
     print(f"\n  {C.ACCENT}── 4K Neural Upscale & Optical Flow (GFPGAN + ESRGAN + RIFE) {C.R}")
-    face_model = GFPGANer(model_path='[https://github.com/TencentARC/GFPGAN/releases/download/v1.3.0/GFPGANv1.3.pth](https://github.com/TencentARC/GFPGAN/releases/download/v1.3.0/GFPGANv1.3.pth)', upscale=1, arch='clean', channel_multiplier=2, bg_upsampler=None)
+    face_model = GFPGANer(model_path='https://github.com/TencentARC/GFPGAN/releases/download/v1.3.0/GFPGANv1.3.pth', upscale=1, arch='clean', channel_multiplier=2, bg_upsampler=None)
     rrdb = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
-    esr_model = RealESRGANer(scale=4, model_path='[https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/Real-ESRGAN_x4plus.pth](https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/Real-ESRGAN_x4plus.pth)', model=rrdb, tile=512, half=True)
+    esr_model = RealESRGANer(scale=4, model_path='https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/Real-ESRGAN_x4plus.pth', model=rrdb, tile=512, half=True)
     rife_bin = "/usr/local/bin/rife-ncnn-vulkan"
 
     for s in proj.scenes:
