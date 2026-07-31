@@ -125,7 +125,7 @@ if LEGACY_WIN_CONSOLE:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 APP_NAME = "NEON ARCHITECT"
-APP_VERSION = "4.5.0"
+APP_VERSION = "4.5.2"
 APP_TAGLINE = "GLM-5.2 · NVIDIA NIM · Zero Bottlenecks · Self-Healing"
 
 CONFIG_DIR = Path.home() / ".neon_architect"
@@ -285,6 +285,18 @@ DEFAULT_CONFIG = {
     "http_connect_timeout": 15.0,
     "max_retries_per_provider": 3,
     "thinking_effort": "off",
+    # Opt-in: allow medium/high thinking (default False — historically stalls on NIM)
+    "allow_medium_high_thinking": False,
+    # Per-effort first-token / content-stall budgets (seconds)
+    "first_token_timeout_off": 60.0,
+    "first_token_timeout_low": 150.0,
+    "first_token_timeout_medium": 240.0,
+    "first_token_timeout_high": 360.0,
+    "stream_content_timeout_off": 200.0,
+    "stream_content_timeout_low": 200.0,
+    "stream_content_timeout_medium": 220.0,
+    "stream_content_timeout_high": 300.0,
+    "empty_pool_max_wait": 120.0,
     "inter_turn_delay": 0.35,
     # 0 = unlimited autopilot; stop on gates or /stop only.
     "max_autopilot_rounds": 0,
@@ -311,6 +323,51 @@ DEFAULT_CONFIG = {
     "tdd_enforce_red_green": True,
     "git_worktree_on_autopilot": True,
 }
+
+def normalize_thinking_policy(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Clamp thinking_effort and scale timeouts. Single source of truth.
+
+    - off  → first_token ~60s
+    - low  → first_token ~150s (only level trusted by default)
+    - medium/high only if allow_medium_high_thinking=True, with larger budgets
+    """
+    allow = bool(cfg.get("allow_medium_high_thinking", False))
+    effort = str(cfg.get("thinking_effort") or "off").lower().strip()
+    if effort in ("high", "medium") and not allow:
+        effort = "off"
+    if effort not in ("off", "low", "medium", "high"):
+        effort = "off"
+    cfg["thinking_effort"] = effort
+    cfg["show_thinking"] = bool(cfg.get("show_thinking", False)) and effort != "off"
+    cfg["autopilot_thinking"] = False
+
+    ft_key = f"first_token_timeout_{effort}"
+    ct_key = f"stream_content_timeout_{effort}"
+    defaults = {
+        "off": (60.0, 200.0),
+        "low": (150.0, 200.0),
+        "medium": (240.0, 220.0),
+        "high": (360.0, 300.0),
+    }
+    ft_def, ct_def = defaults.get(effort, (60.0, 200.0))
+    ft = float(cfg.get(ft_key) or cfg.get("first_token_timeout") or ft_def)
+    ct = float(cfg.get(ct_key) or cfg.get("stream_content_timeout") or ct_def)
+    # floors per effort
+    floors = {"off": 60.0, "low": 150.0, "medium": 240.0, "high": 360.0}
+    cfg["first_token_timeout"] = max(floors.get(effort, 60.0), ft)
+    cfg["stream_content_timeout"] = max(ct_def, ct)
+    # overall stream budget must exceed first-token
+    cfg["stream_timeout"] = max(
+        float(cfg.get("stream_timeout") or 420.0),
+        cfg["first_token_timeout"] + 60.0,
+    )
+    cfg["request_timeout"] = max(
+        float(cfg.get("request_timeout") or 420.0),
+        cfg["stream_timeout"],
+    )
+    return cfg
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  SECTION 1b: PERSONAS & SDLC DEFINITIONS
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1031,7 +1088,8 @@ class Provider:
             self.cooldown_until = time.monotonic() + 86400.0  # effectively gone
             return
         # Progressive cooldown capped
-        self.cooldown_until = time.monotonic() + cooldown * min(self.consecutive_failures, 5)
+        # Cap multiplier at 3 so empty-pool wait (≤120s) can outlast cooldowns
+        self.cooldown_until = time.monotonic() + cooldown * min(self.consecutive_failures, 3)
 
 
 class ProviderPool:
@@ -1068,9 +1126,12 @@ class ProviderPool:
         return self.attempts_on_current >= max_per_provider
 
     def shortest_wait(self) -> float:
-        waits = [max(0.0, p.cooldown_until - time.monotonic()) for p in self.providers]
-        bucket_waits = [p.bucket.wait_time() for p in self.providers]
-        return min(waits + bucket_waits) if (waits or bucket_waits) else 5.0
+        active = [p for p in self.providers if not getattr(p, "permanently_disabled", False)]
+        if not active:
+            return 9999.0
+        waits = [max(0.0, p.cooldown_until - time.monotonic()) for p in active]
+        bucket_waits = [p.bucket.wait_time() for p in active]
+        return min(waits + bucket_waits) if (waits or bucket_waits) else 2.0
 
 
 def build_pool(config: Dict[str, Any]) -> ProviderPool:
@@ -2413,21 +2474,8 @@ class NeonArchitect:
         if not restored and not skip_restore:
             self._rebuild_system()
 
-        # Thinking policy: prefer config/defaults (medium) to reduce NIM first-token stalls.
-        # Do not force "high" — that was causing 90s buffer timeouts.
-        # Default OFF: NIM GLM with enable_thinking buffers full reasoning before first token
-        effort = str(self.config.get("thinking_effort") or "off").lower()
-        if effort in ("high", "medium"):
-            # keep only low if user insists; medium/high stall too often on NIM
-            effort = "off"
-        if effort not in ("off", "low"):
-            effort = "off"
-        self.config["thinking_effort"] = effort
-        self.config["show_thinking"] = bool(self.config.get("show_thinking", False))
-        self.config["autopilot_thinking"] = False
-        self.config["first_token_timeout"] = max(
-            60.0, float(self.config.get("first_token_timeout") or 60.0)
-        )
+        # Thinking + timeout budgets (single policy)
+        normalize_thinking_policy(self.config)
 
         UI.separator()
         UI.ok(f"Initialized in {self.project_dir}")
@@ -3106,17 +3154,41 @@ class NeonArchitect:
         print()
         return content, reasoning, tool_calls, finish_reason
 
+    def _is_template_error(self, e: Exception) -> bool:
+        """NVIDIA 500s about prompt template / tools schema — not fixed by retrying same model."""
+        s = str(e).lower()
+        markers = (
+            "failed to apply prompt temp",
+            "failed to apply prompt template",
+            "prompt template",
+            "apply_chat_template",
+            "chat_template",
+            "jinja",
+            "tool call validation",
+            "tools schema",
+            "invalid tools",
+            "failed to generate completions",
+        )
+        return any(m in s for m in markers)
+
     def _is_transient_error(self, e: Exception) -> bool:
         """Classify whether an error is transient (retryable) or fatal."""
+        if self._is_template_error(e):
+            return False  # deterministic for this model+payload
         err_str = str(e).lower().replace(" ", "")
+        # bare "500" alone is ambiguous — template 500s already handled above
         transient_markers = [
             "timeout", "timedout", "apitimeout", "apiconnection",
             "429", "toomanyrequests", "ratelimit", "resourceexhausted",
-            "overloaded", "503", "502", "500", "504", "workerlocal",
+            "overloaded", "503", "502", "504", "workerlocal",
             "finish_reason", "dropped", "stall", "degraded",
             "badgateway", "unavailable", "gateway", "first-token", "firsttoken",
+            "capacity", "internalservererror",
         ]
         if any(m in err_str for m in transient_markers):
+            return True
+        # Generic 500 without template signature — treat as transient once
+        if "500" in err_str and "template" not in err_str:
             return True
         if isinstance(e, OPENAI_ERRORS):
             return True
@@ -3144,12 +3216,11 @@ class NeonArchitect:
         # before the first SSE token — that was the remaining 5–8s interactive lag.
         effort = str(self.config.get("thinking_effort") or "off").lower()
         payload = dict(payload)
-        if effort == "low":
-            # only explicit low keeps thinking; medium/high forced off above
+        if effort in ("low", "medium", "high"):
             extra = dict(payload.get("extra_body") or {})
             ctk = dict(extra.get("chat_template_kwargs") or {})
             ctk["enable_thinking"] = True
-            ctk["thinking_effort"] = "low"
+            ctk["thinking_effort"] = effort
             extra["chat_template_kwargs"] = ctk
             payload["extra_body"] = extra
         else:
@@ -3160,21 +3231,40 @@ class NeonArchitect:
             extra["chat_template_kwargs"] = ctk
             payload["extra_body"] = extra
 
+        empty_pool_waited = 0.0
+        max_empty_wait = float(self.config.get("empty_pool_max_wait", 120.0))
+        tools_stripped = False
+
         while total_attempts < max_total_attempts:
             provider = self.pool.next_available()
             if not provider:
                 empty_pool_spins += 1
-                wait = min(self.pool.shortest_wait(), 10.0)
-                if empty_pool_spins > 6:
+                wait = float(self.pool.shortest_wait())
+                # Wait for the real cooldown, not a fixed 10s that loses the race
+                if wait <= 0:
+                    wait = 2.0
+                # Cap single sleep but allow cumulative wait up to max_empty_wait
+                slice_w = min(wait, 30.0)
+                if empty_pool_waited + slice_w > max_empty_wait and empty_pool_spins > 2:
+                    alive = [
+                        p.name for p in self.pool.providers
+                        if not getattr(p, "permanently_disabled", False)
+                    ]
                     raise RuntimeError(
-                        "All providers unavailable after repeated waits. "
-                        "Check API key / rate limits / network."
+                        "All providers unavailable after waiting "
+                        f"{empty_pool_waited:.0f}s (cooldowns). "
+                        f"Active pool: {alive or 'none'}. "
+                        "Check API key / rate limits / network, or /model to switch."
                     )
-                wait = max(wait, 5.0)  # never busy-spin at 0.0s
-                UI.warn(f"All providers cooling down. Waiting {wait:.1f}s...")
-                time.sleep(wait)
+                UI.warn(
+                    f"All providers cooling down. Waiting {slice_w:.1f}s "
+                    f"(cooldown≈{wait:.0f}s, waited {empty_pool_waited:.0f}s)..."
+                )
+                time.sleep(slice_w)
+                empty_pool_waited += slice_w
                 continue
             empty_pool_spins = 0
+            empty_pool_waited = 0.0
 
             # Soft rate-limit pacing (info only — token already acquired)
             wt = provider.bucket.wait_time()
@@ -3221,6 +3311,29 @@ class NeonArchitect:
                         continue
                     raise RuntimeError(f"All providers failed. Last error: {e}")
 
+                # Prompt-template / tools-schema 500 — deterministic for this model+payload
+                if self._is_template_error(e):
+                    UI.warn(
+                        f"{provider.name} prompt-template/tools failure — "
+                        f"disabling this model for the session ({str(e)[:120]})"
+                    )
+                    provider.record_failure(cooldown=600.0, permanent=True)
+                    self.pool.rotate()
+                    # One-shot: strip tools and retry on another provider (keeps conversation alive)
+                    if not tools_stripped and payload.get("tools"):
+                        tools_stripped = True
+                        payload = dict(payload)
+                        payload.pop("tools", None)
+                        payload["tool_choice"] = "none"
+                        UI.info("Retrying once without tools schema (template workaround)...")
+                        if total_attempts < max_total_attempts:
+                            time.sleep(0.5)
+                            continue
+                    if total_attempts < max_total_attempts:
+                        time.sleep(0.5)
+                        continue
+                    raise RuntimeError(f"All providers failed (template). Last error: {e}")
+
                 # Auth → stop immediately with clear recovery steps
                 if "401" in err_l or "403" in err_l or "unauthorized" in err_l or "forbidden" in err_l:
                     UI.err(f"Auth failure: {e}")
@@ -3237,15 +3350,16 @@ class NeonArchitect:
                     or "429" in err_l
                     or "ratelimit" in err_c
                 ):
-                    UI.warn(f"{provider.name} at capacity — cooling 90s, rotating")
-                    provider.record_failure(cooldown=20.0)
+                    UI.warn(f"{provider.name} at capacity — cooling 45s, rotating")
+                    provider.record_failure(cooldown=15.0)
                     self.pool.rotate()
                 elif not self._is_transient_error(e):
                     UI.err(f"Fatal API error: {e}")
                     raise
                 else:
                     UI.warn(f"{provider.name} transient: {str(e)[:100]}")
-                    provider.record_failure(cooldown=20.0)
+                    # Shorter cooldown so empty-pool wait can outlast it
+                    provider.record_failure(cooldown=12.0)
                     if self.pool.should_rotate(max_per_provider):
                         self.pool.rotate()
 
@@ -4213,20 +4327,17 @@ def apply_project_to_runtime(cfg: Dict[str, Any], project_dir: Path) -> Dict[str
     # project overrides win (except hardwired thinking / stall policy below)
     for k, v in entry.items():
         runtime[k] = v
-    # Thinking: honor DEFAULT_CONFIG / project entry (do not force high — causes NIM stalls)
-    effort = str(runtime.get("thinking_effort") or DEFAULT_CONFIG.get("thinking_effort") or "off").lower()
-    if effort in ("high", "medium"):
-        effort = "off"
-    if effort not in ("off", "low"):
-        effort = "off"
-    runtime["thinking_effort"] = effort
-    runtime["show_thinking"] = False
-    runtime["autopilot_thinking"] = False
-    runtime["first_token_timeout"] = max(90.0, float(runtime.get("first_token_timeout") or DEFAULT_CONFIG.get("first_token_timeout") or 120.0))
-    runtime["stream_content_timeout"] = max(150.0, float(runtime.get("stream_content_timeout") or DEFAULT_CONFIG.get("stream_content_timeout") or 200.0))
+    # Thinking + timeout budgets (must match NeonArchitect init)
+    normalize_thinking_policy(runtime)
     runtime["http_read_timeout"] = max(180.0, float(runtime.get("http_read_timeout") or 180.0))
-    runtime["stream_timeout"] = max(420.0, float(runtime.get("stream_timeout") or 420.0))
-    runtime["request_timeout"] = max(420.0, float(runtime.get("request_timeout") or 420.0))
+    runtime["stream_timeout"] = max(
+        float(runtime.get("stream_timeout") or 420.0),
+        float(runtime.get("first_token_timeout") or 60.0) + 60.0,
+    )
+    runtime["request_timeout"] = max(
+        float(runtime.get("request_timeout") or 420.0),
+        float(runtime.get("stream_timeout") or 420.0),
+    )
     runtime["project_dir"] = pkey
     runtime["api_key"] = (entry.get("api_key") or "").strip()
     cfg["active_project"] = pkey
