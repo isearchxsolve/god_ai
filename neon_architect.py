@@ -125,7 +125,7 @@ if LEGACY_WIN_CONSOLE:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 APP_NAME = "NEON ARCHITECT"
-APP_VERSION = "4.3.5"
+APP_VERSION = "4.3.8"
 APP_TAGLINE = "GLM-5.2 · NVIDIA NIM · Zero Bottlenecks · Self-Healing"
 
 CONFIG_DIR = Path.home() / ".neon_architect"
@@ -1064,7 +1064,11 @@ def build_pool(config: Dict[str, Any]) -> ProviderPool:
 
     if not providers:
         raise RuntimeError(
-            "No providers configured. Set NVIDIA API key in config or OPENROUTER_API_KEY env."
+            "No providers configured for this project. "
+            "Set a NVIDIA NIM key:  (1) env NVIDIA_API_KEY=nvapi-...  "
+            "(2) python neon_architect.py and /apikey nvapi-...  "
+            "(3) or OPENROUTER_API_KEY for OpenRouter fallback. "
+            f"project={config.get('project_dir')}"
         )
 
     return ProviderPool(providers)
@@ -2341,19 +2345,18 @@ class NeonArchitect:
 
         # Thinking policy: prefer config/defaults (medium) to reduce NIM first-token stalls.
         # Do not force "high" — that was causing 90s buffer timeouts.
-        effort = str(self.config.get("thinking_effort") or DEFAULT_CONFIG.get("thinking_effort") or "medium").lower()
-        if effort not in ("off", "low", "medium", "high"):
+        # Always prefer medium unless user explicitly set off/low in this session
+        effort = str(self.config.get("thinking_effort") or "medium").lower()
+        if effort == "high":
+            effort = "medium"  # high → too many NIM first-token timeouts
+        if effort not in ("off", "low", "medium"):
             effort = "medium"
         self.config["thinking_effort"] = effort
         self.config["show_thinking"] = bool(self.config.get("show_thinking", True))
-        self.config["autopilot_thinking"] = bool(
-            self.config.get("autopilot_thinking", DEFAULT_CONFIG.get("autopilot_thinking", False))
+        self.config["autopilot_thinking"] = False
+        self.config["first_token_timeout"] = max(
+            120.0, float(self.config.get("first_token_timeout") or 120.0)
         )
-        self.config["first_token_timeout"] = float(
-            self.config.get("first_token_timeout") or DEFAULT_CONFIG["first_token_timeout"]
-        )
-        if self.config["first_token_timeout"] < 90.0:
-            self.config["first_token_timeout"] = 90.0
 
         UI.separator()
         UI.ok(f"Initialized in {self.project_dir}")
@@ -3994,8 +3997,8 @@ def load_config() -> Dict[str, Any]:
     _HARDWIRE = {
         "stream_timeout": 420.0,
         "request_timeout": 420.0,
-        "stream_content_timeout": 150.0,
-        "first_token_timeout": 90.0,       # critical: 25s caused false stalls under high think
+        "stream_content_timeout": 200.0,
+        "first_token_timeout": 120.0,
         "http_read_timeout": 180.0,
         "http_connect_timeout": 15.0,
         "retry_max": 8,
@@ -4008,9 +4011,10 @@ def load_config() -> Dict[str, Any]:
         "max_autopilot_rounds": 0,
         "max_phase_rounds": 0,
         "rpm_safety": 0.80,
+        # medium (not high) — high causes long NIM first-token buffers / stalls
         "thinking_effort": "medium",
         "show_thinking": True,
-        "autopilot_thinking": True,
+        "autopilot_thinking": False,
     }
     for _k, _v in _HARDWIRE.items():
         if raw.get(_k) != _v:
@@ -4066,12 +4070,17 @@ def apply_project_to_runtime(cfg: Dict[str, Any], project_dir: Path) -> Dict[str
     # project overrides win (except hardwired thinking / stall policy below)
     for k, v in entry.items():
         runtime[k] = v
-    # Pin thinking-safe policy — project/session/legacy config cannot disable
-    runtime["thinking_effort"] = "high"
-    runtime["show_thinking"] = True
-    runtime["autopilot_thinking"] = True
-    runtime["first_token_timeout"] = max(90.0, float(runtime.get("first_token_timeout") or 90.0))
-    runtime["stream_content_timeout"] = max(150.0, float(runtime.get("stream_content_timeout") or 150.0))
+    # Thinking: honor DEFAULT_CONFIG / project entry (do not force high — causes NIM stalls)
+    effort = str(runtime.get("thinking_effort") or DEFAULT_CONFIG.get("thinking_effort") or "medium").lower()
+    if effort == "high":
+        effort = "medium"
+    if effort not in ("off", "low", "medium"):
+        effort = "medium"
+    runtime["thinking_effort"] = effort
+    runtime["show_thinking"] = bool(runtime.get("show_thinking", True))
+    runtime["autopilot_thinking"] = False
+    runtime["first_token_timeout"] = max(90.0, float(runtime.get("first_token_timeout") or DEFAULT_CONFIG.get("first_token_timeout") or 120.0))
+    runtime["stream_content_timeout"] = max(150.0, float(runtime.get("stream_content_timeout") or DEFAULT_CONFIG.get("stream_content_timeout") or 200.0))
     runtime["http_read_timeout"] = max(180.0, float(runtime.get("http_read_timeout") or 180.0))
     runtime["stream_timeout"] = max(420.0, float(runtime.get("stream_timeout") or 420.0))
     runtime["request_timeout"] = max(420.0, float(runtime.get("request_timeout") or 420.0))
@@ -4093,24 +4102,44 @@ def save_project_settings(cfg: Dict[str, Any], project_dir: Path, **fields: Any)
 
 
 def ensure_api_key(cfg: Dict[str, Any], project_dir: Optional[Path] = None) -> bool:
-    """Resolve API key for THIS project only (multi-entry config).
+    """First-time setup: ask for NVIDIA API key once per project, then reuse.
 
     Priority:
-      1. projects[<path>].api_key in config.json
-      2. Legacy per-project .key.json file (migrated upward)
-      3. Env NVIDIA_API_KEY / NGC_API_KEY / NIM_API_KEY
-      4. Interactive prompt → stored under projects[<path>]
+      1. Already saved projects[<path>].api_key
+      2. Legacy .key.json for this path
+      3. Env NVIDIA_API_KEY / NGC_API_KEY / NIM_API_KEY (saved for this project)
+      4. Interactive prompt (first time) → saved under this project
     """
     project = Path(project_dir or cfg.get("project_dir") or ".").resolve()
-    entry = get_project_entry(cfg, project)
+    root = cfg.get("_root") if isinstance(cfg.get("_root"), dict) else None
+    if not isinstance(root, dict) or "projects" not in root:
+        try:
+            root = load_config()
+        except Exception:
+            root = {"projects": {}}
+        cfg["_root"] = root
+    root.setdefault("projects", {})
+    entry = get_project_entry(root, project)
+
+    def _save(key: str) -> None:
+        key = key.strip().strip('"').strip("'")
+        entry["api_key"] = key
+        cfg["api_key"] = key
+        try:
+            save_config(root)
+        except Exception:
+            pass
+        try:
+            save_project_api_key(project, key)
+        except Exception:
+            pass
 
     key = (entry.get("api_key") or "").strip()
     if not key:
-        # legacy sidecar file
-        key = load_project_api_key(project)
+        key = (load_project_api_key(project) or "").strip()
         if key:
-            entry["api_key"] = key
-            save_config(cfg)
+            _save(key)
+            return True
 
     if not key:
         key = (
@@ -4120,35 +4149,37 @@ def ensure_api_key(cfg: Dict[str, Any], project_dir: Optional[Path] = None) -> b
             or ""
         ).strip()
         if key:
-            entry["api_key"] = key
-            save_config(cfg)
-            UI.info(f"API key from env stored under projects[{project}]")
+            _save(key)
+            UI.info("API key taken from environment and saved for this project.")
+            return True
 
     if key:
-        cfg["api_key"] = key  # runtime flat access for build_pool
+        cfg["api_key"] = key
         return True
 
-    UI.separator("API key for this project")
-    UI.info(f"Project: {project}")
-    UI.info(f"Config:  {CONFIG_FILE}")
-    UI.info("Each project has its own entry + key (avoids throttling one NVIDIA account).")
-    UI.info("Get a key at https://build.nvidia.com")
+    # First time for this project — ask once
+    print()
+    print("=" * 56)
+    print("  NEON ARCHITECT — first-time setup")
+    print("=" * 56)
+    print(f"  Project: {project}")
+    print(f"  Config:  {CONFIG_FILE}")
+    print()
+    print("  No API key saved for this folder yet.")
+    print("  Get a free/paid key: https://build.nvidia.com")
+    print("  Paste your NVIDIA NIM key below (starts with nvapi-).")
+    print("  It will be remembered for this project only.")
+    print("=" * 56)
     try:
-        key = input("NVIDIA API Key: ").strip()
+        key = input("  NVIDIA API Key: ").strip().strip('"').strip("'")
     except (EOFError, KeyboardInterrupt):
+        print()
         key = ""
     if not key:
-        UI.err("API key required for this project.")
+        UI.err("API key is required to start. Run again and paste your nvapi- key.")
         return False
-    entry["api_key"] = key
-    cfg["api_key"] = key
-    save_config(cfg)
-    # keep sidecar in sync for older tools
-    try:
-        save_project_api_key(project, key)
-    except Exception:
-        pass
-    UI.ok(f"Saved project API key → {CONFIG_FILE} [{project}]")
+    _save(key)
+    UI.ok("API key saved. Starting agent…")
     return True
 
 
@@ -4340,8 +4371,11 @@ def main():
 
     if not ensure_api_key(cfg, project_dir=project):
         sys.exit(1)
-    # refresh key into runtime after ensure
-    cfg["api_key"] = get_project_entry(root_cfg, project).get("api_key", "")
+    # refresh key into runtime after ensure (always from root project entry)
+    cfg["api_key"] = (get_project_entry(root_cfg, project).get("api_key") or cfg.get("api_key") or "").strip()
+    if not cfg["api_key"]:
+        UI.err("No API key after ensure_api_key — set NVIDIA_API_KEY or use /apikey after fixing config.")
+        sys.exit(1)
 
     os.system("cls" if os.name == "nt" else "clear")
     UI.neon_banner()
