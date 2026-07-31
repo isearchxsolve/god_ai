@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  NEON ARCHITECT v4.0  —  Monolithic Coding Agent for NVIDIA NIM (GLM-5.2)  ║
+║  NEON ARCHITECT v4.6  —  Monolithic Coding Agent for NVIDIA NIM              ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
-║  Backend:   NVIDIA NIM  →  GLM-5.2  (primary) | Nemotron / Llama (fallback)  ║
-║  Design:    Cyberpunk TUI · Zero Bottlenecks · Self-Healing Streams          ║
-║  Features:  Auto-Nudge · XML Interceptor · Smart Compaction · Token Bucket  ║
+║  Backend:   NVIDIA NIM  →  GLM-5.2 (primary) | Nemotron 3 / Llama (fallback) ║
+║  Design:    Warm terminal UI · Zero Bottlenecks · Self-Healing Streams       ║
+║  Features:  Auto-Nudge · XML Interceptor · Smart Compaction · Token Bucket   ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 
 Usage:
@@ -27,6 +27,7 @@ Commands (inside agent):
 from __future__ import annotations
 
 import argparse
+import copy
 import difflib
 import fnmatch
 import json
@@ -42,6 +43,7 @@ import time
 import uuid
 import concurrent.futures
 import queue
+import platform
 from collections import deque
 import random
 import atexit
@@ -67,6 +69,21 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
+
+from enum import Enum
+from collections import defaultdict
+
+def verify_nim(base_url: str, api_key: str) -> bool:
+    try:
+        r = httpx.get(
+            f"{base_url}/models",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=10,
+        )
+        return r.status_code == 200
+    except Exception:
+        return False
+
 
 # ── OpenAI client ─────────────────────────────────────────────────────────────
 try:
@@ -125,7 +142,7 @@ if LEGACY_WIN_CONSOLE:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 APP_NAME = "NEON ARCHITECT"
-APP_VERSION = "4.5.2"
+APP_VERSION = "4.6.4"
 APP_TAGLINE = "GLM-5.2 · NVIDIA NIM · Zero Bottlenecks · Self-Healing"
 
 CONFIG_DIR = Path.home() / ".neon_architect"
@@ -159,8 +176,44 @@ def load_project_api_key(project_dir: Path) -> str:
     return ""
 
 
+def load_dead_models(project_dir: Path) -> List[str]:
+    """Model ids that 404'd (not enabled on this account's key) in a past
+    session. Persisted so every fresh launch/pool-rebuild doesn't have to
+    re-discover the same unavailable models via live 404s before falling
+    through to a working provider — this was previously pure wasted
+    wall-clock + retry budget on every single turn/session.
+    """
+    data = _safe_json_load(_project_key_path(project_dir))
+    if data and isinstance(data.get("dead_models"), list):
+        return [m for m in data["dead_models"] if isinstance(m, str)]
+    return []
+
+
+def mark_model_dead(project_dir: Path, model_id: str) -> None:
+    """Record a 404'd model id so future sessions skip it at pool-build time."""
+    try:
+        path = _project_key_path(project_dir)
+        data = _safe_json_load(path) or {}
+        dead = set(data.get("dead_models") or [])
+        if model_id in dead:
+            return
+        dead.add(model_id)
+        data["dead_models"] = sorted(dead)
+        SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        tmp.replace(path)
+    except Exception:
+        pass  # best-effort; never let bookkeeping break the retry loop
+
+
 def save_project_api_key(project_dir: Path, api_key: str) -> Path:
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(SESSIONS_DIR, 0o700)
+    except Exception:
+        pass  # best-effort; e.g. unsupported on some filesystems
     path = _project_key_path(project_dir)
     cleaned = api_key.strip().strip('"').strip("'").replace("\n", "").replace("\r", "")
     payload = {
@@ -171,6 +224,10 @@ def save_project_api_key(project_dir: Path, api_key: str) -> Path:
     tmp = path.with_suffix(".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
+    try:
+        os.chmod(tmp, 0o600)
+    except Exception:
+        pass  # best-effort; e.g. unsupported on some filesystems
     tmp.replace(path)
     return path
 
@@ -197,9 +254,10 @@ MODELS: Dict[str, Dict[str, Any]] = {
         "rpm": 40,
         "max_tokens": 8192,
         "ctx_window": 131072,
-        # thinking ON — max server-side reasoning (effort=high)
         "thinking": False,
         "extra_body": None,
+        "temperature": None,
+        "top_p": None,
     },
     "glm-5.2-fp8": {
         "id": "z-ai/glm-5.2-fp8",
@@ -210,26 +268,20 @@ MODELS: Dict[str, Dict[str, Any]] = {
         "ctx_window": 131072,
         "thinking": False,
         "extra_body": None,
+        "temperature": None,
+        "top_p": None,
     },
     "nemotron-ultra": {
         "id": "nvidia/nemotron-3-ultra-550b-a55b",
         "name": "Nemotron 3 Ultra",
         "provider": "NVIDIA NIM",
         "rpm": 20,
-        "max_tokens": 32768,
+        "max_tokens": 16000,
         "ctx_window": 131072,
         "thinking": False,
-        "extra_body": None,
-    },
-    "nemotron-4-340b": {
-        "id": "nvidia/nemotron-4-340b",
-        "name": "Nemotron 4 340B",
-        "provider": "NVIDIA NIM",
-        "rpm": 20,
-        "max_tokens": 32768,
-        "ctx_window": 131072,
-        "thinking": False,
-        "extra_body": None,
+        "extra_body": {"chat_template_kwargs": {"enable_thinking": False, "force_nonempty_content": True}},
+        "temperature": 1.0,
+        "top_p": 0.95,
     },
     "llama-3.1-405b": {
         "id": "nvidia/llama-3.1-405b-instruct",
@@ -240,6 +292,8 @@ MODELS: Dict[str, Dict[str, Any]] = {
         "ctx_window": 131072,
         "thinking": False,
         "extra_body": None,
+        "temperature": None,
+        "top_p": None,
     },
     "nemotron-3-super-120b-a12b": {
         "id": "nvidia/nemotron-3-super-120b-a12b",
@@ -249,14 +303,12 @@ MODELS: Dict[str, Dict[str, Any]] = {
         "max_tokens": 32768,
         "ctx_window": 131072,
         "thinking": False,
-        "extra_body": None,
+        "extra_body": {"chat_template_kwargs": {"enable_thinking": False, "force_nonempty_content": True}},
+        "temperature": 1.0,
+        "top_p": 0.95,
     },
 }
 
-# Hardened defaults for thinking_effort=high on NVIDIA NIM.
-# Root cause of stalls/hiccups: first_token_timeout too low (25s) while GLM
-# buffers 30–90s of reasoning with zero SSE bytes — looked like a dead backend
-# and forced false provider rotations.
 DEFAULT_CONFIG = {
     "version": APP_VERSION,
     "api_key": "",
@@ -265,12 +317,10 @@ DEFAULT_CONFIG = {
     "base_url": NIM_BASE_URL,
     "project_dir": str(Path.cwd()),
     "temperature": 0.2,
-    # 0 = unlimited. Turns driven by phase gates, not a fixed budget.
     "max_rounds": 0,
     "compact_threshold": 0.3,
     "auto_nudge": True,
     "max_nudges": 2,
-    # --- Stream / HTTP sized for high-thinking quiet windows ---
     "stream_timeout": 420.0,
     "request_timeout": 420.0,
     "rpm_safety": 0.80,
@@ -284,10 +334,9 @@ DEFAULT_CONFIG = {
     "http_read_timeout": 180.0,
     "http_connect_timeout": 15.0,
     "max_retries_per_provider": 3,
+    "nim_shared_rpm": 38.0,
     "thinking_effort": "off",
-    # Opt-in: allow medium/high thinking (default False — historically stalls on NIM)
     "allow_medium_high_thinking": False,
-    # Per-effort first-token / content-stall budgets (seconds)
     "first_token_timeout_off": 60.0,
     "first_token_timeout_low": 150.0,
     "first_token_timeout_medium": 240.0,
@@ -298,10 +347,13 @@ DEFAULT_CONFIG = {
     "stream_content_timeout_high": 300.0,
     "empty_pool_max_wait": 120.0,
     "inter_turn_delay": 0.35,
-    # 0 = unlimited autopilot; stop on gates or /stop only.
+    "post_429_backoff": 25.0,
     "max_autopilot_rounds": 0,
-    # 0 = no force-advance on phase round count.
-    "max_phase_rounds": 0,
+    "max_phase_rounds": 40,
+    "testing_max_phase_rounds": 25,
+    "min_tests_passed": 1,
+    "min_coverage_pct": 0,
+    "max_same_tool_successes": 3,
     "startup_compact_tokens": 60000,
     "autopilot_thinking": False,
     "plan_artifact": "PLAN.md",
@@ -310,7 +362,6 @@ DEFAULT_CONFIG = {
     "project_state_file": ".neon_project_state.json",
     "max_same_tool_failures": 3,
     "require_research_for_external": True,
-    # DEFAULT: full tool power INSIDE the project only (paths never escape project_dir).
     "full_access": True,
     "allow_path_outside_project": False,
     "allow_local_network": True,
@@ -325,12 +376,6 @@ DEFAULT_CONFIG = {
 }
 
 def normalize_thinking_policy(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """Clamp thinking_effort and scale timeouts. Single source of truth.
-
-    - off  → first_token ~60s
-    - low  → first_token ~150s (only level trusted by default)
-    - medium/high only if allow_medium_high_thinking=True, with larger budgets
-    """
     allow = bool(cfg.get("allow_medium_high_thinking", False))
     effort = str(cfg.get("thinking_effort") or "off").lower().strip()
     if effort in ("high", "medium") and not allow:
@@ -352,11 +397,9 @@ def normalize_thinking_policy(cfg: Dict[str, Any]) -> Dict[str, Any]:
     ft_def, ct_def = defaults.get(effort, (60.0, 200.0))
     ft = float(cfg.get(ft_key) or cfg.get("first_token_timeout") or ft_def)
     ct = float(cfg.get(ct_key) or cfg.get("stream_content_timeout") or ct_def)
-    # floors per effort
     floors = {"off": 60.0, "low": 150.0, "medium": 240.0, "high": 360.0}
     cfg["first_token_timeout"] = max(floors.get(effort, 60.0), ft)
     cfg["stream_content_timeout"] = max(ct_def, ct)
-    # overall stream budget must exceed first-token
     cfg["stream_timeout"] = max(
         float(cfg.get("stream_timeout") or 420.0),
         cfg["first_token_timeout"] + 60.0,
@@ -447,13 +490,20 @@ SDLC_PHASES: List[str] = [
 SDLC_PHASE_PROMPTS: Dict[str, str] = {
     "planning": (
         "Research the goal (web_search + browse_page if external product). "
-        "Write PLAN.md with requirements, risks, phased tasks, acceptance criteria. Add todos. Do NOT implement yet."
+        "Write PLAN.md with exact headings Requirements, Risks, Acceptance Criteria. "
+        "Add >=5 todos via todo tool with content field each time "
+        '(example: action=add content="Draft API surface for NIM chat completions"). '
+        "Do NOT implement app code yet."
     ),
     "architecture": (
         "Follow PLAN.md. Write ARCHITECTURE.md (components, interfaces, data flow, tech stack) and interface stubs only."
     ),
     "design": "Follow PLAN.md and ARCHITECTURE.md. Design UI/UX, components, styles, layouts.",
-    "implementation": "Follow PLAN.md and ARCHITECTURE.md. Implement with TDD. Track todos.",
+    "implementation": (
+        "Follow PLAN.md and ARCHITECTURE.md. Implement REAL application code under "
+        "src/, app/, backend/, frontend/, lib/, or tests/ (not just PLAN.md). "
+        "TDD: write tests, run them, fix. Track todos."
+    ),
     "testing": "Test against PLAN.md acceptance criteria. Fix failures. No new features.",
     "review": "Review against PLAN.md and ARCHITECTURE.md for quality, security, consistency.",
     "deployment": "Create deployment artifacts aligned with ARCHITECTURE.md.",
@@ -471,22 +521,6 @@ SDLC_PERSONA_MAP: Dict[str, str] = {
     "verification": "tester",
 }
 
-# ── DETERMINISTIC PHASE-COMPLETION GATES ──────────────────────────────────────
-# ROOT CAUSE FIX (architectural): The orchestrator was previously asking the
-# model to self-certify phase completion via prose ("plan complete", "ready to
-# implement"). A thinking model like GLM-5.2 is probabilistic and does not
-# reliably emit those exact linguistic markers, so the orchestrator would sit
-# waiting for a signal that never comes — the model thinks it's working, the
-# orchestrator thinks nothing has happened, and neither side advances.
-#
-# The fix: the orchestrator now checks OBSERVABLE FACTS from actual tool
-# execution (todos created, files written, tests run with a real exit code)
-# rather than the model's claims about its own progress. The model becomes a
-# worker that produces artifacts; the orchestrator is the project manager that
-# verifies artifacts exist and advances the state machine deterministically.
-# Textual signal detection and the stuck-round timer remain as fallbacks, but
-# are no longer the primary or only path to advancing a phase.
-# Gates only — no fixed turn budget, no force-advance on round count.
 SDLC_PHASE_REQUIREMENTS: Dict[str, Dict[str, Any]] = {
     "planning": {
         "kind": "plan_complete",
@@ -494,7 +528,7 @@ SDLC_PHASE_REQUIREMENTS: Dict[str, Dict[str, Any]] = {
         "min_chars": 400,
         "min_todos": 5,
         "require_sections": ["Acceptance Criteria", "Requirements", "Risks"],
-        "require_research": True,  # web_search or browse_page if goal looks external
+        "require_research": True,
     },
     "architecture": {
         "kind": "architecture_complete",
@@ -513,7 +547,7 @@ SDLC_PHASE_REQUIREMENTS: Dict[str, Dict[str, Any]] = {
         "kind": "implementation_complete",
         "any_tool": ["write", "edit"],
         "min_calls": 8,
-        "min_src_writes": 4,  # under src/app/backend/frontend/lib/tests
+        "min_src_writes": 4,
     },
     "testing": {
         "kind": "bash_success",
@@ -530,16 +564,16 @@ SDLC_PHASE_REQUIREMENTS: Dict[str, Dict[str, Any]] = {
         "min_calls": 1,
     },
     "verification": {
-        "kind": "bash_success",
+        "kind": "verification_criteria_complete",
         "require_test_cmd": True,
+        "artifact": "VERIFICATION.md",
     },
 }
 
-# Plan schema markers (case-insensitive section headers expected in PLAN.md)
+
 PLAN_REQUIRED_HEADERS = ("acceptance criteria", "requirements", "risks")
 ARCH_REQUIRED_HEADERS = ("components", "data flow")
 
-# Destructive bash patterns (require confirm unless bash_confirm_destructive=False)
 DESTRUCTIVE_BASH_RE = re.compile(
     r"(?:^|[\s;|&])(rm\s+-[a-zA-Z]*[fr]|rm\s+--recursive|del\s+/[sf]|format\s+|"
     r"git\s+push\s+.*--force|git\s+reset\s+--hard|dd\s+if=|mkfs\.|shutdown|reboot)\b",
@@ -548,31 +582,29 @@ DESTRUCTIVE_BASH_RE = re.compile(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  SECTION 2: CYBERPUNK THEME & UI SYSTEM
+#  SECTION 2: TERMINAL THEME & UI SYSTEM
 # ═══════════════════════════════════════════════════════════════════════════════
 
 if HAS_RICH:
-    # Claude Code design system — warm terracotta, high-contrast, large readable type
     THEME = Theme({
-        "cc_primary": "#d77757",          # terracotta brand accent
+        "cc_primary": "#d77757",
         "cc_primary_bold": "bold #d77757",
         "cc_shimmer": "#eb9f7f",
-        "cc_tool": "bold #fd5db1",        # hot pink tool borders
+        "cc_tool": "bold #fd5db1",
         "cc_tool_dim": "#fd5db1",
-        "cc_permission": "#b1b9f9",       # lavender
+        "cc_permission": "#b1b9f9",
         "cc_success": "bold #4eba65",
         "cc_warn": "bold #ffc107",
         "cc_error": "bold #ff6b80",
-        "cc_muted": "#a0a0a0",           # brighter than #888 for visibility
+        "cc_muted": "#a0a0a0",
         "cc_subtle": "#6a6a6a",
-        "cc_fg": "bold #ffffff",         # large-readable body
+        "cc_fg": "bold #ffffff",
         "cc_body": "#f0f0f0",
         "cc_user": "bold #ffffff",
         "cc_surface": "#373737",
         "cc_thinking": "bold #d77757",
         "cc_prompt": "bold #d77757",
         "cc_status": "#b0b0b0",
-        # keep legacy aliases so old markup doesn't crash
         "neon_cyan": "bold #d77757",
         "neon_magenta": "bold #fd5db1",
         "neon_green": "bold #4eba65",
@@ -599,7 +631,6 @@ if HAS_RICH:
         "status_warn": "bold #ffc107",
         "status_err": "bold #ff6b80",
     })
-    # force_terminal + soft_wrap help readability on Windows Terminal / cmd
     console = Console(
         theme=THEME,
         highlight=False,
@@ -610,8 +641,6 @@ if HAS_RICH:
 else:
     console = None
 
-
-# Whimsical Claude Code thinking verbs (expanded set)
 _CC_VERBS = [
     "Thinking", "Cooking", "Percolating", "Ruminating", "Cogitating",
     "Ideating", "Kneading", "Sautéing", "Pondering", "Brewing",
@@ -632,7 +661,6 @@ class UI:
 
     @staticmethod
     def header(model_name: str, project: str) -> "RenderableType":
-        """Minimal session header — Claude Code has almost no chrome."""
         if not HAS_RICH:
             return f"{APP_NAME} v{APP_VERSION}  ·  {model_name}  ·  {project}"
         line = Text()
@@ -646,7 +674,6 @@ class UI:
 
     @staticmethod
     def turn_indicator(round_num: int, tokens: int, status: str = "") -> "RenderableType":
-        """Large, clear turn marker — high contrast, easy to spot while scrolling."""
         if not HAS_RICH:
             return f"● TURN {round_num:03d}  ·  {tokens:,} tok  {status}"
         t = Text()
@@ -661,7 +688,6 @@ class UI:
 
     @staticmethod
     def user_message(text: str) -> "RenderableType":
-        """User prompt — Claude Code dashed ASCII frame with > prefix."""
         text = text or ""
         lines = text.splitlines() or [""]
         width = 72
@@ -694,7 +720,6 @@ class UI:
 
     @staticmethod
     def thinking_block(text: str = "") -> "RenderableType":
-        """Claude Code–style thinking: brief verb only (no reasoning dump)."""
         global _CC_THINK_IDX
         verb = _CC_VERBS[_CC_THINK_IDX % len(_CC_VERBS)]
         glyph = _CC_SPINNER[_CC_THINK_IDX % len(_CC_SPINNER)]
@@ -708,7 +733,6 @@ class UI:
 
     @staticmethod
     def thinking_live(elapsed: float = 0.0) -> None:
-        """In-place thinking spinner (Claude Code style) while waiting for tokens."""
         global _CC_THINK_IDX
         verb = _CC_VERBS[_CC_THINK_IDX % len(_CC_VERBS)]
         glyph = _CC_SPINNER[_CC_THINK_IDX % len(_CC_SPINNER)]
@@ -730,9 +754,8 @@ class UI:
 
     @staticmethod
     def tool_call(name: str, args_preview: str) -> "RenderableType":
-        """Claude Code–style tool header: ⏺ + Title Case name + muted args."""
         label = {
-            "read": "Read", "write": "Write", "edit": "Edit", "bash": "Bash",
+            "read": "Read", "write": "Write", "edit": "Edit", "bash": "Bash", "run": "Run",
             "search": "Search", "glob": "Glob", "ls": "List", "todo": "Todo",
             "web_search": "WebSearch", "browse_page": "Browse", "task": "Task",
             "modules": "Modules",
@@ -750,7 +773,6 @@ class UI:
 
     @staticmethod
     def tool_result(name: str, output: str, is_error: bool = False) -> "RenderableType":
-        """Tool result body under hot-pink gutter — Claude Code │ / └─."""
         lines = (output or "").splitlines() or [""]
         max_show = 20
         if len(lines) > max_show:
@@ -774,7 +796,6 @@ class UI:
 
     @staticmethod
     def permission_prompt(action: str, detail: str = "") -> "RenderableType":
-        """Claude Code–style permission card (lavender)."""
         if not HAS_RICH:
             return f"\n  [Permission] {action}\n  {detail}\n  Allow? (y/n)\n"
         body = Text()
@@ -817,7 +838,6 @@ class UI:
 
     @staticmethod
     def file_diff(path: str, old: str, new: str) -> "RenderableType":
-        """Inline unified diff with Claude Code gutter colors."""
         if not HAS_RICH:
             return f"--- {path}\n+++ {path}\n"
         t = Text()
@@ -897,11 +917,10 @@ class UI:
         return t
 
     @staticmethod
-    def neon_banner():
-        """Startup — Claude Code minimal chrome."""
+    def neon_banner(model_name: str = "NVIDIA NIM"):
         if not HAS_RICH:
             print(f"{APP_NAME} v{APP_VERSION}")
-            print("Claude Code–style interface  ·  NVIDIA NIM")
+            print(f"{model_name}  ·  NVIDIA NIM")
             return
         console.print()
         title = Text()
@@ -911,13 +930,11 @@ class UI:
         console.print(title)
         sub = Text()
         sub.append("  ", style="cc_muted")
-        sub.append("Warm terracotta UI  ·  ", style="cc_muted")
-        sub.append("GLM-5.2", style="cc_fg")
+        sub.append(str(model_name), style="cc_fg")
         sub.append("  ·  NVIDIA NIM", style="cc_muted")
         console.print(sub)
         console.print(Text("  " + "─" * 52, style="cc_subtle"))
         console.print()
-
 
 
 class TokenBucket:
@@ -930,11 +947,6 @@ class TokenBucket:
         self.tokens = float(burst)
         self.last_update = time.monotonic()
         self.last_request = 0.0
-        # RLock, not Lock: try_acquire()/acquire() hold this lock and then call
-        # wait_time(), which acquires it again. A plain Lock is not reentrant,
-        # so that nested acquire deadlocks the calling thread on every single
-        # call — this was the actual cause of the TURN 001 freeze (it happens
-        # before any request is ever sent, so no HTTP/streaming code runs at all).
         self.lock = threading.RLock()
         self.history: deque[float] = deque()
 
@@ -964,12 +976,9 @@ class TokenBucket:
             return max(waits) if waits else 0.0
 
     def try_acquire(self) -> bool:
-        """Non-blocking: take a token if available, else return False immediately."""
         with self.lock:
             self._refill()
             self._prune()
-            # Inline wait — do NOT call wait_time() while holding lock (deadlock if Lock;
-            # redundant if RLock). Compute directly under the held lock.
             self._refill()
             self._prune()
             waits = []
@@ -988,7 +997,6 @@ class TokenBucket:
             return False
 
     def acquire(self, timeout: float = 5.0) -> bool:
-        """Blocking acquire with short default timeout."""
         start = time.monotonic()
         while time.monotonic() - start < timeout:
             with self.lock:
@@ -1014,6 +1022,12 @@ class TokenBucket:
         with self.lock:
             self.history.append(time.monotonic())
 
+    def penalize(self, seconds: float):
+        with self.lock:
+            self.tokens = 0.0
+            self.last_update = time.monotonic()
+            self.last_request = time.monotonic() + max(0.0, seconds) - self.min_gap
+
 
 @dataclass
 class TokenMeter:
@@ -1036,15 +1050,6 @@ class TokenMeter:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class Provider:
-    """A single API endpoint with failure tracking and cooldown.
-
-    NIM BEHAVIOR: GPU backends behind LB may accept TCP then silently drop.
-    This is NORMAL for inference-as-a-service. We handle it via:
-    1. Short httpx read timeout (20s) to detect silent drops at socket level
-    2. max_retries=0 so OpenAI SDK doesn't mask errors with internal retries
-    3. Our own retry loop with exponential backoff + provider rotation
-    """
-
     def __init__(self, name: str, base_url: str, api_key: str, model_cfg: Dict[str, Any],
                  connect_timeout: float = 10.0, read_timeout: float = 20.0, bucket: Optional[TokenBucket] = None):
         self.name = name
@@ -1053,12 +1058,12 @@ class Provider:
         self.bucket = bucket if bucket is not None else TokenBucket(model_cfg.get("rpm", 20), safety=0.80)
 
         if HAS_OPENAI and HAS_HTTPX:
-            # Aggressive timeouts: detect NIM backend stalls fast, retry to healthy backend
+            # Relaxed pool limits to prevent connection drops on heavy retry/sprawl
             http_timeout = httpx.Timeout(
                 connect=connect_timeout,
-                read=read_timeout,      # KEY: kills silent drops within 20s
-                write=10.0,
-                pool=10.0
+                read=read_timeout,
+                write=30.0,
+                pool=30.0
             )
             self.client = OpenAI(base_url=base_url, api_key=api_key, timeout=http_timeout, max_retries=0)
         elif HAS_OPENAI:
@@ -1087,18 +1092,10 @@ class Provider:
             self.permanently_disabled = True
             self.cooldown_until = time.monotonic() + 86400.0  # effectively gone
             return
-        # Progressive cooldown capped
-        # Cap multiplier at 3 so empty-pool wait (≤120s) can outlast cooldowns
         self.cooldown_until = time.monotonic() + cooldown * min(self.consecutive_failures, 3)
 
 
 class ProviderPool:
-    """Rotates across providers on failure / rate-limit with telemetry.
-
-    NIM BEHAVIOR: When a backend drops, retry SAME provider first (LB may route
-    to different healthy backend). Only rotate after max_retries_per_provider.
-    """
-
     def __init__(self, providers: List[Provider]):
         self.providers = providers
         self.index = 0
@@ -1112,7 +1109,6 @@ class ProviderPool:
         self.attempts_on_current = 0
 
     def next_available(self) -> Optional[Provider]:
-        """Pick next ready provider without blocking >0s on rate-limit wait."""
         for _ in range(len(self.providers)):
             p = self.current()
             if p.available() and p.bucket.try_acquire():
@@ -1121,7 +1117,6 @@ class ProviderPool:
         return None
 
     def should_rotate(self, max_per_provider: int = 3) -> bool:
-        """Rotate only after N failed attempts on current provider."""
         self.attempts_on_current += 1
         return self.attempts_on_current >= max_per_provider
 
@@ -1135,36 +1130,39 @@ class ProviderPool:
 
 
 def build_pool(config: Dict[str, Any]) -> ProviderPool:
-    """Build provider pool from config with OpenRouter fallback."""
     providers: List[Provider] = []
     api_key = config.get("api_key", "")
     base_url = config.get("base_url", NIM_BASE_URL)
     model_key = config.get("default_model", "glm-5.2")
     read_timeout = config.get("http_read_timeout", 20.0)
     connect_timeout = config.get("http_connect_timeout", 10.0)
+    _pd_raw = config.get("project_dir")
+    dead_model_ids = set(load_dead_models(Path(_pd_raw).resolve())) if _pd_raw else set()
     
-    # Shared token buckets per (base_url, api_key) to avoid over-counting RPM
+    nim_shared_rpm = float(config.get("nim_shared_rpm", 38.0))
     shared_buckets: Dict[Tuple[str, str], TokenBucket] = {}
 
-    def get_or_create_bucket(model_key: str) -> TokenBucket:
+    def get_or_create_bucket(_model_key: str) -> TokenBucket:
         key = (base_url, api_key)
         if key not in shared_buckets:
-            rpm = MODELS.get(model_key, {}).get("rpm", 20)
-            shared_buckets[key] = TokenBucket(rpm, safety=0.80)
+            shared_buckets[key] = TokenBucket(nim_shared_rpm, safety=0.80)
         return shared_buckets[key]
 
-    if api_key and model_key in MODELS:
+    if api_key and model_key in MODELS and MODELS[model_key]["id"] not in dead_model_ids:
         providers.append(Provider("NIM-Primary", base_url, api_key, MODELS[model_key],
                                   connect_timeout, read_timeout, get_or_create_bucket(model_key)))
 
-    # NVIDIA NIM fallbacks (same key, different models)
-    fallbacks = ["nemotron-ultra"]  # only verified; 404 models removed
+    fallbacks = [
+        "nemotron-3-super-120b-a12b",
+        "nemotron-ultra",
+        "llama-3.1-405b",
+        "glm-5.2-fp8",
+    ]
     for fb in fallbacks:
-        if fb != model_key and fb in MODELS and api_key:
+        if fb != model_key and fb in MODELS and api_key and MODELS[fb]["id"] not in dead_model_ids:
             providers.append(Provider(f"NIM-{fb}", base_url, api_key, MODELS[fb],
                                       connect_timeout, read_timeout, get_or_create_bucket(fb)))
 
-    # OpenRouter free tier fallback (optional — only if OPENROUTER_API_KEY is set)
     if config.get("enable_openrouter", True):
         or_key = os.environ.get("OPENROUTER_API_KEY")
         if or_key:
@@ -1201,24 +1199,45 @@ def build_pool(config: Dict[str, Any]) -> ProviderPool:
     return ProviderPool(providers)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  SECTION 5: TOOL SYSTEM (Complete Arsenal)
-# ═══════════════════════════════════════════════════════════════════════════════
-
 @dataclass
 class ToolResult:
     output: str
     error: str = ""
     is_error: bool = False
+    # Per-call test-run digest, set only by RunTool when the call was a
+    # test invocation. This used to travel via a RunTool.last_test_digest
+    # CLASS attribute (mutated in execute(), read back by the caller
+    # immediately after) — harmless while tool calls run strictly
+    # sequentially, but a real race condition waiting to happen if the
+    # execution loop is ever parallelized (concurrent.futures is already
+    # imported and MAX_PARALLEL_TOOLS already exists as a batch-size
+    # concept). Attaching it to the ToolResult instance instead removes
+    # the shared mutable state altogether — each call's digest travels
+    # with that call's own result object, so there's nothing to race on
+    # regardless of how the loop is executed in the future.
+    test_digest: str = ""
 
     def text(self) -> str:
-        if self.is_error:
+        # is_error covers two different situations that must not be
+        # collapsed into the same "[ERROR] " rendering:
+        #   (a) an exception prevented the tool from producing output at
+        #       all — self.error is populated, self.output is empty.
+        #   (b) the underlying program ran successfully but exited
+        #       non-zero (e.g. a failing pytest run, a failed lint) —
+        #       self.output holds the actually useful output (the failure
+        #       trace) and self.error is empty. Discarding that output
+        #       here would leave the model staring at a bare "[ERROR] "
+        #       with no idea what actually failed.
+        if self.is_error and self.error:
             return f"[ERROR] {self.error}"
+        if self.is_error and self.output:
+            return self.output
+        if self.is_error:
+            return "[ERROR] (no output captured)"
         return self.output
 
 
 class Tool:
-    """Base class for all tools."""
     name: str = ""
     description: str = ""
     parameters: Dict[str, Any] = field(default_factory=dict)
@@ -1226,19 +1245,44 @@ class Tool:
     def __init__(self, cwd: Path):
         self.cwd = cwd.resolve()
 
-    # Class-level flags set from config / full_access mode
     allow_outside_project: bool = False
 
-    def _safe_path(self, path: str) -> Path:
-        """Resolve path — ALWAYS confined to project directory (system permission = project only)."""
-        raw = (path or "").strip()
+    @staticmethod
+    def _sanitize_rel_path(path: str) -> str:
+        """Aggressive sanitization for hallucinated paths (PLAN.md, content:...)"""
+        raw = (path or "").strip().strip('"').strip("'")
         if not raw:
-            raise ValueError("path is required (use project-relative paths, e.g. src/app.py)")
-        if raw.startswith("\\\\?\\"):
+            return ""
+        if raw.startswith("\\?\\"):
             raw = raw[4:]
+        raw = raw.split("#", 1)[0]
+        
+        low = raw.lower()
+        if ", content" in low or ", requirements" in low or ", risks" in low:
+            raw = raw.split(",", 1)[0]
+        if ":" in raw and not (raw[1] == ":" and sys.platform == "win32"):
+            # strip hallucinated keys like 'path: PLAN.md'
+            raw = raw.split(":", 1)[0] if len(raw.split(":", 1)[0]) > 2 else raw
+        if "," in raw:
+            left = raw.split(",", 1)[0].strip()
+            if "." in Path(left).name or "/" in left:
+                raw = left
+                
+        raw = raw.strip().rstrip(",").replace("\\", "/")
+        bad = {"write", "edit", "read", "path", "content", "todo", "bash", "none", "null"}
+        if raw.lower() in bad:
+            return ""
+        return raw
+
+    def _safe_path(self, path: str) -> Path:
+        raw = self._sanitize_rel_path(path)
+        if not raw:
+            raise ValueError(
+                "path is required (use project-relative paths, e.g. src/app.py or PLAN.md). "
+                f"Got: {path!r}"
+            )
         candidate = Path(raw)
         target = candidate.resolve() if candidate.is_absolute() else (self.cwd / raw).resolve()
-        # Hard sandbox: never allow escape, even if allow_outside_project was set.
         try:
             target.relative_to(self.cwd.resolve())
         except ValueError:
@@ -1270,20 +1314,11 @@ class ReadTool(Tool):
         "properties": {
             "path": {"type": "string", "description": "Relative path to file"},
             "offset": {"type": "integer", "description": "Line number to start from (1-based)", "default": 1},
-            # FIX: was 200 — forced 2-4 extra turns of pagination on any file
-            # over 200 lines, and those files (render_motion.py etc.) get
-            # re-read after every compaction, multiplying wasted turns.
             "limit": {"type": "integer", "description": "Max lines to read", "default": 2000},
         },
         "required": ["path"],
     }
 
-    # Session-level cache: path -> (mtime, size, full_text, lines).
-    # Shared across all ReadTool instances/turns in this process so a
-    # compaction event doesn't force re-reading an unchanged file from disk
-    # — we still re-serve it to the model (it needs the tokens in-context
-    # again), but we skip disk I/O and can tell the model explicitly that
-    # this is a repeat so it stops treating it as new discovery work.
     _cache: Dict[str, Tuple[float, int, str, List[str]]] = {}
     _cache_lock = threading.Lock()
 
@@ -1331,8 +1366,10 @@ class WriteTool(Tool):
     name = "write"
     description = (
         "Create or overwrite a file (or append). path MUST be project-relative "
-        "(e.g. src/app.py). Prefer SMALL files (<4000 chars per write). "
-        "For long docs use multiple writes with append=true. Creates parent dirs."
+        "(e.g. src/app.py). Prefer coherent chunks (<4000 chars). "
+        "NEVER overwrite an existing file with a tiny fragment — that destroys it. "
+        "To change part of a file use edit. To continue a long write use append=true. "
+        "Creates parent dirs."
     )
     parameters = {
         "type": "object",
@@ -1340,12 +1377,21 @@ class WriteTool(Tool):
             "path": {"type": "string", "description": "Project-relative path"},
             "content": {"type": "string"},
             "append": {"type": "boolean", "default": False, "description": "Append instead of overwrite"},
+            "force": {
+                "type": "boolean",
+                "default": False,
+                "description": "Set true to intentionally truncate/shrink an existing file with a small payload.",
+            },
         },
         "required": ["path", "content"],
     }
     WARN_CHARS = 12000
+    # Content that looks like it's meant to be *added* to a doc rather than
+    # replace it (markdown headers, bullet lists, etc). Used to auto-append
+    # instead of hard-failing on the tiny/shrinking-overwrite guard below.
+    _ADDITION_MARKERS = ("#", "-", "*", "1.", "```")
 
-    def execute(self, path: str = "", content: str = None, append: bool = False) -> ToolResult:
+    def execute(self, path: str = "", content: str = None, append: bool = False, force: bool = False) -> ToolResult:
         try:
             if not path or not str(path).strip():
                 return ToolResult(
@@ -1358,19 +1404,66 @@ class WriteTool(Tool):
             fp = self._safe_path(path)
             fp.parent.mkdir(parents=True, exist_ok=True)
             data = content if isinstance(content, str) else str(content)
+            auto_appended = False
+            if not append and not force and fp.is_file():
+                try:
+                    existing_len = fp.stat().st_size
+                except OSError:
+                    existing_len = 0
+                looks_like_addition = data.strip().startswith(self._ADDITION_MARKERS)
+                is_tiny_overwrite = existing_len >= 80 and len(data) < 40
+                is_shrinking_overwrite = existing_len >= 200 and len(data) < max(40, existing_len // 5)
+                if is_tiny_overwrite or is_shrinking_overwrite:
+                    if looks_like_addition:
+                        # Small, section-shaped content against a large existing
+                        # file is almost always an attempt to ADD a section, not
+                        # replace the file. Auto-append instead of forcing the
+                        # model into an endless failed-retry loop it rarely
+                        # recovers from cleanly. Use force=true to really truncate.
+                        append = True
+                        auto_appended = True
+                    elif is_tiny_overwrite:
+                        return ToolResult(
+                            "",
+                            error=(
+                                f"Refused tiny overwrite of {path} "
+                                f"(existing ~{existing_len} bytes, new payload {len(data)} chars). "
+                                f"Use edit (old_text/new_text), write(..., append=true) to extend, "
+                                f"or write(..., force=true) if you really mean to truncate the file."
+                            ),
+                            is_error=True,
+                        )
+                    else:
+                        return ToolResult(
+                            "",
+                            error=(
+                                f"Refused shrinking overwrite of {path} "
+                                f"(existing ~{existing_len} bytes → {len(data)} chars). "
+                                f"Pass the complete new file content, use edit/append, "
+                                f"or write(..., force=true) if you really mean to truncate the file."
+                            ),
+                            is_error=True,
+                        )
             mode = "a" if append else "w"
+            if append and mode == "a" and fp.is_file() and fp.stat().st_size > 0 and not data.startswith("\n"):
+                data = "\n" + data
             with open(fp, mode, encoding="utf-8", newline="\n") as f:
                 f.write(data)
             with ReadTool._cache_lock:
                 ReadTool._cache.pop(str(fp), None)
             size = fp.stat().st_size if fp.is_file() else 0
             notes = []
+            if auto_appended:
+                notes.append(
+                    "NOTE: content looked like a section addition against a large existing file, "
+                    "so it was auto-appended instead of failing. Use force=true next time if you "
+                    "genuinely intend to truncate the file."
+                )
             if len(data) >= self.WARN_CHARS:
                 notes.append(
                     f"WARN: payload {len(data)} chars is large — prefer smaller chunks + append=true "
                     "to avoid model/stream truncation."
                 )
-            # Heuristic: unfinished markdown fence or mid-token cut
             stripped = data.rstrip()
             if stripped.count("```") % 2 == 1:
                 notes.append("WARN: odd number of ``` fences — content may be truncated; append the rest.")
@@ -1421,7 +1514,6 @@ class EditTool(Tool):
                 f.write(new_content)
             with ReadTool._cache_lock:
                 ReadTool._cache.pop(str(fp), None)
-            # Claude Code–style unified diff snippet in tool result
             diff_lines = list(difflib.unified_diff(
                 old_text.splitlines(), new_text.splitlines(),
                 fromfile=f"a/{path}", tofile=f"b/{path}", lineterm="",
@@ -1532,48 +1624,345 @@ class LsTool(Tool):
             return ToolResult("", error=str(e), is_error=True)
 
 
-class BashTool(Tool):
-    name = "bash"
+class RunTool(Tool):
+    """Structural replacement for the old free-text BashTool.
+
+    ROOT CAUSE this addresses: LLMs default to Unix shell syntax regardless
+    of system-prompt instructions, because "developer shell" in their
+    training data is overwhelmingly Unix-flavored. A free-text `command`
+    field gives the model an open channel to express that bias; any fix
+    that inspects/blocks specific strings after the fact (a blocklist of
+    "ls", "cat", "head", ...) is symptomatic — it can only catch patterns
+    already enumerated, and the space of Unix-shaped strings a model might
+    emit is effectively open-ended.
+
+    This tool removes the channel instead of policing it: the schema has
+    a `program` enum and a plain `args` array — there is no field in which
+    pipes, &&, redirection, or `cd` could even be expressed. Execution uses
+    subprocess with shell=False against a resolved real executable path, so
+    even if a stray shell-metacharacter-looking token ends up inside an
+    `args` string, it is passed as an inert literal argv element to the
+    target program's own argument parser — never interpreted as shell
+    syntax, because no shell is ever invoked.
+
+    File inspection (ls/cat/head/grep equivalents) is intentionally NOT
+    reimplemented here — that's already covered by ReadTool/LsTool/
+    SearchTool/GlobTool. This tool's job is narrowed to running known dev
+    programs (test runners, package managers, interpreters, VCS).
+    """
+
+    name = "run"
     description = (
-        "Execute a shell command in the project directory (tests, installs, builds). "
-        "Prefer web_search/browse_page for internet research. "
-        "Destructive commands (rm -rf, git reset --hard, force push) are blocked unless "
-        "confirmed via confirm=true when bash_confirm_destructive is enabled."
+        "Run a known development program (test runner, package manager, "
+        "interpreter, or VCS) with explicit arguments. This is NOT a shell: "
+        "there is no pipe, redirect, `&&`, `cd`, or Unix/Windows shell "
+        "syntax of any kind — only a program name and an argv-style list "
+        "of arguments. Example: program='pytest', args=['-v', '-k', 'foo']. "
+        "For file inspection (listing/reading/searching files) use the "
+        "read/ls/search/glob tools instead — this tool does not do that. "
+        "Destructive git operations (push --force, reset --hard, clean -f, "
+        "branch -D, checkout -f) are refused outright, with no confirmation "
+        "path — do not retry them with different flags."
     )
     parameters = {
         "type": "object",
         "properties": {
-            "command": {"type": "string"},
+            "program": {
+                "type": "string",
+                "enum": [
+                    "python", "pytest", "pip", "npm", "npx", "node", "git",
+                    "cargo", "go", "make", "ruff", "black", "flake8", "mypy",
+                ],
+                "description": (
+                    "Which program to run. No shell — pick exactly one program. "
+                    "Note: 'make' executes recipe commands from the project's "
+                    "Makefile, which can run arbitrary shell-equivalent logic "
+                    "defined in that file — treat it with the same caution as "
+                    "running untrusted project code, not as a fixed linter."
+                ),
+            },
+            "args": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Arguments as a plain list, one item per argv element "
+                    "(NOT a single joined string). Example: "
+                    '["-m", "pytest", "tests/", "-v"]'
+                ),
+                "default": [],
+            },
+            "cwd_subpath": {
+                "type": "string",
+                "description": (
+                    "Optional subdirectory under the project root to run in "
+                    "(relative path, e.g. 'backend'). Omit to run at the "
+                    "project root. Never an absolute path."
+                ),
+            },
             "timeout": {"type": "integer", "default": 120},
-            "confirm": {"type": "boolean", "default": False, "description": "Required for destructive commands"},
         },
-        "required": ["command"],
+        "required": ["program", "args"],
     }
-    MAX_OUTPUT = 80000
-    # Set by NeonArchitect after build_tools
-    confirm_destructive: bool = True
-    last_test_digest: str = ""
 
-    def execute(self, command: str, timeout: int = 120, confirm: bool = False) -> ToolResult:
+    MAX_OUTPUT = 80000
+
+    _REGISTRY: Dict[str, List[str]] = {
+        "python": [sys.executable, "python", "python3"],
+        "pytest": ["pytest", "py.test"],
+        "pip": [sys.executable, "pip", "pip3"],
+        "npm": ["npm"],
+        "npx": ["npx"],
+        "node": ["node"],
+        "git": ["git"],
+        "cargo": ["cargo"],
+        "go": ["go"],
+        "make": ["make"],
+        "ruff": ["ruff"],
+        "black": ["black"],
+        "flake8": ["flake8"],
+        "mypy": ["mypy"],
+    }
+
+    @staticmethod
+    def _windows_shim_variants(path_or_name: str) -> List[str]:
+        # On Windows, npm/npx/etc. are typically installed as .cmd/.bat
+        # shims rather than bare .exe files. shutil.which() normally
+        # resolves these fine because it consults PATHEXT, but PATHEXT is
+        # user/environment-configurable — if it's been stripped or
+        # customized, shutil.which(name) can return None even though
+        # e.g. npm.cmd genuinely exists on PATH. This generates the
+        # explicit variants to retry against, both at resolution time
+        # (_resolve_executable) and at execution time (the
+        # FileNotFoundError fallback in execute(), for the rarer case
+        # where resolution succeeds but launching what it found does
+        # not — e.g. a stale PATH entry pointing at a removed binary).
+        #
+        # VERIFIED on real Windows (10.0.19045, Python 3.11.9) via
+        # test_windows_shim.py: confirmed _resolve_executable finds
+        # npm.CMD/npx.CMD/git.EXE/etc. correctly, INCLUDING under a
+        # deliberately stripped PATHEXT (the actual failure mode this
+        # fallback targets), and that subprocess.run(shell=False)
+        # launches the resolved .CMD files directly with no cmd /c
+        # wrapping needed. All RunTool.execute() round-trip calls
+        # (git, python, npm, node) passed. See test_windows_shim.py
+        # in the repo for the diagnostic script if this needs
+        # re-verification after a future change.
+        if sys.platform != "win32" or Path(path_or_name).suffix:
+            return [path_or_name]
+        return [path_or_name + ext for ext in (".cmd", ".exe", ".bat", "")]
+
+    @staticmethod
+    def _venv_bin_dir(project_root: Path) -> Optional[Path]:
+        # Look for a conventional in-project virtualenv (.venv or venv,
+        # the two overwhelmingly common names) at the project root only —
+        # not walking up parent directories, since that could pick up an
+        # unrelated venv outside the project the agent is scoped to.
+        bin_name = "Scripts" if sys.platform == "win32" else "bin"
+        for venv_name in (".venv", "venv"):
+            candidate = project_root / venv_name / bin_name
+            if candidate.is_dir():
+                return candidate
+        return None
+
+    def _resolve_executable(self, program: str, project_root: Optional[Path] = None) -> Optional[str]:
+        # Prefer an in-project virtualenv for python/pip specifically, if
+        # one exists at the project root. Previously this always resolved
+        # python/pip to sys.executable (the interpreter running the agent
+        # itself) with zero awareness of a project-local venv — so if the
+        # model expected `pip install X` to land in a venv it (or the
+        # user) had already set up, it silently installed into the
+        # agent's own environment instead. Other programs (git, npm,
+        # cargo, etc.) are unaffected — venvs are a Python-specific
+        # concept.
+        if program in ("python", "pip") and project_root is not None:
+            venv_bin = self._venv_bin_dir(project_root)
+            if venv_bin is not None:
+                candidates = (
+                    ["python.exe", "python3.exe"] if sys.platform == "win32" else ["python", "python3"]
+                ) if program == "python" else (
+                    ["pip.exe", "pip3.exe"] if sys.platform == "win32" else ["pip", "pip3"]
+                )
+                for name in candidates:
+                    candidate = venv_bin / name
+                    if candidate.exists():
+                        return str(candidate)
+
+        for name in self._REGISTRY.get(program, []):
+            if name == sys.executable and Path(name).exists():
+                return name
+            found = shutil.which(name)
+            if found:
+                return found
+            if sys.platform == "win32":
+                # Bare-name lookup failed; retry with explicit shim
+                # extensions in case PATHEXT doesn't cover it (see
+                # _windows_shim_variants docstring above).
+                for variant in self._windows_shim_variants(name):
+                    if variant == name:
+                        continue
+                    found = shutil.which(variant)
+                    if found:
+                        return found
+        return None
+
+    def _safe_cwd(self, cwd_subpath: Optional[str]) -> Path:
+        if not cwd_subpath or not str(cwd_subpath).strip():
+            return self.cwd
+        raw = str(cwd_subpath).strip().replace("\\", "/")
+        candidate = Path(raw)
+        target = candidate.resolve() if candidate.is_absolute() else (self.cwd / raw).resolve()
         try:
-            cmd = (command or "").strip()
-            if not cmd:
-                return ToolResult("", error="command is required", is_error=True)
-            if getattr(self, "confirm_destructive", True) and DESTRUCTIVE_BASH_RE.search(cmd) and not confirm:
+            target.relative_to(self.cwd.resolve())
+        except ValueError:
+            raise PermissionError(
+                f"cwd_subpath '{cwd_subpath}' resolves outside the project folder "
+                f"({self.cwd}). Only relative in-project subdirectories are allowed."
+            )
+        if not target.exists():
+            raise FileNotFoundError(f"cwd_subpath '{cwd_subpath}' does not exist under the project root.")
+        return target
+
+    # Destructive git operations expressed as argv flags. The old free-text
+    # BashTool had a regex gate over the whole shell string for these
+    # (see the r"git\s+push\s+.*--force|git\s+reset\s+--hard|..." pattern
+    # near the top of the file); that gate was never reimplemented against
+    # RunTool's structured args array when the shell string was removed,
+    # which left a real gap — a model can currently ask for
+    # program="git", args=["push","--force"] and it runs with zero
+    # confirmation. This restores an equivalent check against argv
+    # elements instead of a command string.
+    _GIT_DESTRUCTIVE_SUBCOMMANDS = {"push", "reset", "clean", "branch", "checkout", "rebase"}
+
+    @staticmethod
+    def _git_destructive_reason(run_args: List[str]) -> Optional[str]:
+        low = [str(a).lower() for a in (run_args or [])]
+        if not low:
+            return None
+        subcmd = low[0]
+        if subcmd not in RunTool._GIT_DESTRUCTIVE_SUBCOMMANDS:
+            return None
+        rest = set(low[1:])
+        if subcmd == "push" and ({"--force", "-f", "--force-with-lease"} & rest):
+            return "git push --force (or -f/--force-with-lease) can overwrite remote history."
+        if subcmd == "reset" and "--hard" in rest:
+            return "git reset --hard discards uncommitted local changes irreversibly."
+        if subcmd == "clean" and ({"-f", "-fd", "-fdx", "--force"} & rest):
+            return "git clean -f deletes untracked files irreversibly."
+        if subcmd == "branch" and ({"-d", "-D", "--delete"} & rest):
+            return "git branch -D force-deletes a branch, discarding unmerged commits."
+        if subcmd == "checkout" and "-f" in rest:
+            return "git checkout -f discards uncommitted local changes."
+        if subcmd == "rebase" and "--force-rebase" in rest:
+            return "git rebase --force-rebase discards the current rebase state."
+        return None
+
+    @staticmethod
+    def _is_test_invocation(program: str, run_args: List[str]) -> bool:
+        program = (program or "").lower()
+        low_args = [str(a).lower() for a in (run_args or [])]
+        if program == "pytest":
+            return True
+        if program == "python" and any("pytest" in a or "unittest" in a for a in low_args):
+            return True
+        if program == "npm" and "test" in low_args:
+            return True
+        if program == "npx" and any(a in ("jest",) for a in low_args):
+            return True
+        if program in ("cargo", "go") and "test" in low_args:
+            return True
+        return False
+
+    def execute(self, program: str = "", args: Optional[List[str]] = None,
+                cwd_subpath: Optional[str] = None, timeout: int = 120,
+                _confirmed_destructive: bool = False) -> ToolResult:
+        try:
+            program = (program or "").strip().lower()
+            if program not in self._REGISTRY:
                 return ToolResult(
                     "",
                     error=(
-                        "Destructive command blocked. Re-call bash with confirm=true if intentional: "
-                        f"{cmd[:200]}"
+                        f"Unknown program '{program}'. Allowed: "
+                        f"{', '.join(sorted(self._REGISTRY.keys()))}. There is no "
+                        "general shell here — pick one of these, or use the "
+                        "read/ls/search/glob tools for file inspection."
                     ),
                     is_error=True,
                 )
+            if args is None:
+                args = []
+            if not isinstance(args, list) or not all(isinstance(a, (str, int, float)) for a in args):
+                return ToolResult(
+                    "",
+                    error=(
+                        "args must be a JSON array of strings, one per argv element — "
+                        'not a single command string. Example: ["-m", "pytest", "-v"]'
+                    ),
+                    is_error=True,
+                )
+            args = [str(a) for a in args]
+
+            if program == "git" and not _confirmed_destructive:
+                reason = self._git_destructive_reason(args)
+                if reason:
+                    return ToolResult(
+                        "",
+                        error=(
+                            f"Blocked: {reason} This tool has no confirmation "
+                            "step, so potentially destructive git operations are "
+                            "refused outright rather than run unconfirmed. If this "
+                            "is genuinely intended, ask the user to run it manually."
+                        ),
+                        is_error=True,
+                    )
+
+            try:
+                cwd = self._safe_cwd(cwd_subpath)
+            except (PermissionError, FileNotFoundError) as e:
+                return ToolResult("", error=str(e), is_error=True)
+
+            resolved = self._resolve_executable(program, project_root=self.cwd)
+            if not resolved:
+                return ToolResult(
+                    "",
+                    error=(
+                        f"Could not find an executable for '{program}' on PATH "
+                        f"(host OS: {platform.system()}). It may not be installed."
+                    ),
+                    is_error=True,
+                )
+
             timeout = max(5, min(int(timeout or 120), 600))
-            result = subprocess.run(
-                cmd, shell=True, cwd=str(self.cwd),
-                capture_output=True, text=True, encoding="utf-8", errors="replace",
-                timeout=timeout,
-            )
+            argv = [resolved, *args]
+
+            try:
+                result = subprocess.run(
+                    argv, shell=False, cwd=str(cwd),
+                    capture_output=True, text=True, encoding="utf-8", errors="replace",
+                    timeout=timeout,
+                )
+            except FileNotFoundError:
+                result = None
+                last_err = None
+                for candidate in self._windows_shim_variants(resolved):
+                    try:
+                        result = subprocess.run(
+                            [candidate, *args], shell=False, cwd=str(cwd),
+                            capture_output=True, text=True, encoding="utf-8", errors="replace",
+                            timeout=timeout,
+                        )
+                        break
+                    except FileNotFoundError as e:
+                        last_err = e
+                if result is None:
+                    return ToolResult(
+                        "",
+                        error=(
+                            f"Found '{program}' on PATH as {resolved!r} but could not "
+                            f"execute it. Underlying error: {last_err}"
+                        ),
+                        is_error=True,
+                    )
+
             output = result.stdout or ""
             if result.stderr:
                 output += f"\n[stderr]\n{result.stderr}"
@@ -1581,27 +1970,44 @@ class BashTool(Tool):
                 half = self.MAX_OUTPUT // 2
                 output = output[:half] + f"\n\n… [truncated {len(output)} chars] …\n\n" + output[-half:]
             output += f"\n[exit code: {result.returncode}]"
-            # Test failure digest for orchestrator injection
-            low = cmd.lower()
-            is_test = any(x in low for x in ("pytest", "unittest", "npm test", "npx jest", "cargo test", "go test"))
-            if is_test:
-                digest_lines = [ln for ln in output.splitlines() if ln.strip()][-40:]
-                BashTool.last_test_digest = (
-                    f"cmd: {cmd}\nexit: {result.returncode}\n" + "\n".join(digest_lines)
+
+            digest = ""
+            if self._is_test_invocation(program, args):
+                all_lines = [ln for ln in output.splitlines() if ln.strip()]
+                digest_lines = all_lines[-40:]
+                # Coverage summary lines (pytest-cov's "TOTAL ... N%", go's
+                # "coverage: N% of statements", etc.) are what the gate now
+                # needs to check real coverage, but they can print earlier
+                # than the last 40 lines when a failing run's traceback
+                # tail is long — the last-40 window exists to bound prompt
+                # size, not to be a correctness-relevant cutoff. Explicitly
+                # keep any coverage-looking line even if it fell outside
+                # that window, rather than widening the whole digest (which
+                # would bloat every test-run prompt just to cover this rare
+                # case).
+                cov_pattern = re.compile(
+                    r"(^TOTAL\s+(?:\S+\s+)*?\d+(?:\.\d+)?%\s*$"
+                    r"|coverage:\s*\d+(?:\.\d+)?%\s+of\s+statements"
+                    r"|All files\s*\|\s*\d+(?:\.\d+)?"
+                    r"|\d+(?:\.\d+)?%\s+coverage)",
                 )
-            return ToolResult(output, is_error=result.returncode != 0)
+                if not any(cov_pattern.search(ln) for ln in digest_lines):
+                    for ln in reversed(all_lines[:-40]):
+                        if cov_pattern.search(ln):
+                            digest_lines = [ln] + digest_lines
+                            break
+                digest = (
+                    f"program: {program} {' '.join(args)}\nexit: {result.returncode}\n"
+                    + "\n".join(digest_lines)
+                )
+            return ToolResult(output, is_error=result.returncode != 0, test_digest=digest)
         except subprocess.TimeoutExpired:
-            return ToolResult("", error=f"Command timed out after {timeout}s", is_error=True)
+            return ToolResult("", error=f"'{program}' timed out after {timeout}s", is_error=True)
         except Exception as e:
-            return ToolResult("", error=str(e), is_error=True)
+            return ToolResult("", error=f"{program} failed: {e}", is_error=True)
 
 
 class TaskTool(Tool):
-    """Lightweight specialist worker: explores the codebase with tools (no nested LLM).
-
-    Gathers files matching the prompt keywords via glob/search/read and returns a
-    structured summary the parent agent can act on — closes the old stub gap.
-    """
     name = "task"
     description = (
         "Delegate an independent exploration task. Searches and reads relevant files "
@@ -1620,7 +2026,6 @@ class TaskTool(Tool):
     def execute(self, description: str, prompt: str) -> ToolResult:
         try:
             text = f"{description or ''}\n{prompt or ''}"
-            # Keyword tokens for search
             tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", text)
             stop = {
                 "the", "and", "for", "with", "that", "this", "from", "into", "about",
@@ -1643,7 +2048,6 @@ class TaskTool(Tool):
             findings: List[str] = []
             paths_hit: List[str] = []
 
-            # 1) Glob likely source trees
             globber = GlobTool(self.cwd)
             for pattern in ("**/*.py", "**/*.ts", "**/*.tsx", "**/*.js", "**/package.json", "**/requirements.txt"):
                 res = globber.execute(pattern=pattern, path=".")
@@ -1655,7 +2059,6 @@ class TaskTool(Tool):
                 if len(paths_hit) > 80:
                     break
 
-            # 2) Search for keywords
             searcher = SearchTool(self.cwd)
             match_files: Dict[str, int] = {}
             for k in keys[:5]:
@@ -1663,7 +2066,6 @@ class TaskTool(Tool):
                 if res.is_error or not res.output:
                     continue
                 for line in res.output.splitlines()[:30]:
-                    # typical "path:line:content"
                     path = line.split(":", 1)[0].strip() if ":" in line else ""
                     if path and not path.startswith("["):
                         match_files[path] = match_files.get(path, 0) + 1
@@ -1705,7 +2107,6 @@ class TaskTool(Tool):
 
 
 class ModulesTool(Tool):
-    """Lightweight module/package graph for Python projects."""
     name = "modules"
     description = (
         "List Python packages/modules under a path and who-imports-whom (shallow). "
@@ -1724,7 +2125,6 @@ class ModulesTool(Tool):
         try:
             base = self._safe_path(path if path else ".")
             if not base.exists():
-                # fallback to project root
                 base = self.cwd
             py_files = []
             for fp in sorted(base.rglob("*.py")):
@@ -1773,11 +2173,36 @@ class TodoTool(Tool):
     _todos: Dict[str, Dict[str, Any]] = {}
     _counter = 0
 
-    def execute(self, action: str, id: Optional[str] = None, content: Optional[str] = None, status: Optional[str] = None) -> ToolResult:
+    def execute(self, action: str = "list", id: Optional[str] = None, content: Optional[str] = None, status: Optional[str] = None, **kwargs) -> ToolResult:
         try:
+            if content is None:
+                for k in ("text", "task", "title", "description", "item", "todo", "body", "msg", "message"):
+                    if kwargs.get(k):
+                        content = kwargs[k]
+                        break
+            if id is None:
+                id = kwargs.get("todo_id") or kwargs.get("tid") or kwargs.get("todoId")
+            if status is None and kwargs.get("state"):
+                status = kwargs.get("state")
+            action = (action or kwargs.get("op") or "list")
+            if isinstance(action, str):
+                action = action.strip().lower()
             if action == "add":
-                if not content:
-                    return ToolResult("", error="Content required for add", is_error=True)
+                if not content or not str(content).strip():
+                    return ToolResult(
+                        "",
+                        error=(
+                            'Missing "content" for todo add — no content field and none of the '
+                            'accepted aliases (text/task/title/description/item/todo/body/msg/message) '
+                            'were present either. Call again with a content string, e.g.: '
+                            '{"action":"add","content":"Write Requirements section in PLAN.md"}'
+                        ),
+                        is_error=True,
+                    )
+                content = str(content).strip()
+                for tid0, t0 in TodoTool._todos.items():
+                    if t0.get("content") == content and t0.get("status") != "done":
+                        return ToolResult(f"Todo already exists {tid0}: {content}")
                 TodoTool._counter += 1
                 tid = f"T{TodoTool._counter:03d}"
                 TodoTool._todos[tid] = {"content": content, "status": "pending"}
@@ -2070,32 +2495,24 @@ class BrowsePageTool(Tool):
 
 def build_tools(cwd: Path, full_access: bool = True, allow_outside: bool = False,
                 allow_local: bool = True, bash_confirm: bool = False) -> Dict[str, Tool]:
-    """Build tools. File I/O is always project-sandboxed; full_access = unrestricted bash in-project."""
+    # `bash_confirm` is kept as a parameter for backward compatibility with
+    # existing call sites, but is now inert: RunTool has no shell-string
+    # concept of a "destructive command" to gate behind confirm=true. It
+    # only ever invokes a fixed enum of known dev programs via argv, with
+    # shell=False, so there is no rm-rf-style shell command it could run
+    # in the first place. This is intentional — see RunTool's docstring.
     tool_list: List[Tool] = [
         ReadTool(cwd), WriteTool(cwd), EditTool(cwd),
         SearchTool(cwd), GlobTool(cwd), LsTool(cwd),
-        BashTool(cwd), WebSearchTool(cwd), BrowsePageTool(cwd),
+        RunTool(cwd), WebSearchTool(cwd), BrowsePageTool(cwd),
         TaskTool(cwd), ModulesTool(cwd), TodoTool(cwd),
     ]
     tools = {t.name: t for t in tool_list}
-    # Paths: always project-only (ignore allow_outside for file tools)
     for t in tools.values():
         t.allow_outside_project = False
     local = bool(allow_local or full_access)
     if "browse_page" in tools:
         tools["browse_page"].allow_local_network = local
-    if "bash" in tools:
-        # full_access default: no destructive confirm; cwd remains project_dir
-        tools["bash"].confirm_destructive = bool(bash_confirm) and not full_access
-        tools["bash"].description = (
-            "Execute a shell command with cwd=project directory. "
-            "File tools cannot leave the project folder. "
-            + (
-                "Destructive commands allowed without confirm (in-project full permission)."
-                if full_access and not bash_confirm
-                else "Destructive commands require confirm=true."
-            )
-        )
     return tools
 
 
@@ -2115,13 +2532,70 @@ def execute_tool(tools: Dict[str, Tool], name: str, args: Dict[str, Any]) -> Too
         return ToolResult("", error=f"{name} failed: {e}", is_error=True)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  SECTION 6: CONTEXT MANAGEMENT (Smart Compaction)
-# ═══════════════════════════════════════════════════════════════════════════════
+def sanitize_tool_arguments(raw: Any) -> str:
+    if raw is None:
+        return "{}"
+    if isinstance(raw, dict):
+        return json.dumps(raw, ensure_ascii=False)
+    if isinstance(raw, (list, int, float, bool)):
+        return json.dumps({"_value": raw}, ensure_ascii=False)
+    s = str(raw).strip()
+    if not s:
+        return "{}"
+    try:
+        parsed = json.loads(s)
+    except Exception:
+        return "{}"
+    if isinstance(parsed, dict):
+        return json.dumps(parsed, ensure_ascii=False)
+    return json.dumps({"_value": parsed}, ensure_ascii=False)
+
+
+def sanitize_tool_calls(tool_calls: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    if not tool_calls:
+        return []
+    out: List[Dict[str, Any]] = []
+    for i, tc in enumerate(tool_calls):
+        if not isinstance(tc, dict):
+            continue
+        if "function" in tc and isinstance(tc.get("function"), dict):
+            fn = dict(tc["function"])
+            name = fn.get("name") or "unknown"
+            args = sanitize_tool_arguments(fn.get("arguments"))
+            tid = tc.get("id") or f"call_{i}"
+            out.append({
+                "id": tid,
+                "type": "function",
+                "function": {"name": name, "arguments": args},
+            })
+        else:
+            name = tc.get("name") or "unknown"
+            args = sanitize_tool_arguments(tc.get("arguments"))
+            tid = tc.get("id") or f"call_{i}"
+            out.append({
+                "id": tid,
+                "type": "function",
+                "function": {"name": name, "arguments": args},
+            })
+    return out
+
+
+def sanitize_messages_for_api(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    cleaned: List[Dict[str, Any]] = []
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        mm = dict(m)
+        if mm.get("role") == "assistant" and mm.get("tool_calls"):
+            mm["tool_calls"] = sanitize_tool_calls(mm["tool_calls"])
+            if not mm["tool_calls"]:
+                mm.pop("tool_calls", None)
+                if not mm.get("content"):
+                    mm["content"] = ""
+        cleaned.append(mm)
+    return cleaned
 
 class ContextManager:
-    """Handles message history, compaction, and summarization."""
-
     def __init__(self, compact_threshold: float = 0.75, ctx_window: int = 131072):
         self.messages: List[Dict[str, Any]] = []
         self.compact_threshold = compact_threshold
@@ -2138,7 +2612,7 @@ class ContextManager:
     def add_assistant(self, content: str = "", tool_calls: Optional[List[Dict]] = None):
         msg: Dict[str, Any] = {"role": "assistant", "content": content or None}
         if tool_calls:
-            msg["tool_calls"] = tool_calls
+            msg["tool_calls"] = sanitize_tool_calls(tool_calls)
         self.messages.append(msg)
 
     def add_tool_result(self, tool_call_id: str, name: str, content: str):
@@ -2166,7 +2640,6 @@ class ContextManager:
         return self.ratio_used() > self.compact_threshold
 
     def compact(self, keep_recent: int = 8) -> bool:
-        """Fold old messages into a summary. Returns True if compaction occurred."""
         sys_msgs = [m for m in self.messages if m.get("role") == "system"]
         rest = [m for m in self.messages if m.get("role") != "system"]
         if len(rest) <= keep_recent + 2:
@@ -2174,18 +2647,9 @@ class ContextManager:
 
         old, recent = rest[:-keep_recent], rest[-keep_recent:]
         summaries = []
-        # FIX: track files the agent already read/wrote in the folded window.
-        # Previously `read` tool results collapsed to the opaque placeholder
-        # "[tool result from read]" with the path thrown away — the model
-        # had no way to know it already had a file's contents, so it kept
-        # re-reading the same files (in paginated chunks) every time
-        # compaction fired. Now we surface an explicit manifest instead.
-        files_touched: Dict[str, str] = {}  # path -> "read" | "wrote" | "edited"
+        files_touched: Dict[str, str] = {}
 
-        # Look at the preceding assistant tool_calls to recover the path
-        # for each tool-result message, since the result itself doesn't
-        # carry it.
-        pending_call_paths: Dict[str, str] = {}  # tool_call_id -> path
+        pending_call_paths: Dict[str, str] = {}
         for m in old:
             role = m.get("role", "")
             if role == "assistant" and m.get("tool_calls"):
@@ -2207,7 +2671,6 @@ class ContextManager:
                     is_error = str(m.get("content", "")).startswith("[ERROR]")
                     if not is_error:
                         verb = {"read": "read", "write": "wrote", "edit": "edited"}[name]
-                        # edit/write after a read should show the more recent action
                         files_touched[path] = verb
 
         for m in old:
@@ -2246,10 +2709,6 @@ class ContextManager:
         return [{k: v for k, v in m.items() if not k.startswith("_")} for m in self.messages]
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  SECTION 7: AGENT CORE (Zero Bottlenecks)
-# ═══════════════════════════════════════════════════════════════════════════════
-
 SYSTEM_PROMPT_TEMPLATE = """You are Neon Architect, an expert autonomous software engineering team.
 Your mission: research, plan, write, edit, test, and ship code using TDD — with minimal wasted turns.
 
@@ -2258,12 +2717,16 @@ CRITICAL RULES (anti-fumble):
 2. If you need a tool, CALL IT in the same response. Do NOT say "Let me..." and stop.
 3. ONE focused tool action per turn when exploring. Do not re-run the same failed command.
 4. If a tool fails twice the same way, CHANGE STRATEGY (different tool, query, or path).
-5. Prefer web_search + browse_page over bash curl for internet research.
+5. Prefer web_search + browse_page over the run tool for internet research (run is for local dev programs only, not curl-style fetching).
 6. Read before edit. Search before creating duplicate files.
 7. Keep working memory accurate: facts you already know need not be rediscovered.
 8. Phase completion is decided by the orchestrator via gates (PLAN.md, ARCHITECTURE.md, todos, tests) — do not claim a phase is done without producing those artifacts.
 9. AUTOPILOT: NEVER ask the user questions, never wait for confirmation, never say "Shall I…?", "Ready?", "Would you like…?", "Proceed to implementation?". The orchestrator advances phases. CALL TOOLS only — no permission requests.
 10. Paths: use project-relative paths only (e.g. src/app.py, PLAN.md). Never use /god_ai/... or other absolute Unix paths on Windows; cwd is already the project folder.
+11. todo add ALWAYS needs content: {{"action":"add","content":"short task text"}}. Never call todo with only action.
+12. write path must be a plain relative path string (PLAN.md or backend/foo.py). Never put markdown or "content:" inside path.
+13. In IMPLEMENTATION: stop editing PLAN.md/ARCHITECTURE.md; write application code under src/, app/, backend/, frontend/, lib/, or tests/.
+14. The run tool takes program (enum) + args (list) — NOT a shell command string. There is no `bash`/`cmd` tool and no shell syntax (pipes, &&, redirection, cd) anywhere in this toolset, on any OS ({os_name} or otherwise). Use the native `read` and `ls` tools for file checks; use `run` only to invoke python/pytest/pip/npm/npx/node/git/cargo/go with explicit argv arguments, e.g. run(program="pytest", args=["-v"]).
 
 TDD: RED (failing test) → GREEN (minimum code) → REFACTOR. Run tests after changes.
 
@@ -2271,11 +2734,12 @@ PERSONA: Architect | Designer | Engineer | Tester | Debugger | Reviewer | DevOps
 
 WORKING DIRECTORY: {project_dir}
 CURRENT MODEL: {model_name}
+CURRENT OS: {os_name}
 
 Tools:
 - read / write / edit — local files (edit returns a diff)
 - search / glob / ls / modules — local discovery & import graph
-- bash — tests, installs, builds (not for web search)
+- run(program, args, cwd_subpath, timeout) — invoke a known dev program (python, pytest, pip, npm, npx, node, git, cargo, go) with explicit argv arguments. Not a shell: no pipes, no &&, no redirection, no cd.
 - web_search(query, num_results) — internet search
 - browse_page(url, max_chars, start_line) — fetch page text
 - todo — task tracker
@@ -2284,10 +2748,6 @@ Tools:
 External products: web_search first; confirm real domain (e.g. oiioii.ai vs oioi.com) before cloning.
 Autopilot: planning → architecture → design → implementation → testing → review → deployment → verification.
 """
-
-
-
-# ── Durable project state (survives compaction / session restore) ─────────────
 
 def _default_project_state() -> Dict[str, Any]:
     return {
@@ -2309,6 +2769,7 @@ def _default_project_state() -> Dict[str, Any]:
         "next_action": None,
         "research_notes": [],
         "src_write_paths": [],
+        "acceptance_criteria": [],
         "updated_at": None,
     }
 
@@ -2337,7 +2798,6 @@ def save_project_state(project_dir: Path, state: Dict[str, Any], filename: str =
 
 
 def plan_has_sections(text: str, headers: tuple) -> bool:
-    """Flexible section detection — accepts common synonyms."""
     low = (text or "").lower()
     synonyms = {
         "acceptance criteria": (
@@ -2369,6 +2829,275 @@ def plan_has_sections(text: str, headers: tuple) -> bool:
     return True
 
 
+def plan_missing_sections(text: str, headers: tuple) -> List[str]:
+    """Like plan_has_sections but returns the list of headers that are
+    actually absent, so callers can deterministically repair the doc
+    instead of only reporting pass/fail."""
+    low = (text or "").lower()
+    synonyms = {
+        "acceptance criteria": (
+            "acceptance criteria", "acceptance criterion", "success criteria",
+            "definition of done", "acceptance:",
+        ),
+        "requirements": (
+            "requirements", "requirement analysis", "functional requirements",
+            "product requirements", "scope",
+        ),
+        "risks": (
+            "risks", "risk assessment", "risk & mitigation", "risks &",
+            "risk mitigation", "known risks",
+        ),
+        "components": (
+            "components", "component architecture", "system components",
+            "modules", "service layout",
+        ),
+        "data flow": (
+            "data flow", "dataflow", "architecture flow", "request flow",
+            "system flow", "pipeline",
+        ),
+    }
+    missing = []
+    for h in headers:
+        key = h.lower().strip()
+        opts = synonyms.get(key, (key,))
+        if not any(o in low for o in opts):
+            missing.append(h)
+    return missing
+
+
+# Same synonym set plan_has_sections/plan_missing_sections use for
+# "acceptance criteria" specifically — kept as a single source of truth
+# so heading-detection here and there can't silently drift apart.
+_ACCEPTANCE_HEADING_SYNONYMS = (
+    "acceptance criteria", "acceptance criterion", "success criteria",
+    "definition of done", "acceptance:",
+)
+
+# Any markdown heading line (#, ##, ###, or a setext-style underline isn't
+# handled here — PLAN.md is generated by the model, which consistently
+# uses ATX-style # headings, so that's what both plan_has_sections and
+# this extractor assume).
+_MD_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$")
+# Bullet/numbered list item lines: "- x", "* x", "1. x", "1) x"
+_MD_LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(.+?)\s*$")
+
+
+def extract_acceptance_criteria(text: str) -> List[str]:
+    """Pull out the list items under PLAN.md's Acceptance Criteria heading
+    as a real, structured list — not prose the model re-reads and
+    re-judges later. This is the artifact the verification gate checks
+    against, so it needs to exist independently of whatever the model
+    later claims about "criteria met".
+
+    Returns an empty list if no matching heading is found, or the
+    heading exists but has no list items beneath it before the next
+    heading (both are legitimate "nothing to extract" states — callers
+    should not treat an empty list here as "gate satisfied trivially";
+    see the verification gate itself for how it's used).
+    """
+    lines = (text or "").splitlines()
+    in_section = False
+    items: List[str] = []
+    for line in lines:
+        m_head = _MD_HEADING_RE.match(line)
+        if m_head:
+            title = m_head.group(1).strip().lower()
+            if any(syn in title for syn in _ACCEPTANCE_HEADING_SYNONYMS):
+                in_section = True
+                continue
+            if in_section:
+                # Hit the next heading — the Acceptance Criteria section
+                # has ended.
+                break
+            continue
+        if in_section:
+            m_item = _MD_LIST_ITEM_RE.match(line)
+            if m_item:
+                item = m_item.group(1).strip()
+                if item:
+                    items.append(item)
+    return items
+
+
+# VERIFICATION.md row format the model is instructed to produce, one row
+# per stored acceptance criterion, e.g.:
+#   - [x] Criterion text as stored — test: tests/test_auth.py::test_login_rejects_bad_password
+# The bracket/check-state isn't load-bearing (a model could mark [ ] or
+# [x] either way without it meaning anything reliable) — what's actually
+# checked structurally is that a row exists whose text plausibly matches
+# a stored criterion AND that row names a non-empty test reference after
+# "test:". This is presence-checking, the same philosophy plan_has_sections
+# uses for headers — it does not judge whether the named test actually
+# exercises the criterion, only that the model was forced to name one
+# specific test per criterion instead of asserting "all criteria pass" as
+# an unstructured claim.
+_VERIFICATION_ROW_RE = re.compile(
+    r"^\s*(?:[-*+]|\d+[.)])\s*(?:\[[ xX]\]\s*)?(.+?)\s*[—\-]+\s*test:\s*(\S.*?)\s*$"
+)
+
+
+def _normalize_criterion_text(text: str) -> str:
+    """Loose-match key for comparing a stored criterion against a
+    VERIFICATION.md row's leading text — lowercased, punctuation-light,
+    whitespace-collapsed. Exact-string matching would break on trivial
+    rewording (e.g. the model paraphrasing the criterion slightly when
+    copying it into VERIFICATION.md), so this compares on a reduced form
+    instead of requiring a byte-for-byte match."""
+    t = (text or "").lower()
+    t = re.sub(r"[^\w\s]", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
+def parse_verification_rows(text: str) -> List[Dict[str, str]]:
+    """Extract (criterion_text, test_ref) pairs from VERIFICATION.md.
+    Returns a list of {"criterion": str, "test_ref": str} dicts, one per
+    recognized row. Rows that don't match the required format (missing
+    the "test:" reference), OR whose test_ref is still the unfilled
+    auto-repair placeholder, are not returned — they don't count toward
+    covering any criterion. Excluding the placeholder specifically
+    matters because it IS non-empty text and would otherwise satisfy a
+    naive "test_ref is non-empty" check — auto-repair scaffolding a row
+    must not be mistaken for the model actually linking a real test,
+    which is the same silent-pass shape this whole change exists to
+    close."""
+    rows = []
+    for line in (text or "").splitlines():
+        m = _VERIFICATION_ROW_RE.match(line)
+        if m:
+            criterion_text = m.group(1).strip()
+            test_ref = m.group(2).strip()
+            if criterion_text and test_ref and not _looks_like_placeholder_ref(test_ref):
+                rows.append({"criterion": criterion_text, "test_ref": test_ref})
+    return rows
+
+
+def _looks_like_placeholder_ref(test_ref: str) -> bool:
+    """True if a test_ref is (still) an unfilled scaffold value rather
+    than a real test identifier — e.g. the literal TODO_TEST_REF this
+    module's own auto-repair writes, or an obvious variant of it."""
+    key = test_ref.strip().strip("`").upper()
+    return key in ("TODO_TEST_REF", "TODO", "TBD", "N/A", "NONE") or key.startswith("TODO")
+
+
+def match_criteria_to_verification(
+    criteria: List[str], verification_rows: List[Dict[str, str]]
+) -> Tuple[List[str], List[str]]:
+    """Compare stored acceptance criteria against parsed VERIFICATION.md
+    rows. Returns (covered, missing) — covered criteria (by original
+    text) that have a matching row with a non-empty test reference, and
+    missing criteria that don't. Matching is by normalized-text
+    containment in either direction, since a criterion may be trimmed or
+    lightly reworded when copied into VERIFICATION.md by the model, and
+    exact-string matching would produce false "missing" results for
+    what's actually the same criterion."""
+    normalized_rows = [
+        (_normalize_criterion_text(r["criterion"]), r["test_ref"]) for r in verification_rows
+    ]
+    covered, missing = [], []
+    for c in criteria:
+        key = _normalize_criterion_text(c)
+        found = any(
+            key and (key in row_key or row_key in key)
+            for row_key, _ in normalized_rows
+        )
+        (covered if found else missing).append(c)
+    return covered, missing
+
+
+def parse_test_digest(digest: str) -> Dict[str, Any]:
+    """Extract real pass/fail/error counts, and coverage percent if
+    present, from a RunTool test_digest.
+
+    The gate previously trusted a bare boolean (exit code 0 on any single
+    recognized test invocation) as proof the phase's tests are green. That
+    boolean says nothing about how many tests ran, so a single trivial
+    passing test satisfied the same gate as a full suite. This parses the
+    actual summary line each test runner prints so gates can require a
+    real count instead of just an exit code.
+
+    Coverage extraction is independent of which runner matched above,
+    since coverage tooling (pytest-cov, coverage.py, jest --coverage/nyc,
+    go test -cover) prints its own summary line alongside whichever
+    runner produced it — it isn't a fifth "runner family", it's an
+    optional addition to any of them. "coverage_pct" is None when no
+    recognized coverage summary line was found (never 0 by default —
+    0.0 is a real, distinct measurement and must not be confused with
+    "not measured").
+
+    Returns a dict: {"parsed": bool, "passed": int, "failed": int,
+    "errors": int, "coverage_pct": Optional[float]} — "parsed" is False
+    if no known test-summary format was recognized (callers should treat
+    that as "unknown", not as "passed"). coverage_pct can be populated
+    even when "parsed" is False, or absent even when "parsed" is True —
+    the two are independent signals.
+    """
+    result = {
+        "parsed": False, "passed": 0, "failed": 0, "errors": 0,
+        "coverage_pct": None,
+    }
+    text = digest or ""
+    if not text:
+        return result
+
+    # --- coverage line, checked first and independently of test-runner kind ---
+    # coverage.py / pytest-cov: "TOTAL    120    15    88%"
+    m_cov_total = re.search(r"^TOTAL\s+(?:\S+\s+)*?(\d+(?:\.\d+)?)%\s*$", text, re.MULTILINE)
+    # go test -cover: "coverage: 82.4% of statements"
+    m_cov_go = re.search(r"coverage:\s*(\d+(?:\.\d+)?)%\s+of\s+statements", text)
+    # jest/nyc "All files" summary row: "All files    |   84.2 |..."
+    m_cov_jest = re.search(r"All files\s*\|\s*(\d+(?:\.\d+)?)", text)
+    # cargo-tarpaulin: "82.40% coverage, 412/500 lines covered"
+    m_cov_cargo = re.search(r"(\d+(?:\.\d+)?)%\s+coverage", text)
+    for m in (m_cov_total, m_cov_go, m_cov_jest, m_cov_cargo):
+        if m:
+            try:
+                result["coverage_pct"] = float(m.group(1))
+            except ValueError:
+                pass
+            break
+
+    # pytest: "3 passed, 1 failed, 2 errors in 0.42s" (order/subset varies)
+    m_passed = re.search(r"(\d+)\s+passed", text)
+    m_failed = re.search(r"(\d+)\s+failed", text)
+    m_errors = re.search(r"(\d+)\s+error", text)
+    if m_passed or m_failed or m_errors:
+        result["parsed"] = True
+        result["passed"] = int(m_passed.group(1)) if m_passed else 0
+        result["failed"] = int(m_failed.group(1)) if m_failed else 0
+        result["errors"] = int(m_errors.group(1)) if m_errors else 0
+        return result
+
+    # jest: "Tests:       2 failed, 5 passed, 7 total"
+    m_jest = re.search(r"Tests:\s*(?:(\d+)\s+failed,\s*)?(\d+)\s+passed", text)
+    if m_jest:
+        result["parsed"] = True
+        result["failed"] = int(m_jest.group(1)) if m_jest.group(1) else 0
+        result["passed"] = int(m_jest.group(2))
+        return result
+
+    # go test: "ok  	pkg	0.003s" (pass) or "FAIL	pkg	0.003s"
+    if re.search(r"^ok\s", text, re.MULTILINE):
+        result["parsed"] = True
+        result["passed"] = max(1, len(re.findall(r"^ok\s", text, re.MULTILINE)))
+        result["failed"] = len(re.findall(r"^FAIL\s", text, re.MULTILINE))
+        return result
+    if re.search(r"^FAIL\s", text, re.MULTILINE):
+        result["parsed"] = True
+        result["failed"] = max(1, len(re.findall(r"^FAIL\s", text, re.MULTILINE)))
+        return result
+
+    # cargo test: "test result: ok. 4 passed; 0 failed;"
+    m_cargo = re.search(r"test result:\s*(ok|FAILED)\.\s*(\d+)\s+passed;\s*(\d+)\s+failed", text)
+    if m_cargo:
+        result["parsed"] = True
+        result["passed"] = int(m_cargo.group(2))
+        result["failed"] = int(m_cargo.group(3))
+        return result
+
+    return result
+
+
 def goal_looks_external(goal: str) -> bool:
     g = (goal or "").lower()
     if not g:
@@ -2383,8 +3112,6 @@ def goal_looks_external(goal: str) -> bool:
 
 
 class NeonArchitect:
-    """The main agent. Cyberpunk interface, zero-bottleneck core."""
-
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.project_dir = Path(config.get("project_dir", ".")).resolve()
@@ -2396,7 +3123,7 @@ class NeonArchitect:
         self.tools = build_tools(
             self.project_dir,
             full_access=self.full_access,
-            allow_outside=False,  # hard policy: project folder only
+            allow_outside=False,
             allow_local=bool(config.get("allow_local_network", True)),
             bash_confirm=bool(config.get("bash_confirm_destructive", False)),
         )
@@ -2413,14 +3140,13 @@ class NeonArchitect:
         self.goal = None
         self.persona_key = config.get("default_persona", "adaptive")
         self.persona_history: deque[str] = deque(maxlen=10)
-        # Autopilot / SDLC state
         self.autopilot = False
         self._session_wants_resume = False
         self.sdlc_phase_idx = 0
         self.sdlc_completed: set[str] = set()
         self.autopilot_rounds = 0
         self.max_autopilot_rounds = int(config.get("max_autopilot_rounds", 0) or 0)
-        self._phase_rounds = 0  # telemetry only — never force-advances
+        self._phase_rounds = 0
         self._max_phase_rounds = int(config.get("max_phase_rounds", 0) or 0)
         self._phase_tool_counts: Dict[str, int] = {}
         self._phase_bash_ok = False
@@ -2431,28 +3157,25 @@ class NeonArchitect:
         self.architecture_artifact = str(config.get("architecture_artifact") or "ARCHITECTURE.md")
         self.working_memory_file = str(config.get("working_memory_file") or ".neon_working_memory.md")
         self.max_same_tool_failures = int(config.get("max_same_tool_failures", 3) or 3)
-        # Recent tool fingerprint → failure count (anti-loop)
+        self.max_same_tool_successes = int(config.get("max_same_tool_successes", 3) or 3)
         self._tool_fail_counts: Dict[str, int] = {}
+        self._tool_success_counts: Dict[str, int] = {}
         self._recent_tool_keys: deque = deque(maxlen=24)
         self._strategy_hints: List[str] = []
+        self._rate_limit_until: float = 0.0
+        self._recent_429_count: int = 0
         self.project_state_file = str(config.get("project_state_file") or ".neon_project_state.json")
         self.project_state: Dict[str, Any] = load_project_state(self.project_dir, self.project_state_file)
         self._src_write_paths: List[str] = list(self.project_state.get("src_write_paths") or [])
         self._last_test_digest: str = ""
         self._research_done: bool = bool(self.project_state.get("research_notes"))
-        # TDD red→green tracking (mitigation)
         self._tdd_saw_red: bool = False
         self._tdd_saw_green: bool = False
         self._consecutive_no_tool_turns: int = 0
-        if "bash" in self.tools:
-            if self.full_access:
-                self.tools["bash"].confirm_destructive = False
-            else:
-                self.tools["bash"].confirm_destructive = bool(config.get("bash_confirm_destructive", True))
+        # NOTE: no bash-confirm-destructive handling here anymore — RunTool
+        # has no shell string to scan for destructive patterns; it only ever
+        # invokes a fixed enum of dev programs via argv with shell=False.
 
-        # Restore previous session ONLY for THIS project path.
-        # Never import last_goal / SDLC from global config — that leaked old
-        # projects into new folders ("not creating a new session for a new project").
         restored = False
         skip_restore = bool(config.get("_fresh", False))
         try:
@@ -2465,7 +3188,6 @@ class NeonArchitect:
                     apply_session(self, prior)
                     restored = True
                 else:
-                    # Brand-new project directory: clean slate (model/persona from config only)
                     self._rebuild_system()
         except Exception as e:
             UI.warn(f"Could not restore session: {e}")
@@ -2474,7 +3196,6 @@ class NeonArchitect:
         if not restored and not skip_restore:
             self._rebuild_system()
 
-        # Thinking + timeout budgets (single policy)
         normalize_thinking_policy(self.config)
 
         UI.separator()
@@ -2482,7 +3203,7 @@ class NeonArchitect:
         UI.info(
             "Permissions: project-folder only for files | "
             f"full_in_project={self.full_access} | "
-            f"bash_confirm={bool(self.tools.get('bash') and getattr(self.tools['bash'], 'confirm_destructive', False))} | "
+            "run_tool=structured (program+args, no shell) | "
             f"local_net={bool(config.get('allow_local_network', True))} | "
             f"worktree={bool(config.get('git_worktree_on_autopilot'))} | "
             f"tdd={bool(config.get('tdd_enforce_red_green'))}"
@@ -2506,18 +3227,15 @@ class NeonArchitect:
             n_msgs = len([m for m in self.ctx.messages if m.get('role') != 'system'])
             if n_msgs:
                 UI.info(f"Conversation: {n_msgs} message(s) restored")
-            # Aggressive startup compact — multi-million token restores destroy latency
             est = self.ctx.estimate_tokens()
             floor = int(self.config.get("startup_compact_tokens", 40000))
             if est > floor:
                 before = est
-                # Keep only last few turns; wipe the rest into a short summary
                 keep = 4 if est > 200_000 else 6
                 if self.ctx.compact(keep_recent=keep):
                     after = self.ctx.estimate_tokens()
                     UI.warn(f"Startup compact: ~{before:,} → ~{after:,} tokens")
                     self._rebuild_system()
-                # If still huge, drop history entirely (keep goal/todos/phase)
                 est2 = self.ctx.estimate_tokens()
                 if est2 > floor * 2:
                     self.ctx.messages = [m for m in self.ctx.messages if m.get("role") == "system"]
@@ -2534,12 +3252,12 @@ class NeonArchitect:
         prompt = SYSTEM_PROMPT_TEMPLATE.format(
             project_dir=str(self.project_dir),
             model_name=self.model_cfg["name"],
+            os_name=platform.system(),
         )
         persona = PERSONAS.get(self.persona_key, PERSONAS["adaptive"])
         prompt += f"\n\n[CURRENT PERSONA: {persona['name']}]\n{persona['prompt']}"
         if self.goal:
             prompt += f"\n\n[CURRENT GOAL]\n{self.goal}\nFocus all actions on this goal."
-        # Durable project state snapshot
         try:
             ps = self.project_state or {}
             snap = []
@@ -2581,7 +3299,6 @@ class NeonArchitect:
         self.ctx.add_system(prompt)
 
     def _sync_project_state(self) -> None:
-        """Write orchestrator facts into PROJECT_STATE and disk."""
         try:
             st = self.project_state
             st["goal"] = self.goal
@@ -2589,7 +3306,6 @@ class NeonArchitect:
             st["completed_phases"] = sorted(self.sdlc_completed)
             st["sdlc_phase_idx"] = int(self.sdlc_phase_idx)
             st["autopilot_active"] = bool(self.autopilot)
-            # Keep resume flag sticky until goal fully complete or user restarts
             if self.autopilot:
                 st["autopilot_resume"] = True
             st["open_todos"] = [
@@ -2605,13 +3321,31 @@ class NeonArchitect:
             pass
 
     def _advance_sdlc(self) -> bool:
-        """Advance to next SDLC phase. Returns True if there are more phases."""
         current = SDLC_PHASES[self.sdlc_phase_idx]
         self.sdlc_completed.add(current)
         self.sdlc_phase_idx += 1
         self._phase_rounds = 0
         self._phase_tool_counts = {}
+        self._tool_fail_counts = {}
+        self._tool_success_counts = {}
         self._phase_bash_ok = False
+        if current == "planning":
+            # Capture PLAN.md's Acceptance Criteria as a real, structural
+            # list now, at the moment planning's gate is confirmed met —
+            # not re-derived later from prose when verification runs. This
+            # is what closes the gap where the same model that wrote easy
+            # acceptance criteria also certified them met, with nothing
+            # structural linking the two: from here on, "criteria" means
+            # this stored list, and verification is checked against it.
+            plan_artifact = self.config.get("plan_artifact", "PLAN.md")
+            plan_text = self._read_artifact_snippet(plan_artifact, max_chars=50000)
+            criteria = extract_acceptance_criteria(plan_text)
+            self.project_state["acceptance_criteria"] = criteria
+            if criteria:
+                self._update_working_memory(
+                    f"captured {len(criteria)} acceptance criteria from {plan_artifact}",
+                    section="Decisions",
+                )
         self._sync_project_state()
         self._update_working_memory(f"phase complete: {current} → next")
         if self.sdlc_phase_idx >= len(SDLC_PHASES):
@@ -2637,13 +3371,15 @@ class NeonArchitect:
                 "No more planning-only exploration."
             )
         elif next_phase == "testing":
-            UI.info("TESTING: run pytest/unittest — only real test commands count as success.")
+            UI.info(
+                "TESTING: use the run tool (program='pytest' or program='npm' args=['test']) "
+                "to exit 0. No CI yaml spam; circuit-breaker after testing_max_phase_rounds."
+            )
         self._rebuild_system()
         self.persist(force=True)
         return True
 
     def _start_autopilot(self, restart: bool = False):
-        """Enter god autopilot. Resumes saved phase unless restart=True."""
         if not self.goal:
             UI.err("No goal set. Use /goal <description> first.")
             return False
@@ -2663,6 +3399,8 @@ class NeonArchitect:
             self._phase_bash_ok = False
             if hasattr(self, "_tool_fail_counts"):
                 self._tool_fail_counts = {}
+            if hasattr(self, "_tool_success_counts"):
+                self._tool_success_counts = {}
             if hasattr(self, "_strategy_hints"):
                 self._strategy_hints = []
             UI.info("Autopilot starting from PLANNING (fresh cycle).")
@@ -2690,7 +3428,6 @@ class NeonArchitect:
         return True
 
     def _stop_autopilot(self):
-        """Halt autopilot mode."""
         if not self.autopilot:
             UI.info("Autopilot is not active.")
             return
@@ -2698,7 +3435,6 @@ class NeonArchitect:
         phase = SDLC_PHASES[self.sdlc_phase_idx] if self.sdlc_phase_idx < len(SDLC_PHASES) else "COMPLETE"
         try:
             self.project_state["autopilot_active"] = False
-            # Still offer resume next launch if goal not finished
             self.project_state["autopilot_resume"] = self.sdlc_phase_idx < len(SDLC_PHASES) and bool(self.goal)
             self._sync_project_state()
         except Exception:
@@ -2710,7 +3446,6 @@ class NeonArchitect:
         self.persist(force=True)
 
     def _autopilot_status(self):
-        """Show autopilot progress."""
         if not self.goal:
             UI.info("No goal set.")
             return
@@ -2750,10 +3485,10 @@ class NeonArchitect:
         plan_name = getattr(self, "plan_artifact", "PLAN.md")
         arch_name = getattr(self, "architecture_artifact", "ARCHITECTURE.md")
         if phase != "planning":
-            plan = self._read_artifact_snippet(plan_name)
+            plan = self._read_artifact_snippet(plan_name, max_chars=2500)
             parts.append(f"[PLAN — follow]\nSource: {plan_name}\n{plan}" if plan else f"[PLAN MISSING] {plan_name}")
         if phase not in ("planning", "architecture"):
-            arch = self._read_artifact_snippet(arch_name)
+            arch = self._read_artifact_snippet(arch_name, max_chars=2500)
             parts.append(f"[ARCHITECTURE — follow]\nSource: {arch_name}\n{arch}" if arch else f"[ARCHITECTURE MISSING] {arch_name}")
         parts.append(f"[TODOS]\n{self._todo_handoff_text()}")
         return "\n\n".join(parts)
@@ -2771,7 +3506,6 @@ class NeonArchitect:
         return ""
 
     def _update_working_memory(self, note: str, section: str = "Facts") -> None:
-        """Structured durable memory: Facts / Decisions / Blockers / Next action."""
         try:
             fp = self._working_memory_path()
             prev = self._read_working_memory()
@@ -2793,7 +3527,6 @@ class NeonArchitect:
             entry = f"- [{stamp}] {note.strip()[:300]}"
             sec = section if section in sections else "Facts"
             sections[sec].append(entry)
-            # Cap each section
             for k in list(sections.keys()):
                 sections[k] = sections[k][-15:]
             body_lines = ["# Neon working memory (auto)", ""]
@@ -2804,7 +3537,6 @@ class NeonArchitect:
             fp.write_text("\n".join(body_lines), encoding="utf-8")
             with ReadTool._cache_lock:
                 ReadTool._cache.pop(str(fp.resolve()), None)
-            # Mirror into project_state
             if section == "Decisions":
                 self.project_state.setdefault("decisions", []).append(note[:200])
                 self.project_state["decisions"] = self.project_state["decisions"][-20:]
@@ -2816,12 +3548,75 @@ class NeonArchitect:
         except Exception:
             pass
 
+    def _normalize_bash_command(self, cmd: str) -> str:
+        c = (cmd or "").strip().lower()
+        c = re.split(r"\s+\|\s*", c)[0]
+        c = re.split(r"\s+2>&1\b", c)[0]
+        c = re.split(r"\s+>\s*", c)[0]
+        c = re.sub(r"\s+", " ", c).strip()
+        if " && " in c:
+            parts = [p.strip() for p in c.split(" && ") if p.strip()]
+            parts = [p for p in parts if not re.match(r"^cd\s+", p)]
+            c = " && ".join(parts) if parts else c
+        return c[:200]
+
     def _tool_fingerprint(self, name: str, args: Dict[str, Any]) -> str:
-        key_args = {}
+        key_args: Dict[str, Any] = {}
+        if name == "run":
+            # Structured fingerprint: keyed directly on the program enum and
+            # the argv list, rather than normalizing a shell command string
+            # (there is no command string in this tool's schema at all).
+            prog = str(args.get("program") or "")
+            run_args = args.get("args") or []
+            key_args["program"] = prog
+            key_args["args"] = json.dumps(run_args, sort_keys=True, ensure_ascii=False)[:150]
+            cwd_sub = args.get("cwd_subpath")
+            if cwd_sub:
+                key_args["cwd_subpath"] = str(cwd_sub)[:100]
+            return f"{name}:{json.dumps(key_args, sort_keys=True, ensure_ascii=False)}"
         for k in ("path", "command", "query", "url", "pattern", "action", "id"):
             if k in args and args[k] is not None:
-                key_args[k] = str(args[k])[:200]
+                val = str(args[k])[:200]
+                if k == "command":
+                    val = self._normalize_bash_command(val)
+                if k == "path" and name in ("write", "edit", "read"):
+                    # Canonicalize hallucinated/malformed paths the same way the
+                    # Tool base class does before touching disk. Without this,
+                    # dozens of cosmetically-different mangled variants of the
+                    # same real target (e.g. "PLAN.md, content: ...",
+                    # "PLAN.md#Risks:", "PLAN.md, risks: ...") each get their
+                    # own fresh fingerprint and their own 2-3 retry budget,
+                    # letting the model loop past the anti-spam breaker
+                    # indefinitely without ever fixing the real problem.
+                    canon = Tool._sanitize_rel_path(val)
+                    val = canon or val
+                key_args[k] = val
+        if name in ("write", "todo") and args.get("content") is not None:
+            c = str(args.get("content") or "")
+            key_args["content"] = c[:80] + f"|len={len(c)}"
+        if name == "edit":
+            if args.get("old_text") is not None:
+                ot = str(args.get("old_text") or "")
+                key_args["old_text"] = ot[:60] + f"|len={len(ot)}"
+            if args.get("new_text") is not None:
+                nt = str(args.get("new_text") or "")
+                key_args["new_text"] = nt[:60] + f"|len={len(nt)}"
         return f"{name}:{json.dumps(key_args, sort_keys=True, ensure_ascii=False)}"
+
+    def _effective_inter_turn_delay(self) -> float:
+        base = float(self.config.get("inter_turn_delay", 0.35) or 0.35)
+        now = time.monotonic()
+        if now < float(getattr(self, "_rate_limit_until", 0.0) or 0.0):
+            return max(base, 5.0)
+        n429 = int(getattr(self, "_recent_429_count", 0) or 0)
+        if n429 > 0:
+            return max(base, min(20.0, 3.0 * n429))
+        return base
+
+    def _note_provider_success(self) -> None:
+        n = int(getattr(self, "_recent_429_count", 0) or 0)
+        if n > 0:
+            self._recent_429_count = max(0, n - 1)
 
     def _autopilot_prompt(self) -> str:
         if self.sdlc_phase_idx >= len(SDLC_PHASES):
@@ -2855,12 +3650,20 @@ class NeonArchitect:
                 f"If providers time out, write an even smaller next file. Call a tool NOW."
             ),
             "testing": (
-                f"TEST against {plan_name}. Run the project test command to exit 0. "
-                f"If failures appear, fix code (GREEN) — do not skip. Call a tool NOW."
+                f"TEST against {plan_name}. "
+                f"FORBIDDEN: rewriting CI yaml repeatedly; re-running the same install/test invocation; "
+                f"tiny fragment overwrites of existing files. "
+                f"(1) Ensure package.json has a working test script OR use run(program='pytest'/'npx', args=[...]) once. "
+                f"(2) Call run ONCE to execute tests. (3) On failure, fix the failing SOURCE with edit/full write, "
+                f"then run again. Do NOT touch .github/workflows unless tests already pass. "
+                f"Call a tool NOW."
             ),
             "review": f"REVIEW vs {plan_name}/{arch_name}. ≥3 read/edit/search. Call a tool NOW.",
             "deployment": f"DEPLOY aligned with {arch_name}. Dockerfile/compose/CI. Call a tool NOW.",
-            "verification": f"VERIFY all {plan_name} criteria. Tests must exit 0. Call a tool NOW.",
+            "verification": (
+                f"VERIFY all {plan_name} criteria. Run tests to exit 0. "
+                f"Do not spam the same command — fix source then re-test. Call a tool NOW."
+            ),
         }
         body = prompts.get(phase, "Continue the goal. Call a tool NOW.")
         handoff = self._phase_handoff_block(phase)
@@ -2872,7 +3675,6 @@ class NeonArchitect:
         return f"{body}\n\n{handoff}{hints}"
 
     def _detect_persona(self, user_input: str) -> Optional[str]:
-        """Auto-detect persona from user input keywords."""
         lower = user_input.lower()
         scores: Dict[str, int] = {}
         for persona_key, triggers in PERSONA_TRIGGERS.items():
@@ -2884,7 +3686,6 @@ class NeonArchitect:
         return max(scores, key=scores.get)
 
     def _switch_persona(self, new_persona: str, reason: str = "manual"):
-        """Switch to a new persona and rebuild system prompt."""
         if new_persona not in PERSONAS:
             return False
         old_name = PERSONAS[self.persona_key]["name"]
@@ -2901,7 +3702,6 @@ class NeonArchitect:
         return True
 
     def persist(self, force: bool = False) -> None:
-        """Autosave durable state. Call after meaningful state changes."""
         now = time.monotonic()
         if not force and (now - self._last_persist) < 2.0:
             return
@@ -2913,61 +3713,66 @@ class NeonArchitect:
             self._last_persist = now
 
     def _build_payload(self) -> Dict[str, Any]:
-        # Autopilot: force a tool when the model has been talking without acting
         force_tool = bool(
             self.autopilot
             and (self._consecutive_no_tool_turns >= 1 or self._phase_rounds >= 1)
         )
+        model_cfg = self.pool.current().model_cfg
+        temperature = model_cfg.get("temperature")
+        if temperature is None:
+            temperature = self.config.get("temperature", 0.2)
+        top_p = model_cfg.get("top_p")
         payload = {
             "model": self.pool.current().model_id,
-            "messages": self.ctx.export(),
-            "temperature": self.config.get("temperature", 0.2),
-            "max_tokens": self.model_cfg.get("max_tokens", 8192),
+            "messages": sanitize_messages_for_api(self.ctx.export()),
+            "temperature": temperature,
+            "max_tokens": model_cfg.get("max_tokens", 8192),
             "stream": True,
             "tools": tools_schema(self.tools),
             "tool_choice": "required" if force_tool else "auto",
         }
-        # Only attach model extra_body when thinking is enabled
+        if top_p is not None:
+            payload["top_p"] = top_p
         effort = str(self.config.get("thinking_effort") or "off").lower()
-        if effort in ("low", "medium", "high") and self.model_cfg.get("extra_body"):
-            payload["extra_body"] = self.model_cfg["extra_body"]
+        base_extra = model_cfg.get("extra_body")
+        if base_extra:
+            extra = dict(base_extra)
+            ctk = dict(extra.get("chat_template_kwargs") or {})
+            if effort in ("low", "medium", "high"):
+                ctk["enable_thinking"] = True
+            extra["chat_template_kwargs"] = ctk
+            payload["extra_body"] = extra
         return payload
 
-
     def _consume_stream(self, provider: "Provider", payload: Dict[str, Any]) -> Tuple[str, str, List[Dict[str, Any]], Optional[str]]:
-        """Consume stream with hard wall-clock timeout via background reader.
-
-        ROOT CAUSE FIX:
-        - OpenAI/httpx read timeout only applies between socket reads, but
-          thinking models (GLM) can legitimately pause 30-90s between chunks.
-        - A bare `for chunk in resp` blocks forever if the iterator never
-          yields and the socket doesn't die.
-        - Solution: read chunks on a daemon thread into a queue; main thread
-          enforces stream_timeout + content_timeout with queue.get(timeout=).
-        - Reasoning tokens reset the content-stall timer (thinking is progress).
-
-        ROOT CAUSE FIX v2:
-        - `client.chat.completions.create(...)` is itself a blocking call: it
-          must get a response back before it can return the stream object.
-          NIM can hold a connection open with low-level keepalive/framing
-          traffic far longer than the configured httpx read timeout without
-          ever delivering a usable HTTP response — that resets httpx's read
-          timer without a single byte reaching application code.
-        - So `create()` now runs INSIDE this same reader thread instead of in
-          the caller. first_token_timeout therefore covers the entire
-          "request sent -> first token seen" window, including stream
-          acquisition, not just "resp object already exists -> first token
-          seen". One wall-clock owned by the orchestrator now protects the
-          whole pre-first-token phase, regardless of where in the stack a
-          stall happens.
-        """
+        # CRITICAL: deep-copy the payload for this attempt. The caller's retry loop
+        # mutates its `payload` dict IN PLACE for the next attempt (new model_id,
+        # temperature, etc.) as soon as this call returns/raises. The background
+        # reader thread below closes over `payload` by reference — if that thread
+        # is still alive (e.g. blocked in a slow HTTP call) when the next attempt
+        # starts, it would otherwise send the WRONG provider's client with the
+        # NEXT attempt's model_id already written into the shared dict. This is
+        # confirmed by mismatched model/payload["model"] pairs found in dumped
+        # failed_payloads/*.json. Working on an isolated copy makes each attempt
+        # fully independent regardless of what the outer loop does afterward.
+        payload = copy.deepcopy(payload)
         content = ""
         reasoning = ""
         tool_calls: List[Dict[str, Any]] = []
         finish_reason = None
         stream_timeout = float(self.config.get("stream_timeout", 300.0))
         content_timeout = float(self.config.get("stream_content_timeout", 90.0))
-        first_token_timeout = float(self.config.get("first_token_timeout", 8.0))
+        
+        try:
+            _prompt_chars = sum(len(json.dumps(m, default=str)) for m in payload.get("messages", []))
+            _prompt_chars += len(json.dumps(payload.get("tools") or [], default=str))
+            est_prompt_tokens = _prompt_chars // 4
+        except Exception:
+            est_prompt_tokens = 0
+        base_first_token_timeout = float(self.config.get("first_token_timeout", 8.0))
+        size_allowance = max(0.0, (est_prompt_tokens - 4000) / 200.0)
+        first_token_timeout = min(base_first_token_timeout + size_allowance, base_first_token_timeout + 300.0)
+        stream_timeout = max(stream_timeout, first_token_timeout + 60.0)
         stream_start = time.monotonic()
         last_content_time = time.monotonic()
         in_think = False
@@ -2975,7 +3780,6 @@ class NeonArchitect:
         last_heartbeat = 0
         saw_any_token = False
 
-        # --- Threaded reader so we can hard-kill on stall ---
         chunk_q: "queue.Queue" = __import__("queue").Queue(maxsize=256)
         SENTINEL = object()
         reader_err: List[BaseException] = []
@@ -2989,8 +3793,40 @@ class NeonArchitect:
                     chunk_q.put(chunk)
             except BaseException as ex:
                 reader_err.append(ex)
+                try:
+                    dump_dir = Path.home() / ".neon_architect" / "failed_payloads"
+                    dump_dir.mkdir(parents=True, exist_ok=True)
+                    dump_path = dump_dir / f"{int(time.time())}_{provider.model_id.replace('/', '_')}.json"
+                    with open(dump_path, "w", encoding="utf-8") as f:
+                        json.dump(
+                            {
+                                "model": provider.model_id,
+                                "error": repr(ex),
+                                "payload": payload,
+                            },
+                            f,
+                            indent=2,
+                            default=str,
+                        )
+                except Exception:
+                    pass
             finally:
                 chunk_q.put(SENTINEL)
+
+        # Prune/track orphaned reader threads from prior attempts that timed out
+        # app-side but never returned (e.g. still blocked in the HTTP call).
+        # These no longer corrupt shared state (payload is deep-copied above),
+        # but leaving them completely unmonitored can leak sockets/threads under
+        # a sustained provider outage, so we keep a bounded, visible registry.
+        orphans = getattr(self, "_orphan_reader_threads", None)
+        if orphans is None:
+            orphans = self._orphan_reader_threads = []
+        orphans[:] = [th for th in orphans if th.is_alive()]
+        if len(orphans) >= 6:
+            UI.warn(
+                f"{len(orphans)} abandoned provider-stream threads still running "
+                "in the background (likely a stuck connection pool)."
+            )
 
         t = threading.Thread(target=_reader, daemon=True, name="neon-stream-reader")
         t.start()
@@ -2998,28 +3834,16 @@ class NeonArchitect:
         try:
             while True:
                 elapsed = time.monotonic() - stream_start
-
-                # Hard overall stream timeout
                 if elapsed > stream_timeout:
                     raise Exception(
                         f"Stream hard timeout after {elapsed:.0f}s (limit: {stream_timeout:.0f}s)"
                     )
-
-                # ROOT CAUSE FIX: NIM can buffer the ENTIRE reasoning phase
-                # server-side and emit ZERO bytes until it's done. The old
-                # content-stall check below only fires AFTER a token is seen,
-                # so total silence was previously bounded only by the 300s
-                # stream_timeout — meaning a stuck request looked identical
-                # to a dead process for up to 5 minutes per retry attempt.
-                # This fires much sooner and hands control back to the retry loop.
                 if not saw_any_token and elapsed > first_token_timeout:
                     raise Exception(
                         f"First-token timeout after {elapsed:.0f}s (limit: {first_token_timeout:.0f}s) — "
                         f"backend is likely buffering the full reasoning phase server-side "
                         f"(thinking_effort={self.config.get('thinking_effort')}). Retrying."
                     )
-
-                # Claude Code–style thinking spinner while waiting for first token
                 if not saw_any_token and elapsed >= 1.5 and int(elapsed) - last_heartbeat >= 1:
                     last_heartbeat = int(elapsed)
                     try:
@@ -3034,7 +3858,6 @@ class NeonArchitect:
                     else:
                         print(msg, end="\r", flush=True)
 
-                # Content / thinking stall (only after first token seen)
                 idle = time.monotonic() - last_content_time
                 if saw_any_token and idle > content_timeout:
                     raise Exception(
@@ -3042,12 +3865,10 @@ class NeonArchitect:
                         f"(thinking={in_think})"
                     )
 
-                # Wait for next chunk with short poll so we re-check timeouts
                 poll = min(2.0, content_timeout / 4.0)
                 try:
                     chunk = chunk_q.get(timeout=poll)
                 except Exception:
-                    # queue.Empty — loop back to check wall-clock / stall
                     if not t.is_alive() and chunk_q.empty():
                         break
                     continue
@@ -3067,7 +3888,6 @@ class NeonArchitect:
 
                 has_content = False
 
-                # Reasoning / thinking tokens = progress (reset stall timer)
                 if hasattr(delta, "reasoning_content") and delta.reasoning_content:
                     has_content = True
                     saw_any_token = True
@@ -3135,11 +3955,6 @@ class NeonArchitect:
                 raise reader_err[0]
 
         finally:
-            # Best-effort close of underlying response to free sockets.
-            # resp now lives inside the reader thread's local scope, so it's
-            # only reachable via resp_holder — and only if create() actually
-            # returned. If it's still hanging, there's nothing to close yet;
-            # the daemon thread is left to resolve (or die with the process).
             try:
                 if resp_holder:
                     resp = resp_holder[0]
@@ -3150,14 +3965,21 @@ class NeonArchitect:
                         close.close()
             except Exception:
                 pass
+            if t.is_alive():
+                orphans.append(t)
 
         print()
+        for tc in tool_calls:
+            if isinstance(tc, dict):
+                tc["arguments"] = sanitize_tool_arguments(tc.get("arguments"))
+                if not tc.get("name"):
+                    tc["name"] = "unknown"
+        tool_calls = [tc for tc in tool_calls if isinstance(tc, dict) and tc.get("name") and tc.get("name") != "unknown"]
         return content, reasoning, tool_calls, finish_reason
 
     def _is_template_error(self, e: Exception) -> bool:
-        """NVIDIA 500s about prompt template / tools schema — not fixed by retrying same model."""
         s = str(e).lower()
-        markers = (
+        specific_markers = (
             "failed to apply prompt temp",
             "failed to apply prompt template",
             "prompt template",
@@ -3167,16 +3989,13 @@ class NeonArchitect:
             "tool call validation",
             "tools schema",
             "invalid tools",
-            "failed to generate completions",
         )
-        return any(m in s for m in markers)
+        return any(m in s for m in specific_markers)
 
     def _is_transient_error(self, e: Exception) -> bool:
-        """Classify whether an error is transient (retryable) or fatal."""
         if self._is_template_error(e):
-            return False  # deterministic for this model+payload
+            return False
         err_str = str(e).lower().replace(" ", "")
-        # bare "500" alone is ambiguous — template 500s already handled above
         transient_markers = [
             "timeout", "timedout", "apitimeout", "apiconnection",
             "429", "toomanyrequests", "ratelimit", "resourceexhausted",
@@ -3187,7 +4006,6 @@ class NeonArchitect:
         ]
         if any(m in err_str for m in transient_markers):
             return True
-        # Generic 500 without template signature — treat as transient once
         if "500" in err_str and "template" not in err_str:
             return True
         if isinstance(e, OPENAI_ERRORS):
@@ -3195,25 +4013,12 @@ class NeonArchitect:
         return False
 
     def _parse_stream(self, payload: Dict[str, Any]) -> Tuple[str, str, List[Dict[str, Any]]]:
-        """Streams to completion with NIM-aware retry architecture.
-
-        ROOT CAUSE FIXES:
-        - Non-blocking provider selection (no 5s acquire hang)
-        - Cap "all cooling down" wait to 10s max
-        - Faster rotate (2 failures per provider)
-        - Shorter exponential backoff
-        - Apply config thinking_effort override on every call
-        """
         max_total_attempts = int(self.config.get("retry_max", 2))
         max_per_provider = int(self.config.get("max_retries_per_provider", 2))
         base_delay = float(self.config.get("retry_base_delay", 1.5))
         total_attempts = 0
         empty_pool_spins = 0
 
-        # Apply thinking_effort from config (overrides model default)
-        # Thinking is OFF unless explicitly enabled (effort in low|medium|high).
-        # GLM-5.2 with enable_thinking buffers the full reasoning phase server-side
-        # before the first SSE token — that was the remaining 5–8s interactive lag.
         effort = str(self.config.get("thinking_effort") or "off").lower()
         payload = dict(payload)
         if effort in ("low", "medium", "high"):
@@ -3224,7 +4029,6 @@ class NeonArchitect:
             extra["chat_template_kwargs"] = ctk
             payload["extra_body"] = extra
         else:
-            # Explicitly DISABLE thinking — critical for NIM first-token latency
             extra = dict(payload.get("extra_body") or {})
             ctk = dict(extra.get("chat_template_kwargs") or {})
             ctk["enable_thinking"] = False
@@ -3235,16 +4039,23 @@ class NeonArchitect:
         max_empty_wait = float(self.config.get("empty_pool_max_wait", 120.0))
         tools_stripped = False
 
+        rl_until = float(getattr(self, "_rate_limit_until", 0.0) or 0.0)
+        if rl_until > time.monotonic():
+            wait_rl = rl_until - time.monotonic()
+            UI.warn(f"Session rate-limit pause {wait_rl:.0f}s (post-429 backoff)...")
+            time.sleep(min(wait_rl, 60.0))
+
+        _last_cooldown_print = 0.0
         while total_attempts < max_total_attempts:
             provider = self.pool.next_available()
             if not provider:
                 empty_pool_spins += 1
                 wait = float(self.pool.shortest_wait())
-                # Wait for the real cooldown, not a fixed 10s that loses the race
                 if wait <= 0:
                     wait = 2.0
-                # Cap single sleep but allow cumulative wait up to max_empty_wait
-                slice_w = min(wait, 30.0)
+                # Consolidate short cooldowns into one sleep instead of many
+                # 2s slices, each of which used to print its own warning line.
+                slice_w = min(wait, 30.0) if wait > 5.0 else wait
                 if empty_pool_waited + slice_w > max_empty_wait and empty_pool_spins > 2:
                     alive = [
                         p.name for p in self.pool.providers
@@ -3256,17 +4067,20 @@ class NeonArchitect:
                         f"Active pool: {alive or 'none'}. "
                         "Check API key / rate limits / network, or /model to switch."
                     )
-                UI.warn(
-                    f"All providers cooling down. Waiting {slice_w:.1f}s "
-                    f"(cooldown≈{wait:.0f}s, waited {empty_pool_waited:.0f}s)..."
-                )
+                now_m = time.monotonic()
+                if now_m - _last_cooldown_print >= 5.0 or empty_pool_spins <= 1:
+                    UI.warn(
+                        f"All providers cooling down. Waiting {slice_w:.1f}s "
+                        f"(cooldown≈{wait:.0f}s, waited {empty_pool_waited:.0f}s total, "
+                        f"spin #{empty_pool_spins})..."
+                    )
+                    _last_cooldown_print = now_m
                 time.sleep(slice_w)
                 empty_pool_waited += slice_w
                 continue
             empty_pool_spins = 0
             empty_pool_waited = 0.0
 
-            # Soft rate-limit pacing (info only — token already acquired)
             wt = provider.bucket.wait_time()
             if wt > 0.5:
                 UI.info(f"Rate limit pacing ({wt:.1f}s)...")
@@ -3282,17 +4096,35 @@ class NeonArchitect:
                     )
                 else:
                     print(f"  * {provider.name} attempt {total_attempts}/{max_total_attempts}...", end="\r", flush=True)
-                # Belt-and-suspenders: guarantee this line hit the terminal even if the
-                # next stage (stream acquisition) stalls, independent of how the console
-                # buffers \r-based redraws.
                 sys.stdout.flush()
 
                 payload["model"] = provider.model_id
+                pt = provider.model_cfg.get("temperature")
+                payload["temperature"] = pt if pt is not None else self.config.get("temperature", 0.2)
+                p_top_p = provider.model_cfg.get("top_p")
+                if p_top_p is not None:
+                    payload["top_p"] = p_top_p
+                else:
+                    payload.pop("top_p", None)
+                payload["max_tokens"] = provider.model_cfg.get("max_tokens", 8192)
+                
+                p_extra = provider.model_cfg.get("extra_body")
+                if p_extra and not tools_stripped:
+                    p_extra = dict(p_extra)
+                    ctk = dict(p_extra.get("chat_template_kwargs") or {})
+                    effort_now = str(self.config.get("thinking_effort") or "off").lower()
+                    if effort_now in ("low", "medium", "high"):
+                        ctk["enable_thinking"] = True
+                    p_extra["chat_template_kwargs"] = ctk
+                    payload["extra_body"] = p_extra
+                else:
+                    payload.pop("extra_body", None)
 
                 content, reasoning, tool_calls, finish_reason = self._consume_stream(provider, payload)
 
                 if finish_reason is not None:
                     provider.record_success()
+                    self._note_provider_success()
                     return content, reasoning, tool_calls
                 else:
                     raise Exception("Stream completed without finish_reason — backend dropped")
@@ -3301,17 +4133,21 @@ class NeonArchitect:
                 err_l = str(e).lower()
                 err_c = err_l.replace(" ", "")
 
-                # 404 = model not available for this account → permanent remove
                 if "404" in err_l or "not found" in err_l or "model_not_found" in err_c:
                     UI.warn(f"{provider.name} permanent miss (404) — removed from pool")
                     provider.record_failure(cooldown=600.0, permanent=True)
+                    _pd = self.config.get("project_dir")
+                    if _pd:
+                        try:
+                            mark_model_dead(Path(_pd).resolve(), provider.model_id)
+                        except Exception:
+                            pass
                     self.pool.rotate()
                     if total_attempts < max_total_attempts:
                         time.sleep(0.3)
                         continue
                     raise RuntimeError(f"All providers failed. Last error: {e}")
 
-                # Prompt-template / tools-schema 500 — deterministic for this model+payload
                 if self._is_template_error(e):
                     UI.warn(
                         f"{provider.name} prompt-template/tools failure — "
@@ -3319,7 +4155,6 @@ class NeonArchitect:
                     )
                     provider.record_failure(cooldown=600.0, permanent=True)
                     self.pool.rotate()
-                    # One-shot: strip tools and retry on another provider (keeps conversation alive)
                     if not tools_stripped and payload.get("tools"):
                         tools_stripped = True
                         payload = dict(payload)
@@ -3334,32 +4169,59 @@ class NeonArchitect:
                         continue
                     raise RuntimeError(f"All providers failed (template). Last error: {e}")
 
-                # Auth → stop immediately with clear recovery steps
                 if "401" in err_l or "403" in err_l or "unauthorized" in err_l or "forbidden" in err_l:
                     UI.err(f"Auth failure: {e}")
                     UI.warn("NVIDIA rejected this project's API key (403/401).")
                     UI.info("Fix:  /apikey <new-nvapi-key-from-https://build.nvidia.com>")
                     UI.info("Check: key must have access to model z-ai/glm-5.2 on NVIDIA NIM.")
-                    UI.info("Or:    /model nemotron-ultra   if that model is enabled on your key.")
+                    UI.info("Or:    /model nemotron-3-super-120b-a12b   if that model is enabled on your key.")
                     raise
 
-                # Capacity / rate limit → cool down, rotate once
                 if (
                     "resourceexhausted" in err_c
                     or "limit reached" in err_l
                     or "429" in err_l
                     or "ratelimit" in err_c
                 ):
-                    UI.warn(f"{provider.name} at capacity — cooling 45s, rotating")
-                    provider.record_failure(cooldown=15.0)
-                    self.pool.rotate()
+                    retry_after = None
+                    for attr in ("response", "http_response"):
+                        resp = getattr(e, attr, None)
+                        headers = getattr(resp, "headers", None) if resp is not None else None
+                        if headers:
+                            ra = headers.get("retry-after") or headers.get("Retry-After")
+                            if ra:
+                                try:
+                                    retry_after = float(ra)
+                                except (TypeError, ValueError):
+                                    retry_after = None
+                            break
+                    cooldown = retry_after if retry_after is not None else 15.0
+                    UI.warn(
+                        f"{provider.name} at capacity (429) — "
+                        f"{'Retry-After='+str(cooldown)+'s' if retry_after is not None else 'no Retry-After header, defaulting 15s'}, "
+                        f"pausing shared key budget"
+                    )
+                    provider.record_failure(cooldown=cooldown)
+                    provider.bucket.penalize(cooldown)
+                    backoff = max(
+                        cooldown,
+                        float(self.config.get("post_429_backoff", 25.0) or 25.0),
+                    )
+                    self._rate_limit_until = max(
+                        getattr(self, "_rate_limit_until", 0.0),
+                        time.monotonic() + backoff,
+                    )
+                    self._recent_429_count = int(getattr(self, "_recent_429_count", 0)) + 1
                 elif not self._is_transient_error(e):
                     UI.err(f"Fatal API error: {e}")
                     raise
                 else:
                     UI.warn(f"{provider.name} transient: {str(e)[:100]}")
-                    # Shorter cooldown so empty-pool wait can outlast it
-                    provider.record_failure(cooldown=12.0)
+                    err_l2 = str(e).lower()
+                    if any(x in err_l2 for x in ("first-token", "firsttoken", "first token", "stall", "buffering")):
+                        provider.record_failure(cooldown=4.0)
+                    else:
+                        provider.record_failure(cooldown=8.0)
                     if self.pool.should_rotate(max_per_provider):
                         self.pool.rotate()
 
@@ -3374,18 +4236,26 @@ class NeonArchitect:
         raise RuntimeError("Exhausted all retry attempts")
 
     def _execute_tools(self, tool_calls: List[Dict[str, Any]]) -> bool:
-        """Execute tool calls and append results. Returns True if any executed."""
         if not tool_calls:
             return False
 
-        formatted = []
-        for tc in tool_calls:
-            formatted.append({
-                "id": tc["id"],
-                "type": "function",
-                "function": {"name": tc["name"], "arguments": tc["arguments"]},
-            })
+        MAX_PARALLEL_TOOLS = 7
+        if len(tool_calls) > MAX_PARALLEL_TOOLS:
+            UI.warn(f"Truncating {len(tool_calls)} parallel tools to {MAX_PARALLEL_TOOLS} to prevent sprawl.")
+            tool_calls = tool_calls[:MAX_PARALLEL_TOOLS]
+
+        formatted = sanitize_tool_calls([
+            {
+                "id": tc.get("id") or "",
+                "name": tc.get("name") or "",
+                "arguments": tc.get("arguments") or "{}",
+            }
+            for tc in tool_calls
+        ])
+        formatted = [f for f in formatted if f.get("function", {}).get("name")]
         self.ctx.add_assistant(content="", tool_calls=formatted)
+
+        spam_blocks = 0
 
         for tc in tool_calls:
             name = tc.get("name", "")
@@ -3403,10 +4273,13 @@ class NeonArchitect:
             else:
                 print(f"* {name}({preview})")
 
-            # Anti-loop: identical failing fingerprints
             fp_key = self._tool_fingerprint(name, args)
             prior_fails = self._tool_fail_counts.get(fp_key, 0)
+            prior_ok = self._tool_success_counts.get(fp_key, 0)
+            max_ok = int(getattr(self, "max_same_tool_successes", 3) or 3)
+            
             if prior_fails >= self.max_same_tool_failures:
+                spam_blocks += 1
                 msg = (
                     f"[BLOCKED REPEAT] {name} with the same arguments already failed "
                     f"{prior_fails} times. Change strategy: different path, query, URL, or tool."
@@ -3414,8 +4287,53 @@ class NeonArchitect:
                 UI.warn(msg)
                 self._strategy_hints.append(msg)
                 result = ToolResult("", error=msg, is_error=True)
+            elif prior_ok >= max_ok and name in ("run", "write", "edit"):
+                spam_blocks += 1
+                msg = (
+                    f"[BLOCKED SPAM] {name} succeeded {prior_ok}x with the same fingerprint "
+                    f"but the phase gate is still open. Do something DIFFERENT "
+                    f"(new path, fix source, run a real test command, or stop rewriting CI)."
+                )
+                UI.warn(msg)
+                self._strategy_hints.append(msg)
+                result = ToolResult("", error=msg, is_error=True)
             else:
-                result = execute_tool(self.tools, name, args)
+                # Interactive confirm gate for destructive git operations.
+                # Reuses the same detection RunTool._git_destructive_reason
+                # already applies as a hard block — here, in an interactive
+                # (non-autopilot) session, we ask the human instead of
+                # refusing outright, since a person is actually present to
+                # answer. Autopilot has no one to ask, so it keeps the
+                # existing hard-block behavior inside RunTool unchanged —
+                # this gate is deliberately skipped there rather than ever
+                # blocking on input() with nobody watching.
+                if (
+                    not self.autopilot
+                    and name == "run"
+                    and str(args.get("program", "")).strip().lower() == "git"
+                ):
+                    reason = RunTool._git_destructive_reason(args.get("args") or [])
+                    if reason:
+                        action = f"run git {' '.join(str(a) for a in (args.get('args') or []))}"
+                        prompt = UI.permission_prompt(action, reason)
+                        if HAS_RICH:
+                            console.print(prompt)
+                        else:
+                            print(prompt)
+                        try:
+                            ans = input("  Allow? [y/N]: ").strip().lower()
+                        except (KeyboardInterrupt, EOFError):
+                            ans = "n"
+                        if ans not in ("y", "yes"):
+                            msg = f"User declined: {reason}"
+                            UI.warn(msg)
+                            result = ToolResult("", error=msg, is_error=True)
+                        else:
+                            result = execute_tool(self.tools, name, {**args, "_confirmed_destructive": True})
+                    else:
+                        result = execute_tool(self.tools, name, args)
+                else:
+                    result = execute_tool(self.tools, name, args)
                 if result.is_error:
                     self._tool_fail_counts[fp_key] = prior_fails + 1
                     if self._tool_fail_counts[fp_key] >= 2:
@@ -3427,6 +4345,7 @@ class NeonArchitect:
                         UI.warn(hint)
                 else:
                     self._tool_fail_counts[fp_key] = 0
+                    self._tool_success_counts[fp_key] = prior_ok + 1
                     if name == "web_search":
                         self._research_done = True
                         q = str(args.get("query", ""))[:120]
@@ -3450,14 +4369,16 @@ class NeonArchitect:
                             self._phase_tool_counts["src_write"] = self._phase_tool_counts.get("src_write", 0) + 1
                     elif name == "todo" and args.get("action") == "add":
                         self._update_working_memory(f"todo: {str(args.get('content',''))[:120]}", section="Next action")
-                    elif name == "bash":
-                        digest = getattr(BashTool, "last_test_digest", "") or ""
+                    elif name == "run":
+                        digest = getattr(result, "test_digest", "") or ""
                         if digest:
                             self._last_test_digest = digest
                             if result.is_error:
                                 self._update_working_memory("test failure — see LAST TEST DIGEST", section="Blockers")
                             else:
-                                cmd = str(args.get("command") or "")[:120]
+                                prog = str(args.get("program") or "")
+                                run_args = args.get("args") or []
+                                cmd = (prog + " " + " ".join(str(a) for a in run_args))[:120]
                                 self.project_state["test_command"] = cmd
                                 self._update_working_memory(f"tests ok: {cmd}", section="Decisions")
 
@@ -3469,20 +4390,14 @@ class NeonArchitect:
             self._phase_tool_counts[name] = self._phase_tool_counts.get(name, 0) + 1
             if name == "todo" and args.get("action") == "add" and not result.is_error:
                 self._phase_tool_counts["todo_add"] = self._phase_tool_counts.get("todo_add", 0) + 1
-            if name == "bash":
-                cmd = str(args.get("command") or "").lower()
-                is_test = any(
-                    x in cmd
-                    for x in (
-                        "pytest", "python -m pytest", "python -m unittest", "unittest",
-                        "npm test", "npx jest", "cargo test", "go test",
-                        "test_core.py", "test_agents.py",
-                    )
-                )
+            if name == "run":
+                prog = str(args.get("program") or "")
+                run_args = args.get("args") or []
+                is_test = RunTool._is_test_invocation(prog, run_args)
                 if is_test and result.is_error:
                     self._tdd_saw_red = True
-                    if BashTool.last_test_digest:
-                        self._last_test_digest = BashTool.last_test_digest
+                    if getattr(result, "test_digest", ""):
+                        self._last_test_digest = result.test_digest
                 if is_test and not result.is_error:
                     self._phase_bash_ok = True
                     if self._tdd_saw_red:
@@ -3493,11 +4408,19 @@ class NeonArchitect:
             max_tool_len = max(2000, (self.model_cfg["ctx_window"] - ctx_tokens) * 4)
             self.ctx.add_tool_result(tc["id"], name, result.text()[:max_tool_len])
 
+        if spam_blocks > 0 and spam_blocks == len(tool_calls):
+            warning = (
+                "SYSTEM CRITICAL: ALL your tool calls this turn were rejected as repetitive spam. "
+                "You are stuck in an infinite loop doing the exact same failing action. "
+                "STOP. Review the context, read the actual files, and try a completely DIFFERENT approach or path."
+            )
+            self.ctx.add_user(warning)
+            UI.warn("Total spam turn detected — injected hard circuit-breaker prompt.")
+
         self._sync_project_state()
         return True
 
     def _asks_user(self, content: str) -> bool:
-        """True if the model is prompting the human (forbidden in autopilot)."""
         lower = (content or "").lower()
         markers = [
             "shall i", "should i", "would you like", "do you want me",
@@ -3512,7 +4435,6 @@ class NeonArchitect:
         ]
         if any(m in lower for m in markers):
             return True
-        # Trailing question aimed at user
         if "?" in content and any(
             w in lower for w in ("you", "shall", "should", "ready", "proceed", "continue")
         ):
@@ -3520,7 +4442,6 @@ class NeonArchitect:
         return False
 
     def _should_nudge(self, content: str) -> bool:
-        """Detect announce-without-tool or forbidden user prompts."""
         if not self.config.get("auto_nudge", True):
             return False
         if self.nudges >= self.config.get("max_nudges", 2):
@@ -3540,8 +4461,43 @@ class NeonArchitect:
         ]
         return any(p in lower for p in phrases)
 
+    def _test_status_hint_bits(self, phase: str) -> List[str]:
+        """Shared by the bash_success and verification_criteria_complete
+        hint branches so both report test/coverage status identically
+        instead of the wording drifting apart between the two phases."""
+        bits: List[str] = []
+        if not self._phase_bash_ok:
+            bits.append("test_invoked: NO — call a test runner (pytest/npm test/cargo test/go test)")
+            return bits
+        stats = parse_test_digest(self._last_test_digest)
+        if not stats["parsed"]:
+            bits.append(
+                "test_invoked: yes, but digest format unrecognized — cannot confirm pass count; "
+                "re-run with a standard test runner that prints a summary line"
+            )
+            return bits
+        bits.append(
+            f"tests: passed={stats['passed']} failed={stats['failed']} errors={stats['errors']}"
+        )
+        if stats["failed"] > 0 or stats["errors"] > 0:
+            bits.append("Fix the failing/erroring tests shown in LAST TEST DIGEST, then re-run.")
+        elif stats["passed"] < int(self.config.get("min_tests_passed", 1) or 1):
+            bits.append("Write and run more real tests — a single trivial test is not enough coverage.")
+        min_cov = float(self.config.get("min_coverage_pct", 0) or 0)
+        if min_cov > 0 and phase == "verification":
+            if stats["coverage_pct"] is None:
+                bits.append(
+                    f"coverage: NOT MEASURED (need ≥{min_cov}%) — re-run with coverage enabled, "
+                    "e.g. `pytest --cov`, `go test -cover`, `npx jest --coverage`"
+                )
+            else:
+                bits.append(
+                    f"coverage: {stats['coverage_pct']}% "
+                    f"({'ok' if stats['coverage_pct'] >= min_cov else f'MISSING — need ≥{min_cov}%'})"
+                )
+        return bits
+
     def _gate_missing_hint(self) -> str:
-        """Tell the model exactly why the current phase gate is not met."""
         if not self.autopilot or self.sdlc_phase_idx >= len(SDLC_PHASES):
             return ""
         phase = SDLC_PHASES[self.sdlc_phase_idx]
@@ -3568,23 +4524,58 @@ class NeonArchitect:
             ok, n = self._artifact_ok(art, int(reqs.get("min_chars", 300)))
             bits.append(f"{art}: {'ok' if ok else 'MISSING'} ({n} chars)")
             bits.append(f"write/edit={sum(self._phase_tool_counts.get(x,0) for x in ('write','edit'))}")
+        elif kind == "bash_success":
+            # This phase's whole job is confirming correctness, so the hint
+            # needs to say more than a generic tool-count dump — report
+            # whether a recognized test command has even run, and what the
+            # parsed digest actually shows (not just the boolean).
+            bits.extend(self._test_status_hint_bits(phase))
+        elif kind == "verification_criteria_complete":
+            bits.extend(self._test_status_hint_bits(phase))
+            criteria = self.project_state.get("acceptance_criteria") or []
+            artifact = reqs.get("artifact") or "VERIFICATION.md"
+            if not criteria:
+                bits.append(
+                    "acceptance_criteria: none captured from planning — gate only requires tests to pass"
+                )
+            else:
+                ok, _n = self._artifact_ok(artifact, min_chars=1)
+                text = self._read_artifact_snippet(artifact, max_chars=50000) if ok else ""
+                rows = parse_verification_rows(text) if text else []
+                covered, missing = match_criteria_to_verification(criteria, rows)
+                bits.append(f"criteria_linked: {len(covered)}/{len(criteria)} in {artifact}")
+                if missing:
+                    bits.append(
+                        f"MISSING test link for: {'; '.join(missing[:3])}"
+                        + (f" (+{len(missing)-3} more)" if len(missing) > 3 else "")
+                    )
+                    bits.append(
+                        f"For each, add a row to {artifact}: "
+                        "`- [x] <criterion text> — test: <path/to/test.py::test_name>`, "
+                        "naming a REAL test you have actually run and confirmed passes."
+                    )
         else:
             bits.append(f"counts={dict(self._phase_tool_counts)}")
+        if self._phase_tool_counts.get("todo_add", 0) < 5 and phase == "planning":
+            bits.append(
+                'TODO EXAMPLE (copy structure): todo action=add content="Research oiioii.ai feature list"'
+            )
+        if phase == "implementation" and self._phase_tool_counts.get("src_write", 0) < 1:
+            bits.append(
+                "IMPLEMENT: write a REAL source file under src/ OR app/ OR backend/ OR frontend/ OR lib/ OR tests/. "
+                "Do NOT edit PLAN.md. Example path=backend/nim_client.py with full file content."
+            )
         bits.append("Call ONE tool now to fix the missing gate item.")
         return " | ".join(bits)
 
     def run_turn(self, user_input: str):
-        """Execute one full turn: user input → persona detect → LLM → tools → loop.
-        In autopilot mode, the agent self-directs through SDLC phases."""
         if user_input:
-            # Handle autopilot commands
             if user_input.lower() == "/stop":
                 self._stop_autopilot()
                 return
             if user_input.lower() == "/status":
                 self._autopilot_status()
                 return
-            # Auto-detect persona if in adaptive mode and NOT in autopilot
             if not self.autopilot and PERSONAS[self.persona_key]["auto_switch"]:
                 detected = self._detect_persona(user_input)
                 if detected and detected != self.persona_key:
@@ -3617,7 +4608,6 @@ class NeonArchitect:
             if self.round % max(1, self._persist_every) == 0:
                 self.persist()
 
-            # Context compaction check
             if self.ctx.should_compact():
                 before = self.ctx.estimate_tokens()
                 if self.ctx.compact(keep_recent=8):
@@ -3641,15 +4631,29 @@ class NeonArchitect:
             except Exception as e:
                 UI.err(f"Turn failed: {e}")
                 if self.autopilot:
-                    # Survive provider outages: save, wait, CONTINUE (don't abandon goal)
                     self.persist(force=True)
+                    self._consecutive_turn_failures = getattr(self, "_consecutive_turn_failures", 0) + 1
+                    n_fail = self._consecutive_turn_failures
                     err_l = str(e).lower()
                     wait = 25.0 if any(x in err_l for x in ("timeout", "capacity", "429", "resource")) else 12.0
+                    # Escalate backoff once it's clear this isn't a one-off blip,
+                    # instead of hammering the pool every 12-25s indefinitely
+                    # (the turns-006-009 style cascade in the session log).
+                    if n_fail >= 3:
+                        wait = min(wait * n_fail, 180.0)
                     phase = SDLC_PHASES[min(self.sdlc_phase_idx, len(SDLC_PHASES) - 1)].upper()
-                    UI.warn(
-                        f"Provider hiccup — sleeping {wait:.0f}s then continuing "
-                        f"(phase={phase}, round={self.autopilot_rounds}). /stop to halt."
-                    )
+                    if n_fail == 3:
+                        UI.warn(
+                            f"Sustained provider outage: {n_fail} turns in a row have failed "
+                            f"(phase={phase}). Backing off to {wait:.0f}s between attempts. "
+                            "/stop to halt, or check API key / network / provider status."
+                        )
+                    else:
+                        UI.warn(
+                            f"Provider hiccup — sleeping {wait:.0f}s then continuing "
+                            f"(phase={phase}, round={self.autopilot_rounds}, "
+                            f"consecutive_failures={n_fail}). /stop to halt."
+                        )
                     if self.autopilot:
                         self.ctx.add_user(
                             "SYSTEM: Provider stalled. Do NOT rewrite huge DESIGN.md/SPEC.md. "
@@ -3660,10 +4664,9 @@ class NeonArchitect:
                     continue
                 break
 
-            # Record tokens (heuristic)
+            self._consecutive_turn_failures = 0
             self.meter.record(tokens, len(content) // 4 + len(reasoning) // 4)
 
-            # XML hallucination interceptor
             if not tool_calls and re.search(r"<(tool_call|function|parameter)", content):
                 UI.warn("Detected XML hallucination. Correcting...")
                 self.ctx.add_assistant(content)
@@ -3674,16 +4677,14 @@ class NeonArchitect:
                 time.sleep(0.5)
                 continue
 
-            # Tool execution
             if tool_calls:
                 self.nudges = 0
                 self._execute_tools(tool_calls)
                 self._consecutive_no_tool_turns = 0
-                # Persist immediately if todos or files changed
                 tool_names = {tc.get("name", "") for tc in tool_calls}
                 if tool_names & {"todo", "write", "edit"}:
                     self.persist(force=True)
-                delay = float(self.config.get("inter_turn_delay", 0.1))
+                delay = self._effective_inter_turn_delay()
                 time.sleep(max(0.1, delay))
                 if self.autopilot:
                     self._phase_rounds += 1
@@ -3694,24 +4695,55 @@ class NeonArchitect:
                             UI.ok("All SDLC phases complete!")
                             self._stop_autopilot()
                             break
-                    elif self._phase_rounds % 5 == 0:
-                        hint = self._gate_missing_hint()
-                        UI.info(
-                            f"Still in {phase_name.upper()} (turn {self._phase_rounds}). "
-                            f"{hint}"
-                        )
-                        # Push explicit fix instruction so model does not idle
-                        self.ctx.add_user(
-                            "AUTOPILOT: Gate still open. " + hint + " Call ONE tool now. Do not ask the user."
-                        )
+                    else:
+                        max_pr = int(self.config.get("max_phase_rounds", 40) or 0)
+                        if (
+                            max_pr > 0
+                            and self._phase_rounds >= max_pr
+                            and phase_name not in ("testing", "verification")
+                        ):
+                            # Previously this force-advanced the phase
+                            # ("soft-advancing") even though its gate was
+                            # never met — the same accidental-leniency
+                            # pattern as the testing circuit-breaker and the
+                            # plan/architecture soft-pass blocks. Stop
+                            # autopilot and record a blocker instead of
+                            # silently marking the phase complete; a human
+                            # decides whether to raise max_phase_rounds,
+                            # intervene manually, or resume.
+                            UI.warn(
+                                f"Phase circuit-breaker: {phase_name.upper()} hit {self._phase_rounds} "
+                                f"rounds without gate. Stopping autopilot — phase is NOT being marked complete."
+                            )
+                            try:
+                                self.project_state.setdefault("blockers", []).append(
+                                    f"{phase_name}: gate not met after {self._phase_rounds} rounds — autopilot halted"
+                                )
+                                self.project_state["blockers"] = self.project_state["blockers"][-10:]
+                                self._update_working_memory(
+                                    f"{phase_name} STALLED: gate not met after {self._phase_rounds} rounds. "
+                                    "Autopilot halted; phase not marked complete.",
+                                    section="Blockers",
+                                )
+                            except Exception:
+                                pass
+                            self._stop_autopilot()
+                            break
+                        elif self._phase_rounds % 5 == 0:
+                            hint = self._gate_missing_hint()
+                            UI.info(
+                                f"Still in {phase_name.upper()} (turn {self._phase_rounds}). "
+                                f"{hint}"
+                            )
+                            self.ctx.add_user(
+                                "AUTOPILOT: Gate still open. " + hint + " Call ONE tool now. Do not ask the user."
+                            )
                     continue
                 continue
 
-            # No tools — assistant response
             self._consecutive_no_tool_turns += 1
             self.ctx.add_assistant(content)
 
-            # Autopilot: if gates already met, advance immediately (never wait on "Shall I…?")
             if self.autopilot and (
                 self._phase_requirements_met() or self._should_advance_phase(content)
             ):
@@ -3722,10 +4754,9 @@ class NeonArchitect:
                     break
                 self.ctx.add_user(self._autopilot_prompt())
                 self.nudges = 0
-                time.sleep(max(0.1, float(self.config.get("inter_turn_delay", 0.1))))
+                time.sleep(max(0.1, self._effective_inter_turn_delay()))
                 continue
 
-            # Forbidden: asking the human during autopilot
             if self.autopilot and self._asks_user(content):
                 UI.warn("Autopilot blocked a user-facing question — forcing tool action.")
                 hint = self._gate_missing_hint()
@@ -3739,7 +4770,6 @@ class NeonArchitect:
                 time.sleep(0.3)
                 continue
 
-            # Auto-nudge if assistant announced but didn't act
             if self._should_nudge(content):
                 self.nudges += 1
                 if self.nudges >= self.config.get("max_nudges", 2) and self.autopilot:
@@ -3761,10 +4791,9 @@ class NeonArchitect:
 
             self.nudges = 0
 
-            # Autopilot: inject next action (gates not met yet)
             if self.autopilot:
                 self.ctx.add_user(self._autopilot_prompt() + "\n" + self._gate_missing_hint())
-                delay = float(self.config.get("inter_turn_delay", 0.1))
+                delay = self._effective_inter_turn_delay()
                 time.sleep(max(0.1, delay))
                 continue
 
@@ -3784,22 +4813,206 @@ class NeonArchitect:
         except Exception:
             return False, 0
 
-    def _artifact_ok(self, relative_path: str, min_chars: int = 200):
+    def _auto_repair_missing_sections(self, artifact: str, headers: tuple, text: str) -> bool:
+        """Deterministically append any genuinely-missing required headers to
+        `artifact` with a clearly-marked placeholder body, instead of just
+        flipping the gate to "passed" while the document stays incomplete.
+        Returns True if the file was modified. This runs in code, not via the
+        LLM's write tool, so it can't get stuck in the same malformed-path /
+        overwrite-guard loop the model does."""
+        missing = plan_missing_sections(text, headers)
+        if not missing:
+            return False
         try:
-            fp = (self.project_dir / relative_path).resolve()
+            fp = (self.project_dir / artifact).resolve()
             fp.relative_to(self.project_dir.resolve())
-            if not fp.is_file():
-                return False, 0
-            try:
-                n = len(fp.read_text(encoding="utf-8", errors="replace").strip())
-            except Exception:
-                n = fp.stat().st_size
-            return n >= min_chars, n
         except Exception:
-            return False, 0
+            return False
+        blocks = []
+        for h in missing:
+            title = h.strip().title()
+            blocks.append(
+                f"\n\n## {title}\n"
+                f"_Auto-filled placeholder — this section was missing after "
+                f"{self._phase_rounds} planning rounds and was inserted "
+                f"automatically so the document is structurally complete. "
+                f"Review and replace with real content._\n"
+                f"- TODO: fill in {h}.\n"
+            )
+        try:
+            with open(fp, "a", encoding="utf-8", newline="\n") as f:
+                f.write("".join(blocks))
+            UI.warn(
+                f"Auto-repaired {artifact}: appended placeholder section(s) for "
+                f"{', '.join(missing)} (model failed to add them after repeated attempts)."
+            )
+            try:
+                with ReadTool._cache_lock:
+                    ReadTool._cache.pop(str(fp), None)
+            except Exception:
+                pass
+            return True
+        except Exception as e:
+            UI.warn(f"Auto-repair of {artifact} failed: {e}")
+            return False
+
+    def _check_tests_pass_gate(self, phase: str) -> bool:
+        """Shared by kind == "bash_success" (testing) and
+        kind == "verification_criteria_complete" (verification) — both
+        need "tests genuinely pass" as a precondition; verification adds
+        the acceptance-criteria linkage on top rather than replacing this
+        check. Kept as one function so the two phases can't drift into
+        checking pass/fail differently."""
+        reqs = SDLC_PHASE_REQUIREMENTS.get(phase) or {}
+        if self._phase_bash_ok:
+            if self.config.get("tdd_enforce_red_green") and phase in ("testing", "verification"):
+                if self._tdd_saw_red and not self._tdd_saw_green:
+                    UI.info("TDD: saw RED but not GREEN yet — keep fixing until tests pass after a failure.")
+                    return False
+            # _phase_bash_ok only proves *some* recognized test command
+            # exited 0 — it says nothing about how many tests ran or
+            # whether any failed alongside a 0 exit (e.g. a runner that
+            # exits 0 while reporting failures in a sub-step). Parse the
+            # actual digest and require a real, non-zero passed count
+            # with no failures/errors before trusting the gate.
+            digest_stats = parse_test_digest(self._last_test_digest)
+            min_passed = int(self.config.get("min_tests_passed", 1) or 1)
+            if digest_stats["parsed"]:
+                if digest_stats["failed"] > 0 or digest_stats["errors"] > 0:
+                    UI.info(
+                        f"Gate NOT met: digest shows {digest_stats['passed']} passed, "
+                        f"{digest_stats['failed']} failed, {digest_stats['errors']} errors."
+                    )
+                    return False
+                if digest_stats["passed"] < min_passed:
+                    UI.info(
+                        f"Gate NOT met: only {digest_stats['passed']} test(s) passed "
+                        f"(need ≥{min_passed})."
+                    )
+                    return False
+                # Coverage requirement: OFF by default (min_coverage_pct
+                # unset/0). Turning it on is a real product decision —
+                # most projects never invoke a coverage tool at all, so
+                # enforcing this unconditionally would make the gate
+                # impossible to pass for any project that doesn't run
+                # `pytest --cov` / `go test -cover` / etc. When a
+                # threshold IS configured, only apply it to the
+                # verification phase — testing's job is "tests pass",
+                # verification's job is "tests actually cover the
+                # acceptance criteria", and coverage-of-code is a
+                # (partial, imperfect) proxy for coverage-of-criteria.
+                # Applying it to both phases would double-count the
+                # same requirement rather than checking two things.
+                min_cov = float(self.config.get("min_coverage_pct", 0) or 0)
+                if min_cov > 0 and phase == "verification":
+                    cov = digest_stats["coverage_pct"]
+                    if cov is None:
+                        UI.info(
+                            f"Gate NOT met: min_coverage_pct={min_cov} is configured but no "
+                            "coverage summary was found in the test digest — re-run tests with "
+                            "coverage enabled (e.g. `pytest --cov`, `go test -cover`)."
+                        )
+                        return False
+                    if cov < min_cov:
+                        UI.info(
+                            f"Gate NOT met: coverage {cov}% is below required {min_cov}%."
+                        )
+                        return False
+                    UI.info(
+                        f"Tests pass: {digest_stats['passed']} passed, 0 failed, "
+                        f"coverage {cov}% ≥ {min_cov}%"
+                    )
+                    return True
+                UI.info(f"Tests pass: {digest_stats['passed']} passed, 0 failed")
+                return True
+            # Digest didn't match a known runner summary format — we
+            # can't confirm real coverage, so don't silently trust the
+            # bare exit code. Let the round loop keep going (and the
+            # missing-gate hint tell the model to produce a recognizable
+            # test run) rather than pass on an unparseable signal.
+            UI.info(
+                "Gate NOT met: test exited 0 but digest format wasn't recognized "
+                "(can't confirm pass count)."
+            )
+            return False
+        max_t = int(self.config.get("testing_max_phase_rounds", 25) or 25)
+        if max_t > 0 and self._phase_rounds >= max_t:
+            # Previously this force-passed the phase after the round
+            # limit ("soft-pass with blocker recorded"), which is the
+            # same silent-pass pattern as the plan/architecture soft-pass
+            # blocks — accidental leniency, not an intended product
+            # behavior. Record the blocker and stop autopilot instead of
+            # pretending the gate was met; a human decides whether to
+            # raise the limit, fix tests, or proceed manually.
+            UI.warn(
+                f"TESTING circuit-breaker: {self._phase_rounds} rounds without green tests. "
+                f"Stopping autopilot — this phase is NOT being marked complete."
+            )
+            try:
+                self.project_state.setdefault("blockers", []).append(
+                    f"{phase}: no green tests after {self._phase_rounds} rounds — autopilot halted"
+                )
+                self.project_state["blockers"] = self.project_state["blockers"][-10:]
+                self._update_working_memory(
+                    f"{phase} STALLED: no green tests after {self._phase_rounds} rounds. "
+                    "Autopilot halted; phase not marked complete.",
+                    section="Blockers",
+                )
+            except Exception:
+                pass
+            self._stop_autopilot()
+            return False
+        return False
+
+    def _auto_repair_verification_criteria(
+        self, artifact: str, missing: List[str], all_criteria: List[str],
+        existing_rows: List[Dict[str, str]],
+    ) -> bool:
+        """Deterministically scaffold VERIFICATION.md rows for criteria
+        that have no matching test reference yet, same pattern as
+        _auto_repair_missing_sections: give the model a concrete
+        structure to fill in rather than letting the gate stay a vague
+        "not met" forever, but never fill in a fake test reference on
+        the model's behalf — a placeholder TODO is left for the model to
+        replace with a real one, and the row still won't count as
+        covered by match_criteria_to_verification until it does.
+        Returns True if the file was modified (which does not by itself
+        mean the gate now passes — the caller re-checks after this)."""
+        try:
+            fp = (self.project_dir / artifact).resolve()
+            fp.relative_to(self.project_dir.resolve())
+        except Exception:
+            return False
+        header_needed = not fp.is_file() or fp.stat().st_size == 0
+        blocks = []
+        if header_needed:
+            blocks.append(
+                "# Criteria Verification\n\n"
+                "One row per PLAN.md Acceptance Criteria item. Each row MUST name a "
+                "specific test that exercises it — replace TODO_TEST_REF with a real "
+                "test path/name (e.g. `tests/test_auth.py::test_rejects_bad_password`) "
+                "and re-run that test before considering this criterion done.\n\n"
+            )
+        for c in missing:
+            blocks.append(f"- [ ] {c} — test: TODO_TEST_REF\n")
+        try:
+            with open(fp, "a", encoding="utf-8", newline="\n") as f:
+                f.write("".join(blocks))
+            UI.warn(
+                f"Auto-repaired {artifact}: scaffolded {len(missing)} criterion row(s) "
+                f"needing a real test reference (model hadn't linked them after repeated attempts)."
+            )
+            try:
+                with ReadTool._cache_lock:
+                    ReadTool._cache.pop(str(fp), None)
+            except Exception:
+                pass
+            return True
+        except Exception as e:
+            UI.warn(f"Auto-repair of {artifact} failed: {e}")
+            return False
 
     def _phase_requirements_met(self) -> bool:
-        """Primary gate: durable artifacts, schema sections, research, src writes, tests."""
         if not self.autopilot or self.sdlc_phase_idx >= len(SDLC_PHASES):
             return False
         phase = SDLC_PHASES[self.sdlc_phase_idx]
@@ -3811,16 +5024,26 @@ class NeonArchitect:
             artifact = reqs.get("artifact") or getattr(self, "plan_artifact", "PLAN.md")
             ok, n = self._artifact_ok(artifact, int(reqs.get("min_chars", 400)))
             added = self._phase_tool_counts.get("todo_add", 0)
-            # Also accept todos already on the board (session / prior turns)
             board = len(TodoTool._todos) if TodoTool._todos else 0
-            todo_ok = added >= int(reqs.get("min_todos", 5)) or board >= int(reqs.get("min_todos", 5))
+            min_todos = int(reqs.get("min_todos", 5))
+            todo_ok = added >= min_todos or board >= min_todos
             plan_text = self._read_artifact_snippet(artifact, max_chars=50000)
             headers = tuple(h.lower() for h in (reqs.get("require_sections") or PLAN_REQUIRED_HEADERS))
             sections_ok = plan_has_sections(plan_text, headers) if plan_text else False
-            # Long substantive plan (>= 1500 chars) soft-passes missing exact headers
             if ok and n >= 1500 and not sections_ok:
-                sections_ok = True
-                UI.info(f"Plan gate: soft-pass sections ({artifact} {n} chars is substantive)")
+                # Genuine repair attempt: this actually edits the artifact
+                # to add the missing headers, so it's kept. What's removed
+                # is the old fallback that set sections_ok = True even when
+                # repair failed or was skipped — that was an unconditional
+                # silent pass, not a real check. If repair doesn't succeed,
+                # sections_ok stays whatever plan_has_sections actually
+                # found, and the gate is allowed to fail; a stuck phase is
+                # now handled once, by the round circuit-breaker, instead
+                # of being quietly waved through here too.
+                if self._auto_repair_missing_sections(artifact, headers, plan_text):
+                    ok, n = self._artifact_ok(artifact, int(reqs.get("min_chars", 400)))
+                    plan_text = self._read_artifact_snippet(artifact, max_chars=50000)
+                    sections_ok = plan_has_sections(plan_text, headers) if plan_text else False
             research_ok = True
             if reqs.get("require_research") and self.config.get("require_research_for_external", True):
                 if goal_looks_external(self.goal or ""):
@@ -3830,6 +5053,12 @@ class NeonArchitect:
                         or self._phase_tool_counts.get("browse_page", 0) > 0
                         or bool(self.project_state.get("research_notes"))
                     )
+            # NOTE: the two round-count "soft-pass"/"hard soft-pass" blocks
+            # that used to live here (forcing todo_ok/sections_ok True after
+            # 12 or 18 rounds) have been removed for the same reason as
+            # above — they were a second, independent silent-pass mechanism
+            # duplicating what the round circuit-breaker now handles
+            # explicitly (halt autopilot, record a blocker, don't advance).
             met = ok and todo_ok and sections_ok and research_ok
             if met:
                 UI.info(
@@ -3841,19 +5070,20 @@ class NeonArchitect:
             artifact = reqs.get("artifact") or getattr(self, "architecture_artifact", "ARCHITECTURE.md")
             ok, n = self._artifact_ok(artifact, int(reqs.get("min_chars", 300)))
             total = sum(self._phase_tool_counts.get(x, 0) for x in reqs.get("any_tool", ["write", "edit"]))
-            # Count any write of ARCHITECTURE.md even if logged under other phase counters
             if ok and n >= 300:
                 total = max(total, 1)
             arch_text = self._read_artifact_snippet(artifact, max_chars=50000)
             headers = tuple(h.lower() for h in (reqs.get("require_sections") or ARCH_REQUIRED_HEADERS))
             sections_ok = plan_has_sections(arch_text, headers) if arch_text else False
             if ok and n >= 1500 and not sections_ok:
-                sections_ok = True
-                UI.info(f"Architecture gate: soft-pass sections ({n} chars)")
+                # Same principle as the plan gate above: keep the genuine
+                # repair attempt, drop the unconditional force-True that
+                # used to follow it regardless of whether repair worked.
+                if self._auto_repair_missing_sections(artifact, headers, arch_text):
+                    ok, n = self._artifact_ok(artifact, int(reqs.get("min_chars", 300)))
+                    arch_text = self._read_artifact_snippet(artifact, max_chars=50000)
+                    sections_ok = plan_has_sections(arch_text, headers) if arch_text else False
             met = ok and total >= int(reqs.get("min_calls", 2)) and sections_ok
-            # If file is large enough, don't block forever on min_calls from this phase only
-            if ok and n >= 1500 and sections_ok:
-                met = True
             if met:
                 UI.info(f"Gate met: {artifact} ({n}c) + writes={total} + sections → {phase.upper()}")
             return met
@@ -3878,20 +5108,56 @@ class NeonArchitect:
                 UI.info(f"Gate met: {total} tool calls → {phase.upper()}")
             return met
         if kind == "bash_success":
-            if not self._phase_bash_ok:
+            return self._check_tests_pass_gate(phase)
+        if kind == "verification_criteria_complete":
+            # Verification needs two independent things to be true, not
+            # one standing in for the other: (1) tests actually pass
+            # (same check as bash_success), and (2) each acceptance
+            # criterion captured from PLAN.md at the end of planning is
+            # linked, in a structural artifact, to a specific test — not
+            # just re-certified by the model's own prose. Both are
+            # required; passing tests alone no longer means "verified".
+            tests_ok = self._check_tests_pass_gate(phase)
+            if not tests_ok:
                 return False
-            # Optional RED→GREEN: prefer seeing a failure then a pass in testing/verification
-            if self.config.get("tdd_enforce_red_green") and phase in ("testing", "verification"):
-                if self._tdd_saw_red and not self._tdd_saw_green:
-                    UI.info("TDD: saw RED but not GREEN yet — keep fixing until tests pass after a failure.")
+            criteria = self.project_state.get("acceptance_criteria") or []
+            artifact = reqs.get("artifact") or "VERIFICATION.md"
+            if not criteria:
+                # Nothing was captured at the end of planning — either the
+                # plan never had a real Acceptance Criteria list (already
+                # a planning-gate concern, not verification's to re-litigate)
+                # or extraction genuinely found nothing. Don't block
+                # verification forever on a list that will never exist;
+                # but also don't silently treat "nothing to check" as
+                # "everything checked" without at least a passing test run,
+                # which tests_ok above already required.
+                UI.info(
+                    f"Gate met: tests pass, no acceptance criteria were captured from planning "
+                    f"→ {phase.upper()}"
+                )
+                return True
+            ok, n = self._artifact_ok(artifact, min_chars=1)
+            text = self._read_artifact_snippet(artifact, max_chars=50000) if ok else ""
+            rows = parse_verification_rows(text) if text else []
+            covered, missing = match_criteria_to_verification(criteria, rows)
+            if missing:
+                if self._auto_repair_verification_criteria(artifact, missing, criteria, rows):
+                    text = self._read_artifact_snippet(artifact, max_chars=50000)
+                    rows = parse_verification_rows(text) if text else []
+                    covered, missing = match_criteria_to_verification(criteria, rows)
+                if missing:
+                    UI.info(
+                        f"Gate NOT met: {len(missing)}/{len(criteria)} acceptance criteria have no "
+                        f"matching test reference in {artifact}."
+                    )
                     return False
-                # If never saw red, still allow advance on green (legacy suites already passing)
-            UI.info(f"Gate met: test exit 0 → {phase.upper()}")
+            UI.info(
+                f"Gate met: tests pass + {len(covered)}/{len(criteria)} acceptance criteria "
+                f"linked to tests in {artifact} → {phase.upper()}"
+            )
             return True
-        return False
 
     def _should_advance_phase(self, content: str) -> bool:
-        """Secondary prose signal only. NEVER force-advances on turn count."""
         if not self.autopilot:
             return False
         phase = SDLC_PHASES[self.sdlc_phase_idx] if self.sdlc_phase_idx < len(SDLC_PHASES) else ""
@@ -3923,7 +5189,6 @@ class NeonArchitect:
 
     def cmd_compact(self):
         before = self.ctx.estimate_tokens()
-        # Fold critical facts into working memory before shrinking chat
         self._update_working_memory(
             f"compact at phase={SDLC_PHASES[self.sdlc_phase_idx] if self.sdlc_phase_idx < len(SDLC_PHASES) else 'done'}; "
             f"goal={(self.goal or '')[:120]}",
@@ -3965,10 +5230,6 @@ class NeonArchitect:
 
 
     def offer_resume_autopilot(self) -> bool:
-        """If prior session left incomplete autopilot/goal, ask user to resume.
-
-        Returns True if autopilot was started.
-        """
         if self.autopilot:
             return False
         if not self.goal:
@@ -3981,7 +5242,6 @@ class NeonArchitect:
             wants = wants or bool(self.project_state.get("autopilot_active"))
         except Exception:
             pass
-        # Also offer if we have a goal + any completed phase or progress
         if not wants and not self.sdlc_completed and self.sdlc_phase_idx == 0:
             return False
         phase = SDLC_PHASES[self.sdlc_phase_idx]
@@ -4000,7 +5260,6 @@ class NeonArchitect:
         UI.info("Staying interactive. /autopilot when ready, /autopilot restart for a full restart.")
         try:
             self.project_state["autopilot_active"] = False
-            # keep resume flag so next launch can ask again unless user clears goal
             self._sync_project_state()
         except Exception:
             pass
@@ -4016,7 +5275,7 @@ class NeonArchitect:
                 UI.info("No goal set. Use /goal <description> to set one, then /autopilot to start.")
             return
         self.goal = goal_text.strip()
-        self.autopilot = False  # reset autopilot on new goal
+        self.autopilot = False
         self.sdlc_phase_idx = 0
         self.sdlc_completed.clear()
         self._rebuild_system()
@@ -4034,13 +5293,12 @@ class NeonArchitect:
                 UI.info("Recent: " + " → ".join(PERSONAS[p]["name"] for p in self.persona_history))
             return
         if self._switch_persona(persona_key.strip().lower()):
-            pass  # _switch_persona already prints
+            pass
         else:
             available = ", ".join(PERSONAS.keys())
             UI.err(f"Unknown persona '{persona_key}'. Available: {available}")
 
     def cmd_autopilot(self, restart: bool = False):
-        """Start or resume god autopilot. restart=True forces PLANNING from scratch."""
         if self.autopilot:
             UI.info("Autopilot is already running.")
             self._autopilot_status()
@@ -4054,22 +5312,13 @@ class NeonArchitect:
         self.run_turn(self._autopilot_prompt())
 
     def cmd_permission(self, mode: str = "status") -> None:
-        """Permission modes. File access is ALWAYS project-folder only.
-
-        full     — default: unrestricted bash in project, local net, no destructive confirm
-        strict   — bash destructive commands require confirm=true
-        local    — enable localhost browse
-        nolo     — disable localhost browse
-        status   — show flags
-        """
         mode = (mode or "status").strip().lower()
         if mode in ("status", "show", ""):
             UI.separator("PERMISSIONS")
             UI.info("File access: PROJECT FOLDER ONLY (hard limit)")
             UI.info(f"full_access (in-project) = {self.full_access}")
             UI.info(f"allow_local_network = {bool(self.config.get('allow_local_network'))}")
-            bash = self.tools.get("bash")
-            UI.info(f"bash_confirm_destructive = {getattr(bash, 'confirm_destructive', False)}")
+            UI.info("run_tool = structured program+args (no shell string; destructive git ops blocked outright)")
             UI.info(f"git_worktree_on_autopilot = {bool(self.config.get('git_worktree_on_autopilot'))}")
             UI.info(f"tdd_enforce_red_green = {bool(self.config.get('tdd_enforce_red_green'))}")
             UI.info("Commands: /permission full | strict | local | nolo | status")
@@ -4095,7 +5344,7 @@ class NeonArchitect:
                 allow_local=bool(self.config.get("allow_local_network", True)),
                 bash_confirm=True,
             )
-            UI.ok("Strict mode: destructive bash requires confirm=true. Files still project-only.")
+            UI.ok("Strict mode enabled. Files still project-only. (run tool blocks destructive git ops outright; no confirm step exists yet.)")
             return
         if mode == "local":
             self.config["allow_local_network"] = True
@@ -4118,12 +5367,10 @@ class NeonArchitect:
         UI.err(f"Unknown permission mode: {mode}. Use full | strict | local | nolo | status")
 
     def cmd_worktree(self, auto: bool = False) -> None:
-        """Create a git worktree branch for isolated autopilot work (mitigates messy main)."""
         branch = f"neon/{datetime.now().strftime('%Y%m%d-%H%M%S')}"
         path = self.project_dir / ".neon_worktrees" / branch.replace("/", "_")
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            # Ensure git repo
             chk = subprocess.run(
                 ["git", "rev-parse", "--is-inside-work-tree"],
                 cwd=str(self.project_dir), capture_output=True, text=True, timeout=15,
@@ -4150,32 +5397,7 @@ class NeonArchitect:
             UI.warn(f"worktree error: {e}")
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  SECTION 8: CONFIG & SESSION PERSISTENCE
-# ═══════════════════════════════════════════════════════════════════════════════
-
 def load_config() -> Dict[str, Any]:
-    """Load multi-project config. Migrates legacy single-key config.json once.
-
-    Schema:
-      {
-        "version": "...",
-        "projects": {
-          "C:/path/to/proj": {
-            "api_key": "nvapi-...",
-            "default_model": "glm-5.2",
-            "default_persona": "adaptive",
-            "last_goal": "...",
-            "last_sdlc_phase_idx": 0,
-            "last_sdlc_completed": [],
-            ...optional timeout overrides...
-          },
-          ...
-        },
-        "active_project": "C:/path/to/proj",
-        # plus global defaults for fields not overridden per project
-      }
-    """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -4191,12 +5413,10 @@ def load_config() -> Dict[str, Any]:
 
     migrated = False
 
-    # --- Migrate legacy flat config (single api_key at top level) → projects map ---
     if "projects" not in raw or not isinstance(raw.get("projects"), dict):
         raw["projects"] = {}
         migrated = True
 
-    # Old-style: api_key + project_dir at top level
     legacy_key = (raw.get("api_key") or "").strip() if isinstance(raw.get("api_key"), str) else ""
     legacy_proj = raw.get("project_dir") or raw.get("active_project")
     if legacy_key and legacy_proj:
@@ -4214,12 +5434,10 @@ def load_config() -> Dict[str, Any]:
                 migrated = True
         raw["projects"][pkey] = entry
         raw["active_project"] = pkey
-        # Strip legacy top-level secret
         if "api_key" in raw:
             del raw["api_key"]
             migrated = True
 
-    # Also absorb any standalone .key.json files into projects map
     try:
         for kp in SESSIONS_DIR.glob("project_*.key.json"):
             data = _safe_json_load(kp)
@@ -4238,10 +5456,9 @@ def load_config() -> Dict[str, Any]:
     except Exception:
         pass
 
-    # Fill global defaults
     for k, v in DEFAULT_CONFIG.items():
         if k == "api_key":
-            continue  # never keep a global key
+            continue
         if k not in raw:
             raw[k] = v
             migrated = True
@@ -4250,7 +5467,6 @@ def load_config() -> Dict[str, Any]:
     if "projects" not in raw:
         raw["projects"] = {}
 
-    # Enforce hardened thinking-safe globals (overwrite stale / contradictory values)
     _HARDWIRE = {
         "stream_timeout": 420.0,
         "request_timeout": 420.0,
@@ -4261,14 +5477,17 @@ def load_config() -> Dict[str, Any]:
         "retry_max": 8,
         "retry_base_delay": 2.5,
         "max_retries_per_provider": 3,
+        "nim_shared_rpm": 38.0,
         "inter_turn_delay": 0.35,
         "compact_threshold": 0.3,
         "startup_compact_tokens": 60000,
         "max_rounds": 0,
         "max_autopilot_rounds": 0,
-        "max_phase_rounds": 0,
+        "max_phase_rounds": 40,
+        "testing_max_phase_rounds": 25,
+        "max_same_tool_successes": 3,
+        "post_429_backoff": 25.0,
         "rpm_safety": 0.80,
-        # medium (not high) — high causes long NIM first-token buffers / stalls
         "thinking_effort": "off",
         "show_thinking": False,
         "autopilot_thinking": False,
@@ -4287,23 +5506,17 @@ def load_config() -> Dict[str, Any]:
 
 
 def save_config(cfg: Dict[str, Any]):
-    """Write multi-project config. Never leaves a top-level api_key or nested _root."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     out = dict(cfg)
-    # Strip runtime-only / secret / recursive junk
     for k in ("api_key", "_fresh", "_root"):
         out.pop(k, None)
-    # Prefer projects map from root if someone passed a flat runtime cfg by mistake
     if not isinstance(out.get("projects"), dict) or not out["projects"]:
-        # empty projects is ok for brand-new install
         out.setdefault("projects", {})
-    # Never embed last_goal at top-level as the only goal source for all projects
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(out, f, indent=2, ensure_ascii=False)
 
 
 def get_project_entry(cfg: Dict[str, Any], project_dir: Path) -> Dict[str, Any]:
-    """Return the per-project settings dict (mutable view into cfg['projects'])."""
     pkey = str(Path(project_dir).resolve())
     projects = cfg.setdefault("projects", {})
     if pkey not in projects or not isinstance(projects[pkey], dict):
@@ -4312,22 +5525,15 @@ def get_project_entry(cfg: Dict[str, Any], project_dir: Path) -> Dict[str, Any]:
 
 
 def apply_project_to_runtime(cfg: Dict[str, Any], project_dir: Path) -> Dict[str, Any]:
-    """Merge global defaults + this project's entry into a flat runtime config.
-
-    Runtime code still sees cfg['api_key'], cfg['default_model'], etc.
-    """
     pkey = str(Path(project_dir).resolve())
     entry = get_project_entry(cfg, project_dir)
     runtime = dict(DEFAULT_CONFIG)
-    # global non-secret overrides from cfg
     for k, v in cfg.items():
         if k in ("projects", "api_key", "active_project"):
             continue
         runtime[k] = v
-    # project overrides win (except hardwired thinking / stall policy below)
     for k, v in entry.items():
         runtime[k] = v
-    # Thinking + timeout budgets (must match NeonArchitect init)
     normalize_thinking_policy(runtime)
     runtime["http_read_timeout"] = max(180.0, float(runtime.get("http_read_timeout") or 180.0))
     runtime["stream_timeout"] = max(
@@ -4345,7 +5551,6 @@ def apply_project_to_runtime(cfg: Dict[str, Any], project_dir: Path) -> Dict[str
 
 
 def save_project_settings(cfg: Dict[str, Any], project_dir: Path, **fields: Any) -> None:
-    """Update fields for one project and write config.json."""
     entry = get_project_entry(cfg, project_dir)
     for k, v in fields.items():
         if v is None and k in entry:
@@ -4356,14 +5561,6 @@ def save_project_settings(cfg: Dict[str, Any], project_dir: Path, **fields: Any)
 
 
 def ensure_api_key(cfg: Dict[str, Any], project_dir: Optional[Path] = None) -> bool:
-    """First-time setup: ask for NVIDIA API key once per project, then reuse.
-
-    Priority:
-      1. Already saved projects[<path>].api_key
-      2. Legacy .key.json for this path
-      3. Env NVIDIA_API_KEY / NGC_API_KEY / NIM_API_KEY (saved for this project)
-      4. Interactive prompt (first time) → saved under this project
-    """
     project = Path(project_dir or cfg.get("project_dir") or ".").resolve()
     root = cfg.get("_root") if isinstance(cfg.get("_root"), dict) else None
     if not isinstance(root, dict) or "projects" not in root:
@@ -4411,7 +5608,6 @@ def ensure_api_key(cfg: Dict[str, Any], project_dir: Optional[Path] = None) -> b
         cfg["api_key"] = key
         return True
 
-    # First time for this project — ask once
     print()
     print("=" * 56)
     print("  NEON ARCHITECT — first-time setup")
@@ -4437,9 +5633,7 @@ def ensure_api_key(cfg: Dict[str, Any], project_dir: Optional[Path] = None) -> b
     return True
 
 
-
 def save_session(agent: "NeonArchitect", *, also_config: bool = True) -> bool:
-    """Persist full agent state for this project so relaunch restores everything."""
     try:
         SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
         session = {
@@ -4472,7 +5666,6 @@ def save_session(agent: "NeonArchitect", *, also_config: bool = True) -> bool:
             json.dump(session, f, ensure_ascii=False, indent=2)
         tmp.replace(sf)
 
-        # Also keep a rolling history entry
         try:
             with open(HISTORY_FILE, "a", encoding="utf-8") as hf:
                 hf.write(json.dumps({
@@ -4496,7 +5689,6 @@ def save_session(agent: "NeonArchitect", *, also_config: bool = True) -> bool:
             }
             if agent.goal is not None:
                 fields["last_goal"] = agent.goal
-            # preserve existing api_key on the entry
             save_project_settings(root, agent.project_dir, **fields)
             agent.config["_root"] = root
         return True
@@ -4509,93 +5701,125 @@ def save_session(agent: "NeonArchitect", *, also_config: bool = True) -> bool:
 
 
 def load_session(project_dir: Path) -> Optional[Dict[str, Any]]:
-    """Load the latest persisted state for this project directory."""
     data = _safe_json_load(_project_session_path(project_dir))
     if not data:
         return None
-    # Reject ancient incompatible schemas softly
     if int(data.get("state_version", 0)) > STATE_VERSION + 5:
         return None
     return data
 
 
 def apply_session(agent: "NeonArchitect", data: Dict[str, Any]) -> None:
-    """Restore agent fields from a saved session dict."""
-    if not data:
+    if not data or not isinstance(data, dict):
         return
-    # Model
-    mk = data.get("model") or agent.config.get("default_model")
-    if mk and mk in MODELS:
-        agent.model_key = mk
-        agent.model_cfg = MODELS[mk]
-        agent.config["default_model"] = mk
 
-    # Persona
-    pk = data.get("persona") or agent.config.get("default_persona", "adaptive")
-    if pk in PERSONAS:
-        agent.persona_key = pk
-        agent.config["default_persona"] = pk
-    for p in data.get("persona_history") or []:
-        if p in PERSONAS:
-            agent.persona_history.append(p)
+    def _safe_get(d: Dict[str, Any], key: str, default: Any = None) -> Any:
+        try:
+            return d.get(key, default)
+        except Exception:
+            return default
 
-    # Goal + SDLC (do NOT auto-enable autopilot)
-    agent.goal = data.get("goal")
-    agent.sdlc_phase_idx = int(data.get("sdlc_phase_idx") or 0)
-    agent.sdlc_completed = set(data.get("sdlc_completed") or [])
-    agent.autopilot_rounds = int(data.get("autopilot_rounds") or 0)
-    agent.autopilot = False  # never auto-start; prompt via offer_resume_autopilot
-    agent._session_wants_resume = bool(
-        data.get("autopilot") or data.get("autopilot_resume")
-    )
-    agent.round = int(data.get("round") or 0)
-    agent._phase_rounds = 0  # always reset on restore so stuck-timer starts fresh
+    try:
+        mk = _safe_get(data, "model") or agent.config.get("default_model")
+        if mk and mk in MODELS:
+            agent.model_key = mk
+            agent.model_cfg = MODELS[mk]
+            agent.config["default_model"] = mk
+    except Exception as e:
+        UI.warn(f"Session restore (model): {e}")
+
+    try:
+        pk = _safe_get(data, "persona") or agent.config.get("default_persona", "adaptive")
+        if pk in PERSONAS:
+            agent.persona_key = pk
+            agent.config["default_persona"] = pk
+        for p in _safe_get(data, "persona_history") or []:
+            if p in PERSONAS:
+                agent.persona_history.append(p)
+    except Exception as e:
+        UI.warn(f"Session restore (persona): {e}")
+
+    try:
+        agent.goal = _safe_get(data, "goal")
+        agent.sdlc_phase_idx = int(_safe_get(data, "sdlc_phase_idx") or 0)
+        agent.sdlc_completed = set(_safe_get(data, "sdlc_completed") or [])
+        agent.autopilot_rounds = int(_safe_get(data, "autopilot_rounds") or 0)
+        agent.autopilot = False 
+        agent._session_wants_resume = bool(
+            _safe_get(data, "autopilot") or _safe_get(data, "autopilot_resume")
+        )
+        agent.round = int(_safe_get(data, "round") or 0)
+    except Exception as e:
+        UI.warn(f"Session restore (goal/sdlc): {e}")
+
+    agent._phase_rounds = 0
     agent._phase_tool_counts = {}
     agent._phase_bash_ok = False
 
-    # Tokens
-    meter = data.get("meter") or {}
-    agent.meter.prompt = int(meter.get("prompt") or 0)
-    agent.meter.completion = int(meter.get("completion") or 0)
+    try:
+        meter = _safe_get(data, "meter") or {}
+        agent.meter.prompt = int(_safe_get(meter, "prompt") or 0)
+        agent.meter.completion = int(_safe_get(meter, "completion") or 0)
+    except Exception as e:
+        UI.warn(f"Session restore (meter): {e}")
 
-    # Todos
-    todos = data.get("todos")
-    if isinstance(todos, dict):
-        TodoTool._todos = {str(k): v for k, v in todos.items() if isinstance(v, dict)}
-        TodoTool._counter = int(data.get("todo_counter") or len(TodoTool._todos))
+    try:
+        todos = _safe_get(data, "todos")
+        if isinstance(todos, dict):
+            cleaned: Dict[str, Dict[str, Any]] = {}
+            for k, v in todos.items():
+                if not isinstance(v, dict):
+                    continue
+                cleaned[str(k)] = {
+                    "content": str(v.get("content") or v.get("text") or v.get("task") or ""),
+                    "status": str(v.get("status") or v.get("state") or "pending"),
+                }
+            TodoTool._todos = cleaned
+            TodoTool._counter = int(_safe_get(data, "todo_counter") or len(cleaned))
+        elif isinstance(todos, list):
+            cleaned = {}
+            for i, item in enumerate(todos):
+                if isinstance(item, dict):
+                    tid = str(item.get("id") or f"T{i+1:03d}")
+                    cleaned[tid] = {
+                        "content": str(item.get("content") or item.get("text") or ""),
+                        "status": str(item.get("status") or item.get("state") or "pending"),
+                    }
+            TodoTool._todos = cleaned
+            TodoTool._counter = int(_safe_get(data, "todo_counter") or len(cleaned))
+    except Exception as e:
+        UI.warn(f"Session restore (todos): {e}")
+        TodoTool._todos = {}
+        TodoTool._counter = 0
 
-    # Do NOT restore thinking_effort / show_thinking from session — those are
-    # hardwired runtime policy. Old sessions saved "off" and kept killing think mode.
-
-    # Messages (keep system out — rebuilt below)
-    msgs = data.get("messages") or []
-    restored = []
-    for m in msgs:
-        if not isinstance(m, dict):
-            continue
-        role = m.get("role")
-        if role == "system":
-            continue  # rebuilt by _rebuild_system
-        restored.append(m)
-    agent.ctx.messages = restored
-    agent.ctx.compaction_summary = data.get("compaction_summary")
+    try:
+        msgs = _safe_get(data, "messages") or []
+        restored = []
+        for m in msgs:
+            if isinstance(m, dict):
+                role = m.get("role")
+                if role == "system":
+                    continue
+                restored.append(m)
+        agent.ctx.messages = sanitize_messages_for_api(restored)
+        agent.ctx.compaction_summary = _safe_get(data, "compaction_summary")
+    except Exception as e:
+        UI.warn(f"Session restore (messages): {e}")
+        agent.ctx.messages = []
+        agent.ctx.compaction_summary = None
 
     agent._rebuild_system()
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  SECTION 9: MAIN LOOP
-# ═══════════════════════════════════════════════════════════════════════════════
 
 def main():
     parser = argparse.ArgumentParser(description=f"{APP_NAME} v{APP_VERSION}")
     parser.add_argument("--project", "-p", default=None,
                         help="Project directory (default: current working directory)")
-    parser.add_argument("--model", "-m", default=None, help="Model key (glm-5.2, nemotron-ultra, ...)")
+    parser.add_argument("--model", "-m", default=None, help="Model key (glm-5.2, nemotron-3-super-120b-a12b, ...)")
     parser.add_argument("--fresh", action="store_true",
                         help="Start a clean session (do not restore prior goal/messages/todos)")
     parser.add_argument("--full-access", action="store_true",
-                        help="Unrestricted mode: any path, any bash (no destructive confirm), local network browse")
+                        help="Unrestricted mode: local network browse allowed (destructive git ops still blocked in run tool)")
     parser.add_argument("--allow-outside", action="store_true",
                         help="Allow file tools to touch paths outside the project directory")
     parser.add_argument("--allow-local-net", action="store_true",
@@ -4603,28 +5827,24 @@ def main():
     args = parser.parse_args()
 
     root_cfg = load_config()
-    # Claude Code style: project = cwd unless -p is given.
     if args.project:
         project = Path(args.project).resolve()
     else:
         project = Path.cwd().resolve()
 
-    # Merge this project's entry (api_key, model, goal prefs) into flat runtime cfg
     cfg = apply_project_to_runtime(root_cfg, project)
-    cfg["_root"] = root_cfg  # keep handle for multi-project saves
+    cfg["_root"] = root_cfg
     if args.model:
         cfg["default_model"] = args.model
         save_project_settings(root_cfg, project, default_model=args.model)
     if args.fresh:
         cfg["_fresh"] = True
-    # Defaults already: full in-project access, paths locked to project.
     if args.full_access:
         cfg["full_access"] = True
-        cfg["allow_path_outside_project"] = False  # never leave project folder
+        cfg["allow_path_outside_project"] = False
         cfg["allow_local_network"] = True
         cfg["bash_confirm_destructive"] = False
     if args.allow_outside:
-        # Policy: outside paths are not granted even if flag is passed
         UI.warn("--allow-outside ignored: file access is limited to the project folder only.")
         cfg["allow_path_outside_project"] = False
     if args.allow_local_net:
@@ -4632,14 +5852,14 @@ def main():
 
     if not ensure_api_key(cfg, project_dir=project):
         sys.exit(1)
-    # refresh key into runtime after ensure (always from root project entry)
     cfg["api_key"] = (get_project_entry(root_cfg, project).get("api_key") or cfg.get("api_key") or "").strip()
     if not cfg["api_key"]:
         UI.err("No API key after ensure_api_key — set NVIDIA_API_KEY or use /apikey after fixing config.")
         sys.exit(1)
 
     os.system("cls" if os.name == "nt" else "clear")
-    UI.neon_banner()
+    _banner_model = MODELS.get(cfg.get("default_model"), MODELS["glm-5.2"])["name"]
+    UI.neon_banner(_banner_model)
     if HAS_RICH:
         console.print(UI.header(
             MODELS.get(cfg["default_model"], MODELS["glm-5.2"])["name"],
@@ -4655,10 +5875,8 @@ def main():
         UI.err(f"Failed to initialize: {e}")
         sys.exit(1)
 
-    # Survive crashes / abrupt kill where possible
     atexit.register(lambda: save_session(agent, also_config=True))
 
-    # Persist this project's prefs into config.json → projects[<path>]
     try:
         root = agent.config.get("_root") or load_config()
         save_project_settings(
@@ -4668,13 +5886,11 @@ def main():
             default_persona=agent.persona_key,
         )
         agent.config["_root"] = root
-        # Keep runtime flat fields in sync
         agent.config["project_dir"] = str(project)
         agent.config["version"] = APP_VERSION
     except Exception as e:
         UI.warn(f"Could not update config: {e}")
 
-    # Offer to resume autopilot from last session (goal + phase persisted)
     if not cfg.get("_fresh"):
         try:
             if agent.offer_resume_autopilot():
@@ -4689,25 +5905,41 @@ def main():
             UI.warn(f"Resume prompt skipped: {e}")
 
     UI.separator("Ready")
-    # Masked key status — per-project entry in config.json
     _k = (agent.config.get("api_key") or "")
     _nproj = len((agent.config.get("_root") or load_config()).get("projects") or {})
-    if _k:
-        _masked = (_k[:6] + "…" + _k[-4:]) if len(_k) > 12 else "***"
-        UI.info(f"API key (this project): {_masked}")
+    _masked = ("***" + _k[-4:]) if len(_k) > 8 else ("***" if _k else None)
+    if HAS_RICH:
+        summary = Table.grid(padding=(0, 2))
+        summary.add_column(style="cc_muted", justify="right")
+        summary.add_column(style="cc_body")
+        summary.add_row("API key", (f"{_masked}  ({_nproj} project{'s' if _nproj != 1 else ''} configured)"
+                                      if _masked else "[cc_warn]not set — use /apikey[/cc_warn]"))
+        summary.add_row("Timeouts", f"first-token {agent.config.get('first_token_timeout', 60):.0f}s"
+                                     f"  ·  retries {agent.config.get('retry_max', 2)}"
+                                     f"  ·  thinking {agent.config.get('thinking_effort', 'off')}")
+        summary.add_row("Personas", "architect · designer · engineer · tester · debugger · reviewer · devops")
+        console.print(Padding(summary, (0, 2)))
+        console.print()
+        tip = Text()
+        tip.append("  Type a request, or press ", style="cc_muted")
+        tip.append("Enter", style="cc_fg")
+        tip.append(" to continue the last task.  ", style="cc_muted")
+        tip.append("/help", style="cc_primary")
+        tip.append(" for commands  ·  ", style="cc_muted")
+        tip.append("/goal", style="cc_primary")
+        tip.append(" + ", style="cc_muted")
+        tip.append("/autopilot", style="cc_primary")
+        tip.append(" for full SDLC autopilot", style="cc_muted")
+        console.print(tip)
+        console.print()
     else:
-        UI.warn("No API key for this project — set with /apikey")
-    UI.info(f"Config: {CONFIG_FILE}  ·  {_nproj} project entr{'y' if _nproj == 1 else 'ies'}")
-    UI.info("Type your request. Empty Enter = proceed.")
-    UI.info("Commands: /new /apikey /files /cost /clear /reset /compact /model /todo /goal /persona /autopilot /status /stop /permission /worktree /exit")
-    UI.info(
-        f"First token: {agent.config.get('first_token_timeout', 5)}s | "
-        f"Retries: {agent.config.get('retry_max', 2)} | "
-        f"Thinking: {agent.config.get('thinking_effort', 'off')} | "
-        f"HTTP read: {agent.config.get('http_read_timeout', 60)}s"
-    )
-    UI.info("Personas: architect, designer, engineer, tester, debugger, reviewer, devops (or adaptive)")
-    UI.info("GOD MODE: /goal <desc> → /autopilot → full SDLC with TDD until goal reached")
+        if _masked:
+            print(f"API key: {_masked}  ({_nproj} project(s) configured)")
+        else:
+            print("No API key for this project — set with /apikey")
+        print(f"Timeouts: first-token {agent.config.get('first_token_timeout', 60):.0f}s, "
+              f"retries {agent.config.get('retry_max', 2)}, thinking {agent.config.get('thinking_effort', 'off')}")
+        print("Type a request, or press Enter to continue the last task. /help for commands.")
 
     while True:
         try:
@@ -4731,6 +5963,49 @@ def main():
             agent._rebuild_system()
             agent.persist(force=True)
             UI.ok("Context cleared (goal/model/todos kept). State saved.")
+            continue
+        if raw == "/help" or raw == "/?":
+            if HAS_RICH:
+                groups = [
+                    ("Session", [
+                        ("/new", "clean session (keeps API key & model)"),
+                        ("/reset", "wipe goal, SDLC, todos, conversation"),
+                        ("/clear", "wipe conversation only"),
+                        ("/exit", "quit"),
+                    ]),
+                    ("Autopilot", [
+                        ("/goal <desc>", "set the objective"),
+                        ("/autopilot", "run full SDLC until goal reached"),
+                        ("/status", "show autopilot progress"),
+                        ("/stop", "halt autopilot"),
+                        ("/todo", "show task tracker"),
+                    ]),
+                    ("Model & context", [
+                        ("/model <name>", "switch model"),
+                        ("/persona <name>", "switch persona"),
+                        ("/compact", "force context compaction"),
+                        ("/cost", "token usage stats"),
+                    ]),
+                    ("Project", [
+                        ("/files", "show project file tree"),
+                        ("/apikey <key>", "set API key for this project"),
+                        ("/permission", "review file/bash permissions"),
+                        ("/worktree", "git worktree status"),
+                    ]),
+                ]
+                for title, rows in groups:
+                    console.print(Text(f"  {title}", style="cc_muted"))
+                    t = Table.grid(padding=(0, 2))
+                    t.add_column(style="cc_primary")
+                    t.add_column(style="cc_body")
+                    for cmd, desc in rows:
+                        t.add_row(f"    {cmd}", desc)
+                    console.print(t)
+                console.print(Text("  Empty Enter continues the last task.", style="cc_subtle"))
+                console.print()
+            else:
+                print("Commands: /new /reset /clear /exit /goal /autopilot /status /stop /todo "
+                      "/model /persona /compact /cost /files /apikey /permission /worktree")
             continue
         if raw == "/files":
             agent.cmd_files()
@@ -4787,7 +6062,7 @@ def main():
                 UI.info(f"Config:  {CONFIG_FILE}")
                 k = (entry.get("api_key") or agent.config.get("api_key") or "")
                 if k:
-                    UI.info(f"Current key: {k[:6]}…{k[-4:] if len(k)>12 else '***'}")
+                    UI.info(f"Current key: {'***' + k[-4:] if len(k) > 8 else '***'}")
                 else:
                     UI.warn("No API key set for this project.")
                 UI.info(f"Projects in config: {len(root.get('projects') or {})}")
@@ -4813,7 +6088,6 @@ def main():
                 UI.err(f"Key saved but pool rebuild failed: {e}")
             continue
         if raw == "/new":
-            # Clean session for THIS project only — keeps API key & model
             agent.ctx.clear()
             agent.goal = None
             agent.autopilot = False
@@ -4834,14 +6108,13 @@ def main():
             agent.config.pop("last_sdlc_phase_idx", None)
             agent.config.pop("last_sdlc_completed", None)
             agent._rebuild_system()
-            # Overwrite session file with empty state so next launch stays clean
             agent.persist(force=True)
             UI.ok("New session for this project. Goal/todos/history cleared. API key & model kept.")
             try:
-                self.project_state["autopilot_active"] = False
-                self.project_state["autopilot_resume"] = False
-                self._session_wants_resume = False
-                self._sync_project_state()
+                agent.project_state["autopilot_active"] = False
+                agent.project_state["autopilot_resume"] = False
+                agent._session_wants_resume = False
+                agent._sync_project_state()
             except Exception:
                 pass
             UI.info(f"Project: {agent.project_dir}")
@@ -4870,7 +6143,7 @@ def main():
             UI.ok("Full reset: goal, SDLC, todos, conversation wiped. Model/persona kept.")
             continue
         if raw.startswith("/"):
-            UI.warn(f"Unknown command: {raw}. Try /new /apikey /exit /clear /reset /files /cost /compact /model /todo /goal /persona /autopilot /status /stop")
+            UI.warn(f"Unknown command: {raw}. Type /help to see available commands.")
             continue
 
         try:
