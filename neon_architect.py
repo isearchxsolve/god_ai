@@ -125,7 +125,7 @@ if LEGACY_WIN_CONSOLE:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 APP_NAME = "NEON ARCHITECT"
-APP_VERSION = "4.3.8"
+APP_VERSION = "4.5.0"
 APP_TAGLINE = "GLM-5.2 · NVIDIA NIM · Zero Bottlenecks · Self-Healing"
 
 CONFIG_DIR = Path.home() / ".neon_architect"
@@ -198,7 +198,7 @@ MODELS: Dict[str, Dict[str, Any]] = {
         "max_tokens": 8192,
         "ctx_window": 131072,
         # thinking ON — max server-side reasoning (effort=high)
-        "thinking": True,
+        "thinking": False,
         "extra_body": None,
     },
     "glm-5.2-fp8": {
@@ -208,7 +208,7 @@ MODELS: Dict[str, Dict[str, Any]] = {
         "rpm": 40,
         "max_tokens": 8192,
         "ctx_window": 131072,
-        "thinking": True,
+        "thinking": False,
         "extra_body": None,
     },
     "nemotron-ultra": {
@@ -218,7 +218,7 @@ MODELS: Dict[str, Dict[str, Any]] = {
         "rpm": 20,
         "max_tokens": 32768,
         "ctx_window": 131072,
-        "thinking": True,
+        "thinking": False,
         "extra_body": None,
     },
     "nemotron-4-340b": {
@@ -228,7 +228,7 @@ MODELS: Dict[str, Dict[str, Any]] = {
         "rpm": 20,
         "max_tokens": 32768,
         "ctx_window": 131072,
-        "thinking": True,
+        "thinking": False,
         "extra_body": None,
     },
     "llama-3.1-405b": {
@@ -238,7 +238,7 @@ MODELS: Dict[str, Dict[str, Any]] = {
         "rpm": 20,
         "max_tokens": 32768,
         "ctx_window": 131072,
-        "thinking": True,
+        "thinking": False,
         "extra_body": None,
     },
     "nemotron-3-super-120b-a12b": {
@@ -248,7 +248,7 @@ MODELS: Dict[str, Dict[str, Any]] = {
         "rpm": 20,
         "max_tokens": 32768,
         "ctx_window": 131072,
-        "thinking": True,
+        "thinking": False,
         "extra_body": None,
     },
 }
@@ -274,17 +274,17 @@ DEFAULT_CONFIG = {
     "stream_timeout": 420.0,
     "request_timeout": 420.0,
     "rpm_safety": 0.80,
-    "show_thinking": True,
+    "show_thinking": False,
     "theme": "neon",
     "retry_max": 8,
     "retry_base_delay": 2.5,
     "enable_openrouter": True,
     "stream_content_timeout": 200.0,
-    "first_token_timeout": 120.0,
+    "first_token_timeout": 60.0,
     "http_read_timeout": 180.0,
     "http_connect_timeout": 15.0,
     "max_retries_per_provider": 3,
-    "thinking_effort": "medium",
+    "thinking_effort": "off",
     "inter_turn_delay": 0.35,
     # 0 = unlimited autopilot; stop on gates or /stop only.
     "max_autopilot_rounds": 0,
@@ -554,17 +554,20 @@ else:
     console = None
 
 
-# Whimsical Claude Code thinking verbs (subset)
+# Whimsical Claude Code thinking verbs (expanded set)
 _CC_VERBS = [
     "Thinking", "Cooking", "Percolating", "Ruminating", "Cogitating",
     "Ideating", "Kneading", "Sautéing", "Pondering", "Brewing",
     "Noodling", "Whirring", "Mulling", "Spinning", "Crunching",
+    "Synthesizing", "Harmonizing", "Channeling", "Orchestrating",
+    "Conjuring", "Distilling", "Weaving", "Sculpting", "Composing",
 ]
 _CC_SPINNER = ["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"]
+_CC_THINK_IDX = 0
 
 
 class UI:
-    """Claude Code–style terminal UI: terracotta accent, hot-pink tools, large readable type."""
+    """Claude Code–style terminal UI: terracotta accent, hot-pink tools, dashed frames."""
 
     @staticmethod
     def esc(text: str) -> str:
@@ -588,7 +591,7 @@ class UI:
     def turn_indicator(round_num: int, tokens: int, status: str = "") -> "RenderableType":
         """Large, clear turn marker — high contrast, easy to spot while scrolling."""
         if not HAS_RICH:
-            return f"── TURN {round_num:03d}  ·  {tokens:,} tok  {status} ──"
+            return f"● TURN {round_num:03d}  ·  {tokens:,} tok  {status}"
         t = Text()
         t.append("● ", style="cc_primary_bold")
         t.append(f"TURN {round_num:03d}", style="cc_primary_bold")
@@ -601,20 +604,30 @@ class UI:
 
     @staticmethod
     def user_message(text: str) -> "RenderableType":
-        """User prompt — Claude Code dashed ASCII frame, large > prefix."""
-        if not HAS_RICH:
-            return f"\n> {text}\n"
-        # Wide dashed border for visibility
-        width = min(max(len(text) + 6, 40), 72)
+        """User prompt — Claude Code dashed ASCII frame with > prefix."""
+        text = text or ""
+        lines = text.splitlines() or [""]
+        width = 72
         dash = "- " * (width // 2)
-        dash = dash[:width]
+        dash = dash[:width].rstrip()
+        if not HAS_RICH:
+            out = [dash, f"|  > {lines[0]}"]
+            for ln in lines[1:]:
+                out.append(f"|    {ln}")
+            out.append("|")
+            out.append(dash)
+            return "\n".join(out)
         body = Text()
         body.append(dash + "\n", style="cc_muted")
         body.append("|  ", style="cc_muted")
         body.append("> ", style="cc_prompt")
-        body.append(UI.esc(text), style="cc_user")
-        body.append("\n", style="cc_user")
-        body.append("|  ", style="cc_muted")
+        body.append(UI.esc(lines[0]), style="cc_user")
+        body.append("\n")
+        for ln in lines[1:]:
+            body.append("|    ", style="cc_muted")
+            body.append(UI.esc(ln), style="cc_user")
+            body.append("\n")
+        body.append("|", style="cc_muted")
         body.append("\n" + dash, style="cc_muted")
         return body
 
@@ -623,16 +636,40 @@ class UI:
         return Text("", style="cc_body") if HAS_RICH else Text("")  # type: ignore
 
     @staticmethod
-    def thinking_block(text: str) -> "RenderableType":
+    def thinking_block(text: str = "") -> "RenderableType":
         """Claude Code–style thinking: brief verb only (no reasoning dump)."""
+        global _CC_THINK_IDX
+        verb = _CC_VERBS[_CC_THINK_IDX % len(_CC_VERBS)]
+        glyph = _CC_SPINNER[_CC_THINK_IDX % len(_CC_SPINNER)]
+        _CC_THINK_IDX += 1
         if not HAS_RICH:
-            return f"  · {random.choice(_CC_VERBS)}…"
-        verb = random.choice(_CC_VERBS)
-        glyph = random.choice(_CC_SPINNER)
+            return f"  {glyph} {verb}…"
         t = Text()
         t.append(f"  {glyph} ", style="cc_thinking")
         t.append(f"{verb}…", style="cc_thinking")
         return t
+
+    @staticmethod
+    def thinking_live(elapsed: float = 0.0) -> None:
+        """In-place thinking spinner (Claude Code style) while waiting for tokens."""
+        global _CC_THINK_IDX
+        verb = _CC_VERBS[_CC_THINK_IDX % len(_CC_VERBS)]
+        glyph = _CC_SPINNER[_CC_THINK_IDX % len(_CC_SPINNER)]
+        _CC_THINK_IDX += 1
+        msg = f"  {glyph} {verb}…"
+        if elapsed >= 8:
+            msg += f"  ({int(elapsed)}s)"
+        if HAS_RICH:
+            console.print(f"[cc_thinking]{msg}[/cc_thinking]", end="\r")
+        else:
+            print(msg, end="\r", flush=True)
+
+    @staticmethod
+    def clear_live_line() -> None:
+        if HAS_RICH:
+            console.print(" " * 60, end="\r")
+        else:
+            print(" " * 60, end="\r", flush=True)
 
     @staticmethod
     def tool_call(name: str, args_preview: str) -> "RenderableType":
@@ -641,25 +678,27 @@ class UI:
             "read": "Read", "write": "Write", "edit": "Edit", "bash": "Bash",
             "search": "Search", "glob": "Glob", "ls": "List", "todo": "Todo",
             "web_search": "WebSearch", "browse_page": "Browse", "task": "Task",
-        }.get(name, str(name))
+            "modules": "Modules",
+        }.get(name, str(name).replace("_", " ").title().replace(" ", ""))
         if not HAS_RICH:
-            return f"  ⏺ {label}  {args_preview}"
+            return f"  ⏺ {label}" + (f"  {args_preview}" if args_preview else "")
         t = Text()
         t.append("  ⏺ ", style="cc_tool")
         t.append(label, style="cc_tool")
         if args_preview:
             t.append("  ", style="cc_tool")
-            ap = args_preview if len(args_preview) < 80 else args_preview[:77] + "…"
+            ap = args_preview if len(args_preview) < 90 else args_preview[:87] + "…"
             t.append(UI.esc(ap), style="cc_muted")
         return t
 
     @staticmethod
     def tool_result(name: str, output: str, is_error: bool = False) -> "RenderableType":
-        """Tool result body under hot-pink gutter — larger, clearer."""
+        """Tool result body under hot-pink gutter — Claude Code │ / └─."""
         lines = (output or "").splitlines() or [""]
-        if len(lines) > 24:
-            shown = lines[:24]
-            shown.append(f"… [{len(lines) - 24} more lines]")
+        max_show = 20
+        if len(lines) > max_show:
+            shown = lines[:max_show]
+            shown.append(f"… [{len(lines) - max_show} more lines]")
         else:
             shown = lines
         if not HAS_RICH:
@@ -671,11 +710,28 @@ class UI:
         for ln in shown:
             row = Text()
             row.append("  │ ", style=border)
-            row.append(UI.esc(ln), style=style)
+            row.append(UI.esc(ln[:200]), style=style)
             parts.append(row)
-        end = Text("  └─", style=border)
-        parts.append(end)
+        parts.append(Text("  └─", style=border))
         return Group(*parts) if parts else Text("")
+
+    @staticmethod
+    def permission_prompt(action: str, detail: str = "") -> "RenderableType":
+        """Claude Code–style permission card (lavender)."""
+        if not HAS_RICH:
+            return f"\n  [Permission] {action}\n  {detail}\n  Allow? (y/n)\n"
+        body = Text()
+        body.append("  ╭─ Permission ─────────────────────────\n", style="cc_permission")
+        body.append("  │ ", style="cc_permission")
+        body.append(UI.esc(action), style="cc_fg")
+        body.append("\n")
+        if detail:
+            body.append("  │ ", style="cc_permission")
+            body.append(UI.esc(detail[:120]), style="cc_muted")
+            body.append("\n")
+        body.append("  │ Allow this action? [y/n]\n", style="cc_permission")
+        body.append("  ╰──────────────────────────────────────", style="cc_permission")
+        return body
 
     @staticmethod
     def file_tree(root: Path, cwd: Path) -> "RenderableType":
@@ -704,19 +760,30 @@ class UI:
 
     @staticmethod
     def file_diff(path: str, old: str, new: str) -> "RenderableType":
+        """Inline unified diff with Claude Code gutter colors."""
         if not HAS_RICH:
             return f"--- {path}\n+++ {path}\n"
         t = Text()
-        t.append(f"  ┌─ Edit: {path}\n", style="cc_tool")
+        t.append(f"  ⏺ Edit  ", style="cc_tool")
+        t.append(UI.esc(path) + "\n", style="cc_muted")
+        n = 0
         for line in difflib.unified_diff(
-            (old or "").splitlines(), (new or "").splitlines(), lineterm=""
+            (old or "").splitlines(), (new or "").splitlines(), lineterm="",
+            n=3,
         ):
-            if line.startswith("+") and not line.startswith("+++"):
+            if line.startswith("+++") or line.startswith("---") or line.startswith("@@"):
+                t.append("  │ " + line + "\n", style="cc_subtle")
+            elif line.startswith("+"):
                 t.append("  │ " + line + "\n", style="cc_success")
-            elif line.startswith("-") and not line.startswith("---"):
+                n += 1
+            elif line.startswith("-"):
                 t.append("  │ " + line + "\n", style="cc_error")
+                n += 1
             else:
                 t.append("  │ " + line + "\n", style="cc_muted")
+            if n > 40:
+                t.append("  │ …\n", style="cc_muted")
+                break
         t.append("  └─", style="cc_tool")
         return t
 
@@ -725,28 +792,28 @@ class UI:
         if HAS_RICH:
             console.print(Text.assemble(("  ✓ ", "cc_success"), (msg, "cc_body")))
         else:
-            print(f"  + {msg}")
+            print(f"  ✓ {msg}")
 
     @staticmethod
     def warn(msg: str):
         if HAS_RICH:
             console.print(Text.assemble(("  ⚠ ", "cc_warn"), (msg, "cc_body")))
         else:
-            print(f"  ! {msg}")
+            print(f"  ⚠ {msg}")
 
     @staticmethod
     def err(msg: str):
         if HAS_RICH:
             console.print(Text.assemble(("  ✗ ", "cc_error"), (msg, "cc_fg")))
         else:
-            print(f"  x {msg}")
+            print(f"  ✗ {msg}")
 
     @staticmethod
     def info(msg: str):
         if HAS_RICH:
             console.print(Text.assemble(("  · ", "cc_primary"), (msg, "cc_body")))
         else:
-            print(f"  * {msg}")
+            print(f"  · {msg}")
 
     @staticmethod
     def separator(title: str = ""):
@@ -756,11 +823,10 @@ class UI:
             else:
                 console.print(Text("  " + "─" * 48, style="cc_subtle"))
         else:
-            print(f"--- {title} ---" if title else "-" * 40)
+            print(f"── {title} ──" if title else "─" * 40)
 
     @staticmethod
     def status_bar(model: str, tokens: int, phase: str = "") -> "RenderableType":
-        """Bottom-style status — large enough to read at a glance."""
         if not HAS_RICH:
             return f"{model}  ·  {tokens:,} tok  ·  {phase}"
         t = Text()
@@ -775,7 +841,7 @@ class UI:
 
     @staticmethod
     def neon_banner():
-        """Startup banner — Claude Code minimal (no heavy cyberpunk boxes)."""
+        """Startup — Claude Code minimal chrome."""
         if not HAS_RICH:
             print(f"{APP_NAME} v{APP_VERSION}")
             print("Claude Code–style interface  ·  NVIDIA NIM")
@@ -1054,7 +1120,7 @@ def build_pool(config: Dict[str, Any]) -> ProviderPool:
                     "rpm": 15,
                     "max_tokens": 8192,
                     "ctx_window": 131072,
-                    "thinking": True,
+                    "thinking": False,
                     "extra_body": None,
                 }
                 providers.append(Provider(
@@ -2168,6 +2234,9 @@ def _default_project_state() -> Dict[str, Any]:
         "goal": None,
         "phase": "planning",
         "completed_phases": [],
+        "autopilot_active": False,
+        "autopilot_resume": False,
+        "sdlc_phase_idx": 0,
         "stack": [],
         "entrypoints": [],
         "test_command": None,
@@ -2285,6 +2354,7 @@ class NeonArchitect:
         self.persona_history: deque[str] = deque(maxlen=10)
         # Autopilot / SDLC state
         self.autopilot = False
+        self._session_wants_resume = False
         self.sdlc_phase_idx = 0
         self.sdlc_completed: set[str] = set()
         self.autopilot_rounds = 0
@@ -2345,17 +2415,18 @@ class NeonArchitect:
 
         # Thinking policy: prefer config/defaults (medium) to reduce NIM first-token stalls.
         # Do not force "high" — that was causing 90s buffer timeouts.
-        # Always prefer medium unless user explicitly set off/low in this session
-        effort = str(self.config.get("thinking_effort") or "medium").lower()
-        if effort == "high":
-            effort = "medium"  # high → too many NIM first-token timeouts
-        if effort not in ("off", "low", "medium"):
-            effort = "medium"
+        # Default OFF: NIM GLM with enable_thinking buffers full reasoning before first token
+        effort = str(self.config.get("thinking_effort") or "off").lower()
+        if effort in ("high", "medium"):
+            # keep only low if user insists; medium/high stall too often on NIM
+            effort = "off"
+        if effort not in ("off", "low"):
+            effort = "off"
         self.config["thinking_effort"] = effort
-        self.config["show_thinking"] = bool(self.config.get("show_thinking", True))
+        self.config["show_thinking"] = bool(self.config.get("show_thinking", False))
         self.config["autopilot_thinking"] = False
         self.config["first_token_timeout"] = max(
-            120.0, float(self.config.get("first_token_timeout") or 120.0)
+            60.0, float(self.config.get("first_token_timeout") or 60.0)
         )
 
         UI.separator()
@@ -2468,6 +2539,11 @@ class NeonArchitect:
             st["goal"] = self.goal
             st["phase"] = SDLC_PHASES[self.sdlc_phase_idx] if self.sdlc_phase_idx < len(SDLC_PHASES) else "complete"
             st["completed_phases"] = sorted(self.sdlc_completed)
+            st["sdlc_phase_idx"] = int(self.sdlc_phase_idx)
+            st["autopilot_active"] = bool(self.autopilot)
+            # Keep resume flag sticky until goal fully complete or user restarts
+            if self.autopilot:
+                st["autopilot_resume"] = True
             st["open_todos"] = [
                 {"id": tid, **todo} for tid, todo in list(TodoTool._todos.items())[:40]
             ]
@@ -2495,6 +2571,12 @@ class NeonArchitect:
             if self.autopilot:
                 UI.ok("Autopilot stopping: full SDLC cycle done. Review output or /autopilot to continue.")
                 self.autopilot = False
+            try:
+                self.project_state["autopilot_active"] = False
+                self.project_state["autopilot_resume"] = False
+                self._sync_project_state()
+            except Exception:
+                pass
             return False
         next_phase = SDLC_PHASES[self.sdlc_phase_idx]
         next_persona = SDLC_PERSONA_MAP.get(next_phase, "adaptive")
@@ -2518,6 +2600,12 @@ class NeonArchitect:
             UI.err("No goal set. Use /goal <description> first.")
             return False
         self.autopilot = True
+        try:
+            self.project_state["autopilot_active"] = True
+            self.project_state["autopilot_resume"] = True
+            self._sync_project_state()
+        except Exception:
+            pass
         if restart or self.sdlc_phase_idx >= len(SDLC_PHASES):
             self.sdlc_phase_idx = 0
             self.sdlc_completed.clear()
@@ -2560,10 +2648,17 @@ class NeonArchitect:
             return
         self.autopilot = False
         phase = SDLC_PHASES[self.sdlc_phase_idx] if self.sdlc_phase_idx < len(SDLC_PHASES) else "COMPLETE"
+        try:
+            self.project_state["autopilot_active"] = False
+            # Still offer resume next launch if goal not finished
+            self.project_state["autopilot_resume"] = self.sdlc_phase_idx < len(SDLC_PHASES) and bool(self.goal)
+            self._sync_project_state()
+        except Exception:
+            pass
         UI.separator("AUTOPILOT HALTED")
         UI.info(f"Stopped at phase: {phase.upper()}")
         UI.info(f"Completed: {', '.join(self.sdlc_completed) if self.sdlc_completed else 'none'}")
-        UI.info("Type /autopilot to resume from current phase.")
+        UI.info("Type /autopilot to resume from current phase (also offered on next launch).")
         self.persist(force=True)
 
     def _autopilot_status(self):
@@ -2876,13 +2971,18 @@ class NeonArchitect:
                         f"(thinking_effort={self.config.get('thinking_effort')}). Retrying."
                     )
 
-                # Heartbeat every 15s after 20s
-                if elapsed > 20 and int(elapsed) - last_heartbeat >= 15:
+                # Claude Code–style thinking spinner while waiting for first token
+                if not saw_any_token and elapsed >= 1.5 and int(elapsed) - last_heartbeat >= 1:
                     last_heartbeat = int(elapsed)
-                    phase = "thinking" if in_think else "streaming"
-                    msg = f"  * {phase}... ({elapsed:.0f}s)"
+                    try:
+                        UI.thinking_live(elapsed)
+                    except Exception:
+                        pass
+                elif saw_any_token and elapsed > 20 and int(elapsed) - last_heartbeat >= 15:
+                    last_heartbeat = int(elapsed)
+                    msg = f"  · streaming... ({elapsed:.0f}s)"
                     if HAS_RICH:
-                        console.print(f"  [neon_dim]{msg}[/neon_dim]", end="\r")
+                        console.print(f"  [cc_muted]{msg}[/cc_muted]", end="\r")
                     else:
                         print(msg, end="\r", flush=True)
 
@@ -2923,6 +3023,10 @@ class NeonArchitect:
                 if hasattr(delta, "reasoning_content") and delta.reasoning_content:
                     has_content = True
                     saw_any_token = True
+                    try:
+                        UI.clear_live_line()
+                    except Exception:
+                        pass
                     if not in_think:
                         print(" " * 70, end="\r")
                         if self.config.get("show_thinking", True):
@@ -3040,25 +3144,21 @@ class NeonArchitect:
         # before the first SSE token — that was the remaining 5–8s interactive lag.
         effort = str(self.config.get("thinking_effort") or "off").lower()
         payload = dict(payload)
-        if effort in ("low", "medium", "high") and (
-            self.model_cfg.get("thinking") or self.config.get("autopilot_thinking")
-        ):
+        if effort == "low":
+            # only explicit low keeps thinking; medium/high forced off above
             extra = dict(payload.get("extra_body") or {})
             ctk = dict(extra.get("chat_template_kwargs") or {})
             ctk["enable_thinking"] = True
-            ctk["thinking_effort"] = effort
+            ctk["thinking_effort"] = "low"
             extra["chat_template_kwargs"] = ctk
             payload["extra_body"] = extra
         else:
-            # Explicitly strip any thinking kwargs inherited from model defaults
+            # Explicitly DISABLE thinking — critical for NIM first-token latency
             extra = dict(payload.get("extra_body") or {})
-            if "chat_template_kwargs" in extra:
-                ctk = dict(extra["chat_template_kwargs"])
-                ctk["enable_thinking"] = False
-                extra["chat_template_kwargs"] = ctk
-                payload["extra_body"] = extra
-            elif not extra:
-                payload.pop("extra_body", None)
+            ctk = dict(extra.get("chat_template_kwargs") or {})
+            ctk["enable_thinking"] = False
+            extra["chat_template_kwargs"] = ctk
+            payload["extra_body"] = extra
 
         while total_attempts < max_total_attempts:
             provider = self.pool.next_available()
@@ -3749,6 +3849,49 @@ class NeonArchitect:
         else:
             print(result.text())
 
+
+    def offer_resume_autopilot(self) -> bool:
+        """If prior session left incomplete autopilot/goal, ask user to resume.
+
+        Returns True if autopilot was started.
+        """
+        if self.autopilot:
+            return False
+        if not self.goal:
+            return False
+        if self.sdlc_phase_idx >= len(SDLC_PHASES):
+            return False
+        wants = bool(getattr(self, "_session_wants_resume", False))
+        try:
+            wants = wants or bool(self.project_state.get("autopilot_resume"))
+            wants = wants or bool(self.project_state.get("autopilot_active"))
+        except Exception:
+            pass
+        # Also offer if we have a goal + any completed phase or progress
+        if not wants and not self.sdlc_completed and self.sdlc_phase_idx == 0:
+            return False
+        phase = SDLC_PHASES[self.sdlc_phase_idx]
+        UI.separator("RESUME AUTOPILOT?")
+        UI.info(f"Goal: {self.goal}")
+        UI.info(f"Last phase: {phase.upper()} | completed: {', '.join(sorted(self.sdlc_completed)) or 'none'}")
+        UI.info("Press Enter or y to resume autopilot from this phase.")
+        UI.info("Type n to stay in interactive mode (goal kept).")
+        try:
+            ans = input("  Resume autopilot? [Y/n]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            ans = "n"
+        if ans in ("", "y", "yes"):
+            return bool(self._start_autopilot(restart=False))
+        UI.info("Staying interactive. /autopilot when ready, /autopilot restart for a full restart.")
+        try:
+            self.project_state["autopilot_active"] = False
+            # keep resume flag so next launch can ask again unless user clears goal
+            self._sync_project_state()
+        except Exception:
+            pass
+        return False
+
     def cmd_goal(self, goal_text: str = ""):
         if not goal_text.strip():
             if self.goal:
@@ -3998,7 +4141,7 @@ def load_config() -> Dict[str, Any]:
         "stream_timeout": 420.0,
         "request_timeout": 420.0,
         "stream_content_timeout": 200.0,
-        "first_token_timeout": 120.0,
+        "first_token_timeout": 60.0,
         "http_read_timeout": 180.0,
         "http_connect_timeout": 15.0,
         "retry_max": 8,
@@ -4012,8 +4155,8 @@ def load_config() -> Dict[str, Any]:
         "max_phase_rounds": 0,
         "rpm_safety": 0.80,
         # medium (not high) — high causes long NIM first-token buffers / stalls
-        "thinking_effort": "medium",
-        "show_thinking": True,
+        "thinking_effort": "off",
+        "show_thinking": False,
         "autopilot_thinking": False,
     }
     for _k, _v in _HARDWIRE.items():
@@ -4071,13 +4214,13 @@ def apply_project_to_runtime(cfg: Dict[str, Any], project_dir: Path) -> Dict[str
     for k, v in entry.items():
         runtime[k] = v
     # Thinking: honor DEFAULT_CONFIG / project entry (do not force high — causes NIM stalls)
-    effort = str(runtime.get("thinking_effort") or DEFAULT_CONFIG.get("thinking_effort") or "medium").lower()
-    if effort == "high":
-        effort = "medium"
-    if effort not in ("off", "low", "medium"):
-        effort = "medium"
+    effort = str(runtime.get("thinking_effort") or DEFAULT_CONFIG.get("thinking_effort") or "off").lower()
+    if effort in ("high", "medium"):
+        effort = "off"
+    if effort not in ("off", "low"):
+        effort = "off"
     runtime["thinking_effort"] = effort
-    runtime["show_thinking"] = bool(runtime.get("show_thinking", True))
+    runtime["show_thinking"] = False
     runtime["autopilot_thinking"] = False
     runtime["first_token_timeout"] = max(90.0, float(runtime.get("first_token_timeout") or DEFAULT_CONFIG.get("first_token_timeout") or 120.0))
     runtime["stream_content_timeout"] = max(150.0, float(runtime.get("stream_content_timeout") or DEFAULT_CONFIG.get("stream_content_timeout") or 200.0))
@@ -4196,7 +4339,11 @@ def save_session(agent: "NeonArchitect", *, also_config: bool = True) -> bool:
             "persona": agent.persona_key,
             "persona_history": list(agent.persona_history),
             "goal": agent.goal,
-            "autopilot": False,  # never auto-resume god mode (safety)
+            "autopilot": bool(agent.autopilot),
+            "autopilot_resume": bool(
+                agent.autopilot
+                or (agent.goal and agent.sdlc_phase_idx < len(SDLC_PHASES))
+            ),
             "sdlc_phase_idx": agent.sdlc_phase_idx,
             "sdlc_completed": sorted(agent.sdlc_completed),
             "autopilot_rounds": agent.autopilot_rounds,
@@ -4286,7 +4433,10 @@ def apply_session(agent: "NeonArchitect", data: Dict[str, Any]) -> None:
     agent.sdlc_phase_idx = int(data.get("sdlc_phase_idx") or 0)
     agent.sdlc_completed = set(data.get("sdlc_completed") or [])
     agent.autopilot_rounds = int(data.get("autopilot_rounds") or 0)
-    agent.autopilot = False
+    agent.autopilot = False  # never auto-start; prompt via offer_resume_autopilot
+    agent._session_wants_resume = bool(
+        data.get("autopilot") or data.get("autopilot_resume")
+    )
     agent.round = int(data.get("round") or 0)
     agent._phase_rounds = 0  # always reset on restore so stuck-timer starts fresh
     agent._phase_tool_counts = {}
@@ -4412,6 +4562,20 @@ def main():
         agent.config["version"] = APP_VERSION
     except Exception as e:
         UI.warn(f"Could not update config: {e}")
+
+    # Offer to resume autopilot from last session (goal + phase persisted)
+    if not cfg.get("_fresh"):
+        try:
+            if agent.offer_resume_autopilot():
+                try:
+                    agent.run_turn(agent._autopilot_prompt())
+                except KeyboardInterrupt:
+                    print()
+                    UI.warn("Interrupted — autopilot still active; empty Enter or /stop.")
+                except Exception as e:
+                    UI.err(f"Resume turn error: {e}")
+        except Exception as e:
+            UI.warn(f"Resume prompt skipped: {e}")
 
     UI.separator("Ready")
     # Masked key status — per-project entry in config.json
@@ -4562,6 +4726,13 @@ def main():
             # Overwrite session file with empty state so next launch stays clean
             agent.persist(force=True)
             UI.ok("New session for this project. Goal/todos/history cleared. API key & model kept.")
+            try:
+                self.project_state["autopilot_active"] = False
+                self.project_state["autopilot_resume"] = False
+                self._session_wants_resume = False
+                self._sync_project_state()
+            except Exception:
+                pass
             UI.info(f"Project: {agent.project_dir}")
             continue
         if raw == "/reset":
