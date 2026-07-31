@@ -125,7 +125,7 @@ if LEGACY_WIN_CONSOLE:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 APP_NAME = "NEON ARCHITECT"
-APP_VERSION = "4.3.1"
+APP_VERSION = "4.3.4"
 APP_TAGLINE = "GLM-5.2 · NVIDIA NIM · Zero Bottlenecks · Self-Healing"
 
 CONFIG_DIR = Path.home() / ".neon_architect"
@@ -279,7 +279,7 @@ DEFAULT_CONFIG = {
     "retry_max": 8,
     "retry_base_delay": 2.5,
     "enable_openrouter": True,
-    "stream_content_timeout": 150.0,
+    "stream_content_timeout": 180.0,
     "first_token_timeout": 90.0,
     "http_read_timeout": 180.0,
     "http_connect_timeout": 15.0,
@@ -2112,6 +2112,8 @@ CRITICAL RULES (anti-fumble):
 6. Read before edit. Search before creating duplicate files.
 7. Keep working memory accurate: facts you already know need not be rediscovered.
 8. Phase completion is decided by the orchestrator via gates (PLAN.md, ARCHITECTURE.md, todos, tests) — do not claim a phase is done without producing those artifacts.
+9. AUTOPILOT: NEVER ask the user questions, never wait for confirmation, never say "Shall I…?", "Ready?", "Would you like…?", "Proceed to implementation?". The orchestrator advances phases. CALL TOOLS only — no permission requests.
+10. Paths: use project-relative paths only (e.g. src/app.py, PLAN.md). Never use /god_ai/... or other absolute Unix paths on Windows; cwd is already the project folder.
 
 TDD: RED (failing test) → GREEN (minimum code) → REFACTOR. Run tests after changes.
 
@@ -2123,7 +2125,7 @@ CURRENT MODEL: {model_name}
 Tools:
 - read / write / edit — local files (edit returns a diff)
 - search / glob / ls / modules — local discovery & import graph
-- bash — tests, installs, builds (not for web search; destructive needs confirm=true)
+- bash — tests, installs, builds (not for web search)
 - web_search(query, num_results) — internet search
 - browse_page(url, max_chars, start_line) — fetch page text
 - todo — task tracker
@@ -2182,8 +2184,36 @@ def save_project_state(project_dir: Path, state: Dict[str, Any], filename: str =
 
 
 def plan_has_sections(text: str, headers: tuple) -> bool:
+    """Flexible section detection — accepts common synonyms."""
     low = (text or "").lower()
-    return all(h in low for h in headers)
+    synonyms = {
+        "acceptance criteria": (
+            "acceptance criteria", "acceptance criterion", "success criteria",
+            "definition of done", "acceptance:",
+        ),
+        "requirements": (
+            "requirements", "requirement analysis", "functional requirements",
+            "product requirements", "scope",
+        ),
+        "risks": (
+            "risks", "risk assessment", "risk & mitigation", "risks &",
+            "risk mitigation", "known risks",
+        ),
+        "components": (
+            "components", "component architecture", "system components",
+            "modules", "service layout",
+        ),
+        "data flow": (
+            "data flow", "dataflow", "architecture flow", "request flow",
+            "system flow", "pipeline",
+        ),
+    }
+    for h in headers:
+        key = h.lower().strip()
+        opts = synonyms.get(key, (key,))
+        if not any(o in low for o in opts):
+            return False
+    return True
 
 
 def goal_looks_external(goal: str) -> bool:
@@ -2259,6 +2289,7 @@ class NeonArchitect:
         # TDD red→green tracking (mitigation)
         self._tdd_saw_red: bool = False
         self._tdd_saw_green: bool = False
+        self._consecutive_no_tool_turns: int = 0
         if "bash" in self.tools:
             if self.full_access:
                 self.tools["bash"].confirm_destructive = False
@@ -2629,14 +2660,18 @@ class NeonArchitect:
         arch_name = getattr(self, "architecture_artifact", "ARCHITECTURE.md")
         prompts = {
             "planning": (
-                f"PLANNING: (1) web_search any external product in the goal, browse_page top URLs "
-                f"(confirm domain, e.g. oiioii.ai vs oioi.com). (2) Write {plan_name} with requirements, "
-                f"risks, phased tasks, acceptance criteria. (3) todo add ≥5. Do NOT implement app code. "
-                f"Gate: {plan_name} ≥200 chars AND ≥5 todos. Call a tool NOW."
+                f"AUTOPILOT PLANNING — do NOT ask the user anything. "
+                f"(1) web_search external product + browse_page top URLs. "
+                f"(2) Write {plan_name} that MUST contain headings: Requirements, Risks, Acceptance Criteria "
+                f"(exact words help the gate). (3) todo add ≥5. Do NOT implement app code. "
+                f"If {plan_name} already exists and is complete, do NOT summarize for the user — "
+                f"call a tool to fix any missing section headers, or wait for orchestrator advance. "
+                f"Call a tool NOW."
             ),
             "architecture": (
-                f"ARCHITECTURE: follow {plan_name}. Write {arch_name} + interface stubs (≥2 write/edit). "
-                f"No full features yet. Call a tool NOW."
+                f"AUTOPILOT ARCHITECTURE — do NOT ask the user. Follow {plan_name}. "
+                f"Write {arch_name} with headings Components and Data Flow + interface stubs (≥2 write/edit). "
+                f"No full features. Call a tool NOW."
             ),
             "design": f"DESIGN following {plan_name}/{arch_name}. ≥3 write/edit. Call a tool NOW.",
             "implementation": (
@@ -2704,6 +2739,11 @@ class NeonArchitect:
             self._last_persist = now
 
     def _build_payload(self) -> Dict[str, Any]:
+        # Autopilot: force a tool when the model has been talking without acting
+        force_tool = bool(
+            self.autopilot
+            and (self._consecutive_no_tool_turns >= 1 or self._phase_rounds >= 1)
+        )
         payload = {
             "model": self.pool.current().model_id,
             "messages": self.ctx.export(),
@@ -2711,7 +2751,7 @@ class NeonArchitect:
             "max_tokens": self.model_cfg.get("max_tokens", 8192),
             "stream": True,
             "tools": tools_schema(self.tools),
-            "tool_choice": "auto",
+            "tool_choice": "required" if force_tool else "auto",
         }
         # Only attach model extra_body when thinking is enabled
         effort = str(self.config.get("thinking_effort") or "off").lower()
@@ -3211,13 +3251,38 @@ class NeonArchitect:
         self._sync_project_state()
         return True
 
+    def _asks_user(self, content: str) -> bool:
+        """True if the model is prompting the human (forbidden in autopilot)."""
+        lower = (content or "").lower()
+        markers = [
+            "shall i", "should i", "would you like", "do you want me",
+            "ready to proceed", "may i proceed", "can i proceed",
+            "let me know", "please confirm", "awaiting your",
+            "your approval", "want me to continue", "shall we",
+            "ready for the next", "proceed to the next phase",
+            "move to the next phase", "ok to continue",
+            "start phase", "begin phase", "shall i start",
+            "ready for **", "gate satisfied. ready",
+            "proceeding to **implementation**?",
+        ]
+        if any(m in lower for m in markers):
+            return True
+        # Trailing question aimed at user
+        if "?" in content and any(
+            w in lower for w in ("you", "shall", "should", "ready", "proceed", "continue")
+        ):
+            return True
+        return False
+
     def _should_nudge(self, content: str) -> bool:
-        """Detect announce-without-tool. Stricter to cut wasted turns."""
+        """Detect announce-without-tool or forbidden user prompts."""
         if not self.config.get("auto_nudge", True):
             return False
         if self.nudges >= self.config.get("max_nudges", 2):
             return False
-        if len(content) > 800:
+        if self.autopilot and self._asks_user(content):
+            return True
+        if len(content) > 800 and not self.autopilot:
             return False
         lower = content.lower()
         phrases = [
@@ -3225,9 +3290,43 @@ class NeonArchitect:
             "allow me to", "i should", "first, i", "next, i",
             "i can", "i shall", "i intend to", "i am going to",
             "going to search", "going to read", "going to check",
-            "will now", "now i will",
+            "will now", "now i will", "planning phase is complete",
+            "ready to proceed", "gate requirements are satisfied",
         ]
         return any(p in lower for p in phrases)
+
+    def _gate_missing_hint(self) -> str:
+        """Tell the model exactly why the current phase gate is not met."""
+        if not self.autopilot or self.sdlc_phase_idx >= len(SDLC_PHASES):
+            return ""
+        phase = SDLC_PHASES[self.sdlc_phase_idx]
+        reqs = SDLC_PHASE_REQUIREMENTS.get(phase) or {}
+        kind = reqs.get("kind")
+        bits = [f"Phase={phase}. Gate NOT met. Do NOT ask the user."]
+        if kind == "plan_complete":
+            art = reqs.get("artifact") or "PLAN.md"
+            ok, n = self._artifact_ok(art, int(reqs.get("min_chars", 400)))
+            bits.append(f"{art}: {'ok' if ok else 'MISSING/short'} ({n} chars)")
+            bits.append(f"todos_added={self._phase_tool_counts.get('todo_add', 0)} need ≥{reqs.get('min_todos', 5)}")
+            text = self._read_artifact_snippet(art, max_chars=20000)
+            headers = tuple(h.lower() for h in (reqs.get("require_sections") or PLAN_REQUIRED_HEADERS))
+            for h in headers:
+                bits.append(f"section '{h}': {'ok' if plan_has_sections(text, (h,)) else 'MISSING — edit PLAN.md to add heading'}")
+            research = (
+                self._research_done
+                or self._phase_tool_counts.get("web_search", 0) > 0
+                or self._phase_tool_counts.get("browse_page", 0) > 0
+            )
+            bits.append(f"research: {'ok' if research else 'need web_search/browse_page'}")
+        elif kind == "architecture_complete":
+            art = reqs.get("artifact") or "ARCHITECTURE.md"
+            ok, n = self._artifact_ok(art, int(reqs.get("min_chars", 300)))
+            bits.append(f"{art}: {'ok' if ok else 'MISSING'} ({n} chars)")
+            bits.append(f"write/edit={sum(self._phase_tool_counts.get(x,0) for x in ('write','edit'))}")
+        else:
+            bits.append(f"counts={dict(self._phase_tool_counts)}")
+        bits.append("Call ONE tool now to fix the missing gate item.")
+        return " | ".join(bits)
 
     def run_turn(self, user_input: str):
         """Execute one full turn: user input → persona detect → LLM → tools → loop.
@@ -3328,6 +3427,7 @@ class NeonArchitect:
             if tool_calls:
                 self.nudges = 0
                 self._execute_tools(tool_calls)
+                self._consecutive_no_tool_turns = 0
                 # Persist immediately if todos or files changed
                 tool_names = {tc.get("name", "") for tc in tool_calls}
                 if tool_names & {"todo", "write", "edit"}:
@@ -3343,48 +3443,76 @@ class NeonArchitect:
                             UI.ok("All SDLC phases complete!")
                             self._stop_autopilot()
                             break
-                    elif self._phase_rounds % 10 == 0:
+                    elif self._phase_rounds % 5 == 0:
+                        hint = self._gate_missing_hint()
                         UI.info(
                             f"Still in {phase_name.upper()} (turn {self._phase_rounds}). "
-                            f"Counts: {dict(self._phase_tool_counts)}. Gates not met — continuing."
+                            f"{hint}"
+                        )
+                        # Push explicit fix instruction so model does not idle
+                        self.ctx.add_user(
+                            "AUTOPILOT: Gate still open. " + hint + " Call ONE tool now. Do not ask the user."
                         )
                     continue
                 continue
 
             # No tools — assistant response
+            self._consecutive_no_tool_turns += 1
             self.ctx.add_assistant(content)
+
+            # Autopilot: if gates already met, advance immediately (never wait on "Shall I…?")
+            if self.autopilot and (
+                self._phase_requirements_met() or self._should_advance_phase(content)
+            ):
+                if not self._advance_sdlc():
+                    UI.separator("GOAL ACHIEVED")
+                    UI.ok("All SDLC phases complete!")
+                    self._stop_autopilot()
+                    break
+                self.ctx.add_user(self._autopilot_prompt())
+                self.nudges = 0
+                time.sleep(max(0.1, float(self.config.get("inter_turn_delay", 0.1))))
+                continue
+
+            # Forbidden: asking the human during autopilot
+            if self.autopilot and self._asks_user(content):
+                UI.warn("Autopilot blocked a user-facing question — forcing tool action.")
+                hint = self._gate_missing_hint()
+                self.ctx.add_user(
+                    "SYSTEM OVERRIDE (AUTOPILOT): Do NOT ask the user. Do NOT wait for confirmation. "
+                    "Never say Shall I / Ready / Would you like. "
+                    f"{hint} "
+                    "Call exactly ONE tool now."
+                )
+                self.nudges = 0
+                time.sleep(0.3)
+                continue
 
             # Auto-nudge if assistant announced but didn't act
             if self._should_nudge(content):
                 self.nudges += 1
                 if self.nudges >= self.config.get("max_nudges", 2) and self.autopilot:
                     UI.warn("Nudge cap — hard tool command.")
+                    hint = self._gate_missing_hint()
                     self.ctx.add_user(
-                        "SYSTEM OVERRIDE: Do not explain. Call exactly ONE tool now "
-                        "(prefer web_search, browse_page, write, or todo). "
-                        "If the last tool failed, use a DIFFERENT approach."
+                        "SYSTEM OVERRIDE: Do not explain. Do not ask the user. "
+                        f"Call exactly ONE tool now. {hint}"
                     )
                     self.nudges = 0
                 else:
                     UI.warn("Paused without tool — nudging.")
-                    self.ctx.add_user(
-                        "Call the tool you need NOW. No preamble. One tool call only."
-                    )
-                time.sleep(0.5)  # was 1.5s — reduced
+                    msg = "Call the tool you need NOW. No preamble. One tool call only."
+                    if self.autopilot:
+                        msg += " " + self._gate_missing_hint()
+                    self.ctx.add_user(msg)
+                time.sleep(0.5)
                 continue
 
             self.nudges = 0
 
-            # Autopilot: auto-proceed after assistant responds without tools
+            # Autopilot: inject next action (gates not met yet)
             if self.autopilot:
-                if self._phase_requirements_met() or self._should_advance_phase(content):
-                    if not self._advance_sdlc():
-                        UI.separator("GOAL ACHIEVED")
-                        UI.ok("All SDLC phases complete!")
-                        self._stop_autopilot()
-                        break
-                # Inject autopilot prompt for next action
-                self.ctx.add_user(self._autopilot_prompt())
+                self.ctx.add_user(self._autopilot_prompt() + "\n" + self._gate_missing_hint())
                 delay = float(self.config.get("inter_turn_delay", 0.1))
                 time.sleep(max(0.1, delay))
                 continue
@@ -3432,9 +3560,16 @@ class NeonArchitect:
             artifact = reqs.get("artifact") or getattr(self, "plan_artifact", "PLAN.md")
             ok, n = self._artifact_ok(artifact, int(reqs.get("min_chars", 400)))
             added = self._phase_tool_counts.get("todo_add", 0)
-            plan_text = self._read_artifact_snippet(artifact, max_chars=20000)
+            # Also accept todos already on the board (session / prior turns)
+            board = len(TodoTool._todos) if TodoTool._todos else 0
+            todo_ok = added >= int(reqs.get("min_todos", 5)) or board >= int(reqs.get("min_todos", 5))
+            plan_text = self._read_artifact_snippet(artifact, max_chars=50000)
             headers = tuple(h.lower() for h in (reqs.get("require_sections") or PLAN_REQUIRED_HEADERS))
             sections_ok = plan_has_sections(plan_text, headers) if plan_text else False
+            # Long substantive plan (>= 1500 chars) soft-passes missing exact headers
+            if ok and n >= 1500 and not sections_ok:
+                sections_ok = True
+                UI.info(f"Plan gate: soft-pass sections ({artifact} {n} chars is substantive)")
             research_ok = True
             if reqs.get("require_research") and self.config.get("require_research_for_external", True):
                 if goal_looks_external(self.goal or ""):
@@ -3444,18 +3579,30 @@ class NeonArchitect:
                         or self._phase_tool_counts.get("browse_page", 0) > 0
                         or bool(self.project_state.get("research_notes"))
                     )
-            met = ok and added >= int(reqs.get("min_todos", 5)) and sections_ok and research_ok
+            met = ok and todo_ok and sections_ok and research_ok
             if met:
-                UI.info(f"Gate met: {artifact} ({n}c) + todos={added} + sections + research → {phase.upper()}")
+                UI.info(
+                    f"Gate met: {artifact} ({n}c) + todos={max(added, board)} "
+                    f"+ sections + research → {phase.upper()}"
+                )
             return met
         if kind == "architecture_complete":
             artifact = reqs.get("artifact") or getattr(self, "architecture_artifact", "ARCHITECTURE.md")
             ok, n = self._artifact_ok(artifact, int(reqs.get("min_chars", 300)))
             total = sum(self._phase_tool_counts.get(x, 0) for x in reqs.get("any_tool", ["write", "edit"]))
-            arch_text = self._read_artifact_snippet(artifact, max_chars=20000)
+            # Count any write of ARCHITECTURE.md even if logged under other phase counters
+            if ok and n >= 300:
+                total = max(total, 1)
+            arch_text = self._read_artifact_snippet(artifact, max_chars=50000)
             headers = tuple(h.lower() for h in (reqs.get("require_sections") or ARCH_REQUIRED_HEADERS))
             sections_ok = plan_has_sections(arch_text, headers) if arch_text else False
+            if ok and n >= 1500 and not sections_ok:
+                sections_ok = True
+                UI.info(f"Architecture gate: soft-pass sections ({n} chars)")
             met = ok and total >= int(reqs.get("min_calls", 2)) and sections_ok
+            # If file is large enough, don't block forever on min_calls from this phase only
+            if ok and n >= 1500 and sections_ok:
+                met = True
             if met:
                 UI.info(f"Gate met: {artifact} ({n}c) + writes={total} + sections → {phase.upper()}")
             return met
