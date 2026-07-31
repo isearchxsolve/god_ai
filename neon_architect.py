@@ -125,7 +125,7 @@ if LEGACY_WIN_CONSOLE:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 APP_NAME = "NEON ARCHITECT"
-APP_VERSION = "4.2.13"
+APP_VERSION = "4.3.1"
 APP_TAGLINE = "GLM-5.2 · NVIDIA NIM · Zero Bottlenecks · Self-Healing"
 
 CONFIG_DIR = Path.home() / ".neon_architect"
@@ -265,31 +265,51 @@ DEFAULT_CONFIG = {
     "base_url": NIM_BASE_URL,
     "project_dir": str(Path.cwd()),
     "temperature": 0.2,
-    "max_rounds": 500,
+    # 0 = unlimited. Turns driven by phase gates, not a fixed budget.
+    "max_rounds": 0,
     "compact_threshold": 0.3,
     "auto_nudge": True,
-    "max_nudges": 3,
+    "max_nudges": 2,
     # --- Stream / HTTP sized for high-thinking quiet windows ---
-    "stream_timeout": 420.0,           # full-stream wall-clock (think + codegen)
+    "stream_timeout": 420.0,
     "request_timeout": 420.0,
-    "rpm_safety": 0.80,                # fewer 429 hiccups
+    "rpm_safety": 0.80,
     "show_thinking": True,
     "theme": "neon",
     "retry_max": 8,
-    "retry_base_delay": 2.5,           # calmer backoff
+    "retry_base_delay": 2.5,
     "enable_openrouter": True,
-    "stream_content_timeout": 150.0,   # idle AFTER first token
-    "first_token_timeout": 90.0,       # MUST exceed server think buffer (25s = false stalls)
-    "http_read_timeout": 180.0,        # socket quiet between chunks
-    "http_connect_timeout": 15.0,      # NIM LB can be slow to accept
-    "max_retries_per_provider": 3,     # rotate after real failures; don't thrash
+    "stream_content_timeout": 150.0,
+    "first_token_timeout": 90.0,
+    "http_read_timeout": 180.0,
+    "http_connect_timeout": 15.0,
+    "max_retries_per_provider": 3,
     "thinking_effort": "high",
-    "inter_turn_delay": 0.35,          # light pacing vs rate spikes
-    "max_autopilot_rounds": 500,
-    "max_phase_rounds": 4,
+    "inter_turn_delay": 0.35,
+    # 0 = unlimited autopilot; stop on gates or /stop only.
+    "max_autopilot_rounds": 0,
+    # 0 = no force-advance on phase round count.
+    "max_phase_rounds": 0,
     "startup_compact_tokens": 60000,
     "autopilot_thinking": True,
-
+    "plan_artifact": "PLAN.md",
+    "architecture_artifact": "ARCHITECTURE.md",
+    "working_memory_file": ".neon_working_memory.md",
+    "project_state_file": ".neon_project_state.json",
+    "max_same_tool_failures": 3,
+    "require_research_for_external": True,
+    # DEFAULT: full tool power INSIDE the project only (paths never escape project_dir).
+    "full_access": True,
+    "allow_path_outside_project": False,
+    "allow_local_network": True,
+    "bash_confirm_destructive": False,
+    "bash_timeout_max": 600,
+    "implementation_path_prefixes": ["src/", "app/", "backend/", "frontend/", "lib/", "tests/"],
+    "min_implementation_src_writes": 4,
+    "session_restore_max_messages": 24,
+    "session_restore_max_tokens": 80000,
+    "tdd_enforce_red_green": True,
+    "git_worktree_on_autopilot": True,
 }
 # ═══════════════════════════════════════════════════════════════════════════════
 #  SECTION 1b: PERSONAS & SDLC DEFINITIONS
@@ -368,14 +388,19 @@ SDLC_PHASES: List[str] = [
 ]
 
 SDLC_PHASE_PROMPTS: Dict[str, str] = {
-    "planning": "Create a detailed task breakdown and plan. Identify requirements, risks, and dependencies.",
-    "architecture": "Design the system architecture. Define components, interfaces, data flow, and tech stack.",
-    "design": "Design the UI/UX and component structure. Create layouts, styles, and interaction patterns.",
-    "implementation": "Implement the features using TDD. Write clean, documented code with proper error handling.",
-    "testing": "Write and run comprehensive tests. Ensure coverage for edge cases and error paths.",
-    "review": "Review the codebase for quality, security, and consistency. Refactor as needed.",
-    "deployment": "Create deployment artifacts: Dockerfile, docker-compose, CI/CD config, documentation.",
-    "verification": "Run final integration tests. Verify all acceptance criteria are met.",
+    "planning": (
+        "Research the goal (web_search + browse_page if external product). "
+        "Write PLAN.md with requirements, risks, phased tasks, acceptance criteria. Add todos. Do NOT implement yet."
+    ),
+    "architecture": (
+        "Follow PLAN.md. Write ARCHITECTURE.md (components, interfaces, data flow, tech stack) and interface stubs only."
+    ),
+    "design": "Follow PLAN.md and ARCHITECTURE.md. Design UI/UX, components, styles, layouts.",
+    "implementation": "Follow PLAN.md and ARCHITECTURE.md. Implement with TDD. Track todos.",
+    "testing": "Test against PLAN.md acceptance criteria. Fix failures. No new features.",
+    "review": "Review against PLAN.md and ARCHITECTURE.md for quality, security, consistency.",
+    "deployment": "Create deployment artifacts aligned with ARCHITECTURE.md.",
+    "verification": "Verify every PLAN.md acceptance criterion. Mark todos done only when criteria pass.",
 }
 
 SDLC_PERSONA_MAP: Dict[str, str] = {
@@ -404,29 +429,37 @@ SDLC_PERSONA_MAP: Dict[str, str] = {
 # verifies artifacts exist and advances the state machine deterministically.
 # Textual signal detection and the stuck-round timer remain as fallbacks, but
 # are no longer the primary or only path to advancing a phase.
+# Gates only — no fixed turn budget, no force-advance on round count.
 SDLC_PHASE_REQUIREMENTS: Dict[str, Dict[str, Any]] = {
-    # Strict gates so IMPLEMENTATION is real coding, not 2 stubs + phase skip.
     "planning": {
-        "kind": "todo_count",
+        "kind": "plan_complete",
+        "artifact": "PLAN.md",
+        "min_chars": 400,
         "min_todos": 5,
+        "require_sections": ["Acceptance Criteria", "Requirements", "Risks"],
+        "require_research": True,  # web_search or browse_page if goal looks external
     },
     "architecture": {
-        "kind": "tool_calls",
+        "kind": "architecture_complete",
+        "artifact": "ARCHITECTURE.md",
+        "min_chars": 300,
         "any_tool": ["write", "edit"],
         "min_calls": 2,
+        "require_sections": ["Components", "Data Flow"],
     },
     "design": {
         "kind": "tool_calls",
         "any_tool": ["write", "edit"],
-        "min_calls": 2,
+        "min_calls": 3,
     },
     "implementation": {
-        "kind": "tool_calls",
+        "kind": "implementation_complete",
         "any_tool": ["write", "edit"],
-        "min_calls": 8,  # substantial application code
+        "min_calls": 8,
+        "min_src_writes": 4,  # under src/app/backend/frontend/lib/tests
     },
     "testing": {
-        "kind": "bash_success",  # only pytest/unittest-style cmds set _phase_bash_ok
+        "kind": "bash_success",
         "require_test_cmd": True,
     },
     "review": {
@@ -444,6 +477,18 @@ SDLC_PHASE_REQUIREMENTS: Dict[str, Dict[str, Any]] = {
         "require_test_cmd": True,
     },
 }
+
+# Plan schema markers (case-insensitive section headers expected in PLAN.md)
+PLAN_REQUIRED_HEADERS = ("acceptance criteria", "requirements", "risks")
+ARCH_REQUIRED_HEADERS = ("components", "data flow")
+
+# Destructive bash patterns (require confirm unless bash_confirm_destructive=False)
+DESTRUCTIVE_BASH_RE = re.compile(
+    r"(?:^|[\s;|&])(rm\s+-[a-zA-Z]*[fr]|rm\s+--recursive|del\s+/[sf]|format\s+|"
+    r"git\s+push\s+.*--force|git\s+reset\s+--hard|dd\s+if=|mkfs\.|shutdown|reboot)\b",
+    re.I,
+)
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  SECTION 2: CYBERPUNK THEME & UI SYSTEM
@@ -579,29 +624,29 @@ class UI:
 
     @staticmethod
     def thinking_block(text: str) -> "RenderableType":
-        """Terracotta thinking line — large glyph + verb."""
+        """Claude Code–style thinking: brief verb only (no reasoning dump)."""
         if not HAS_RICH:
-            return f"* {text[:240]}"
+            return f"  · {random.choice(_CC_VERBS)}…"
         verb = random.choice(_CC_VERBS)
         glyph = random.choice(_CC_SPINNER)
         t = Text()
         t.append(f"  {glyph} ", style="cc_thinking")
-        t.append(f"{verb}… ", style="cc_thinking")
-        if text:
-            snippet = text.strip().replace("\n", " ")
-            if len(snippet) > 100:
-                snippet = snippet[:100] + "…"
-            t.append(UI.esc(snippet), style="cc_muted")
+        t.append(f"{verb}…", style="cc_thinking")
         return t
 
     @staticmethod
     def tool_call(name: str, args_preview: str) -> "RenderableType":
-        """Hot-pink tool header — Claude Code signature."""
+        """Claude Code–style tool header: ⏺ + Title Case name + muted args."""
+        label = {
+            "read": "Read", "write": "Write", "edit": "Edit", "bash": "Bash",
+            "search": "Search", "glob": "Glob", "ls": "List", "todo": "Todo",
+            "web_search": "WebSearch", "browse_page": "Browse", "task": "Task",
+        }.get(name, str(name))
         if not HAS_RICH:
-            return f"  ┌─ {name}  {args_preview}"
+            return f"  ⏺ {label}  {args_preview}"
         t = Text()
-        t.append("  ┌─ ", style="cc_tool")
-        t.append(str(name), style="cc_tool")
+        t.append("  ⏺ ", style="cc_tool")
+        t.append(label, style="cc_tool")
         if args_preview:
             t.append("  ", style="cc_tool")
             ap = args_preview if len(args_preview) < 80 else args_preview[:77] + "…"
@@ -1050,12 +1095,26 @@ class Tool:
     def __init__(self, cwd: Path):
         self.cwd = cwd.resolve()
 
+    # Class-level flags set from config / full_access mode
+    allow_outside_project: bool = False
+
     def _safe_path(self, path: str) -> Path:
-        target = (self.cwd / path).resolve()
+        """Resolve path — ALWAYS confined to project directory (system permission = project only)."""
+        raw = (path or "").strip()
+        if not raw:
+            raise ValueError("path is required (use project-relative paths, e.g. src/app.py)")
+        if raw.startswith("\\\\?\\"):
+            raw = raw[4:]
+        candidate = Path(raw)
+        target = candidate.resolve() if candidate.is_absolute() else (self.cwd / raw).resolve()
+        # Hard sandbox: never allow escape, even if allow_outside_project was set.
         try:
-            target.relative_to(self.cwd)
+            target.relative_to(self.cwd.resolve())
         except ValueError:
-            raise PermissionError(f"Path '{path}' escapes project directory")
+            raise PermissionError(
+                f"Path '{path}' is outside the project folder ({self.cwd}). "
+                f"All file access is limited to the project directory."
+            )
         return target
 
     def execute(self, **kwargs) -> ToolResult:
@@ -1139,23 +1198,38 @@ class ReadTool(Tool):
 
 class WriteTool(Tool):
     name = "write"
-    description = "Create or overwrite a file with the given content. Creates parent dirs."
+    description = (
+        "Create or overwrite a file. path MUST be project-relative "
+        "(e.g. src/core/agents/pm.py), never omit path. Creates parent dirs."
+    )
     parameters = {
         "type": "object",
         "properties": {
-            "path": {"type": "string"},
+            "path": {"type": "string", "description": "Project-relative path"},
             "content": {"type": "string"},
         },
         "required": ["path", "content"],
     }
 
-    def execute(self, path: str, content: str) -> ToolResult:
+    def execute(self, path: str = "", content: str = None) -> ToolResult:
         try:
+            if not path or not str(path).strip():
+                return ToolResult(
+                    "",
+                    error="path is required. Example: path='src/core/agents/pm.py'",
+                    is_error=True,
+                )
+            if content is None:
+                return ToolResult("", error="content is required", is_error=True)
             fp = self._safe_path(path)
             fp.parent.mkdir(parents=True, exist_ok=True)
-            with open(fp, "w", encoding="utf-8") as f:
-                f.write(content)
-            return ToolResult(f"Written {len(content)} chars to {path}")
+            data = content if isinstance(content, str) else str(content)
+            with open(fp, "w", encoding="utf-8", newline="\n") as f:
+                f.write(data)
+            with ReadTool._cache_lock:
+                ReadTool._cache.pop(str(fp), None)
+            size = fp.stat().st_size if fp.is_file() else 0
+            return ToolResult(f"Written {len(data)} chars ({size} bytes on disk) to {path}")
         except Exception as e:
             return ToolResult("", error=str(e), is_error=True)
 
@@ -1182,16 +1256,34 @@ class EditTool(Tool):
             with open(fp, "r", encoding="utf-8", errors="replace") as f:
                 original = f.read()
             if old_text not in original:
-                return ToolResult("", error=f"old_text not found in {path}", is_error=True)
+                hint = ""
+                sn = (old_text or "")[:40]
+                if sn and sn in original:
+                    hint = " (partial match exists — check whitespace)"
+                return ToolResult("", error=f"old_text not found in {path}{hint}", is_error=True)
             if replace_all:
-                new_content = original.replace(old_text, new_text)
                 count = original.count(old_text)
+                new_content = original.replace(old_text, new_text)
             else:
                 new_content = original.replace(old_text, new_text, 1)
                 count = 1
-            with open(fp, "w", encoding="utf-8") as f:
+            with open(fp, "w", encoding="utf-8", newline="\n") as f:
                 f.write(new_content)
-            return ToolResult(f"Replaced {count} occurrence(s) in {path}")
+            with ReadTool._cache_lock:
+                ReadTool._cache.pop(str(fp), None)
+            # Claude Code–style unified diff snippet in tool result
+            diff_lines = list(difflib.unified_diff(
+                old_text.splitlines(), new_text.splitlines(),
+                fromfile=f"a/{path}", tofile=f"b/{path}", lineterm="",
+            ))
+            diff_txt = "\n".join(diff_lines[:80])
+            if len(diff_lines) > 80:
+                diff_txt += f"\n… [{len(diff_lines)-80} more diff lines]"
+            msg = (
+                f"Replaced {count} occurrence(s) in {path} ({len(new_content)} chars now)\n"
+                f"--- diff ---\n{diff_txt}"
+            )
+            return ToolResult(msg)
         except Exception as e:
             return ToolResult("", error=str(e), is_error=True)
 
@@ -1292,26 +1384,61 @@ class LsTool(Tool):
 
 class BashTool(Tool):
     name = "bash"
-    description = "Execute a shell command. Use timeout to limit execution time."
+    description = (
+        "Execute a shell command in the project directory (tests, installs, builds). "
+        "Prefer web_search/browse_page for internet research. "
+        "Destructive commands (rm -rf, git reset --hard, force push) are blocked unless "
+        "confirmed via confirm=true when bash_confirm_destructive is enabled."
+    )
     parameters = {
         "type": "object",
         "properties": {
             "command": {"type": "string"},
             "timeout": {"type": "integer", "default": 120},
+            "confirm": {"type": "boolean", "default": False, "description": "Required for destructive commands"},
         },
         "required": ["command"],
     }
+    MAX_OUTPUT = 80000
+    # Set by NeonArchitect after build_tools
+    confirm_destructive: bool = True
+    last_test_digest: str = ""
 
-    def execute(self, command: str, timeout: int = 120) -> ToolResult:
+    def execute(self, command: str, timeout: int = 120, confirm: bool = False) -> ToolResult:
         try:
+            cmd = (command or "").strip()
+            if not cmd:
+                return ToolResult("", error="command is required", is_error=True)
+            if getattr(self, "confirm_destructive", True) and DESTRUCTIVE_BASH_RE.search(cmd) and not confirm:
+                return ToolResult(
+                    "",
+                    error=(
+                        "Destructive command blocked. Re-call bash with confirm=true if intentional: "
+                        f"{cmd[:200]}"
+                    ),
+                    is_error=True,
+                )
+            timeout = max(5, min(int(timeout or 120), 600))
             result = subprocess.run(
-                command, shell=True, cwd=str(self.cwd),
-                capture_output=True, text=True, timeout=timeout,
+                cmd, shell=True, cwd=str(self.cwd),
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=timeout,
             )
-            output = result.stdout
+            output = result.stdout or ""
             if result.stderr:
                 output += f"\n[stderr]\n{result.stderr}"
+            if len(output) > self.MAX_OUTPUT:
+                half = self.MAX_OUTPUT // 2
+                output = output[:half] + f"\n\n… [truncated {len(output)} chars] …\n\n" + output[-half:]
             output += f"\n[exit code: {result.returncode}]"
+            # Test failure digest for orchestrator injection
+            low = cmd.lower()
+            is_test = any(x in low for x in ("pytest", "unittest", "npm test", "npx jest", "cargo test", "go test"))
+            if is_test:
+                digest_lines = [ln for ln in output.splitlines() if ln.strip()][-40:]
+                BashTool.last_test_digest = (
+                    f"cmd: {cmd}\nexit: {result.returncode}\n" + "\n".join(digest_lines)
+                )
             return ToolResult(output, is_error=result.returncode != 0)
         except subprocess.TimeoutExpired:
             return ToolResult("", error=f"Command timed out after {timeout}s", is_error=True)
@@ -1320,23 +1447,163 @@ class BashTool(Tool):
 
 
 class TaskTool(Tool):
+    """Lightweight specialist worker: explores the codebase with tools (no nested LLM).
+
+    Gathers files matching the prompt keywords via glob/search/read and returns a
+    structured summary the parent agent can act on — closes the old stub gap.
+    """
     name = "task"
-    description = "Launch a sub-agent to perform an independent multi-step task. Returns a summary."
+    description = (
+        "Delegate an independent exploration task. Searches and reads relevant files "
+        "under the project, returns a structured summary (paths + excerpts). "
+        "Use for 'find how X works', 'map module Y', etc. Does not write files."
+    )
     parameters = {
         "type": "object",
         "properties": {
             "description": {"type": "string", "description": "Short task description"},
-            "prompt": {"type": "string", "description": "Detailed instructions for the sub-agent"},
+            "prompt": {"type": "string", "description": "Detailed instructions / keywords"},
         },
         "required": ["description", "prompt"],
     }
 
     def execute(self, description: str, prompt: str) -> ToolResult:
-        return ToolResult(
-            f"[Sub-agent: {description}]\n"
-            f"This is a simulated sub-agent task. In swarm mode, this would execute:\n"
-            f"{prompt[:300]}..."
-        )
+        try:
+            text = f"{description or ''}\n{prompt or ''}"
+            # Keyword tokens for search
+            tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", text)
+            stop = {
+                "the", "and", "for", "with", "that", "this", "from", "into", "about",
+                "find", "how", "what", "where", "please", "should", "must", "task",
+                "search", "read", "file", "files", "code", "project", "implement",
+            }
+            keys = []
+            seen = set()
+            for tok in tokens:
+                low = tok.lower()
+                if low in stop or low in seen:
+                    continue
+                seen.add(low)
+                keys.append(tok)
+                if len(keys) >= 8:
+                    break
+            if not keys:
+                keys = ["main", "config", "agent"]
+
+            findings: List[str] = []
+            paths_hit: List[str] = []
+
+            # 1) Glob likely source trees
+            globber = GlobTool(self.cwd)
+            for pattern in ("**/*.py", "**/*.ts", "**/*.tsx", "**/*.js", "**/package.json", "**/requirements.txt"):
+                res = globber.execute(pattern=pattern, path=".")
+                if not res.is_error and res.output:
+                    for line in res.output.splitlines()[:40]:
+                        line = line.strip()
+                        if line and line not in paths_hit:
+                            paths_hit.append(line)
+                if len(paths_hit) > 80:
+                    break
+
+            # 2) Search for keywords
+            searcher = SearchTool(self.cwd)
+            match_files: Dict[str, int] = {}
+            for k in keys[:5]:
+                res = searcher.execute(pattern=re.escape(k), path=".")
+                if res.is_error or not res.output:
+                    continue
+                for line in res.output.splitlines()[:30]:
+                    # typical "path:line:content"
+                    path = line.split(":", 1)[0].strip() if ":" in line else ""
+                    if path and not path.startswith("["):
+                        match_files[path] = match_files.get(path, 0) + 1
+
+            ranked = sorted(match_files.items(), key=lambda x: -x[1])[:12]
+            reader = ReadTool(self.cwd)
+            excerpts = []
+            for path, score in ranked:
+                try:
+                    r = reader.execute(path=path, offset=1, limit=40)
+                    if not r.is_error:
+                        body = (r.output or "")[:1200]
+                        excerpts.append(f"### {path} (score={score})\n{body}")
+                except Exception:
+                    continue
+
+            lines = [
+                f"[Sub-agent complete] {description}",
+                f"Keywords: {', '.join(keys)}",
+                f"Indexed source candidates: {len(paths_hit)}",
+                f"Keyword-matched files: {len(match_files)}",
+                "",
+                "## Top matches",
+            ]
+            for path, score in ranked[:10]:
+                lines.append(f"- {path} (hits≈{score})")
+            if excerpts:
+                lines.append("")
+                lines.append("## Excerpts")
+                lines.extend(excerpts[:6])
+            else:
+                lines.append("")
+                lines.append("No keyword hits. Sample paths:")
+                for pth in paths_hit[:15]:
+                    lines.append(f"- {pth}")
+            return ToolResult("\n".join(lines))
+        except Exception as e:
+            return ToolResult("", error=f"task sub-agent failed: {e}", is_error=True)
+
+
+class ModulesTool(Tool):
+    """Lightweight module/package graph for Python projects."""
+    name = "modules"
+    description = (
+        "List Python packages/modules under a path and who-imports-whom (shallow). "
+        "Use before large refactors to extend existing modules instead of duplicating."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "default": "src"},
+            "max_files": {"type": "integer", "default": 80},
+        },
+        "required": [],
+    }
+
+    def execute(self, path: str = "src", max_files: int = 80) -> ToolResult:
+        try:
+            base = self._safe_path(path if path else ".")
+            if not base.exists():
+                # fallback to project root
+                base = self.cwd
+            py_files = []
+            for fp in sorted(base.rglob("*.py")):
+                if any(part.startswith(".") for part in fp.relative_to(self.cwd).parts):
+                    continue
+                py_files.append(fp)
+                if len(py_files) >= max(10, min(int(max_files or 80), 200)):
+                    break
+            import_re = re.compile(r"^\s*(?:from\s+([\w.]+)\s+import|import\s+([\w.]+))", re.M)
+            lines = [f"Modules under {base.relative_to(self.cwd) if base != self.cwd else '.'} ({len(py_files)} files)", ""]
+            for fp in py_files:
+                rel = str(fp.relative_to(self.cwd)).replace("\\", "/")
+                try:
+                    text = fp.read_text(encoding="utf-8", errors="replace")[:8000]
+                except Exception:
+                    continue
+                imps = []
+                for m in import_re.finditer(text):
+                    mod = m.group(1) or m.group(2)
+                    if mod and mod not in imps:
+                        imps.append(mod)
+                    if len(imps) >= 12:
+                        break
+                imp_s = ", ".join(imps[:12]) if imps else "(no imports parsed)"
+                lines.append(f"- {rel}")
+                lines.append(f"    imports: {imp_s}")
+            return ToolResult("\n".join(lines))
+        except Exception as e:
+            return ToolResult("", error=str(e), is_error=True)
 
 
 class TodoTool(Tool):
@@ -1395,13 +1662,291 @@ class TodoTool(Tool):
             return ToolResult("", error=str(e), is_error=True)
 
 
-def build_tools(cwd: Path) -> Dict[str, Tool]:
+
+def _strip_html(html: str) -> str:
+    try:
+        from bs4 import BeautifulSoup  # type: ignore
+        soup = BeautifulSoup(html, "html.parser")
+        for tag in soup(["script", "style", "noscript", "svg", "iframe"]):
+            tag.decompose()
+        text = soup.get_text("\n", strip=True)
+        return "\n".join(ln.strip() for ln in text.splitlines() if ln.strip())
+    except Exception:
+        pass
+    text = re.sub(r"(?is)<(script|style|noscript)[^>]*>.*?</\1>", " ", html)
+    text = re.sub(r"(?s)<[^>]+>", " ", text)
+    text = re.sub(r"&nbsp;", " ", text)
+    text = re.sub(r"&amp;", "&", text)
+    text = re.sub(r"&lt;", "<", text)
+    text = re.sub(r"&gt;", ">", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def urllib_quote(s: str) -> str:
+    from urllib.parse import quote
+    return quote(s, safe="")
+
+
+def _http_get(url: str, timeout: float = 25.0, headers: Optional[Dict[str, str]] = None) -> Tuple[int, str, str]:
+    default_headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; NeonArchitect/4.2) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    if headers:
+        default_headers.update(headers)
+    if HAS_HTTPX:
+        with httpx.Client(follow_redirects=True, timeout=timeout, headers=default_headers) as client:
+            r = client.get(url)
+            return r.status_code, r.text, str(r.url)
+    import urllib.request
+    req = urllib.request.Request(url, headers=default_headers)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read()
+        charset = resp.headers.get_content_charset() or "utf-8"
+        return getattr(resp, "status", 200), raw.decode(charset, errors="replace"), resp.geturl()
+
+
+class WebSearchTool(Tool):
+    name = "web_search"
+    description = (
+        "Search the public internet. Returns ranked titles, URLs, snippets. "
+        "Use BEFORE guessing product domains. Follow with browse_page on best URLs. "
+        "Supports site: operators."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "num_results": {"type": "integer", "default": 8},
+        },
+        "required": ["query"],
+    }
+
+    def execute(self, query: str, num_results: int = 8) -> ToolResult:
+        try:
+            q = (query or "").strip()
+            if not q:
+                return ToolResult("", error="query is required", is_error=True)
+            n = max(1, min(int(num_results or 8), 15))
+            results: List[Dict[str, str]] = []
+            errors: List[str] = []
+            brave_key = (os.environ.get("BRAVE_API_KEY") or os.environ.get("BRAVE_SEARCH_API_KEY") or "").strip()
+            if brave_key:
+                try:
+                    status, body, _ = _http_get(
+                        f"https://api.search.brave.com/res/v1/web/search?q={urllib_quote(q)}&count={n}",
+                        timeout=20.0,
+                        headers={"Accept": "application/json", "X-Subscription-Token": brave_key},
+                    )
+                    if status == 200:
+                        data = json.loads(body)
+                        for item in (data.get("web") or {}).get("results") or []:
+                            results.append({"title": item.get("title") or "", "url": item.get("url") or "",
+                                            "snippet": item.get("description") or ""})
+                    else:
+                        errors.append(f"brave:{status}")
+                except Exception as e:
+                    errors.append(f"brave:{e}")
+            if len(results) < n:
+                try:
+                    status, body, _ = _http_get(f"https://html.duckduckgo.com/html/?q={urllib_quote(q)}", timeout=25.0)
+                    if status == 200:
+                        results.extend(self._parse_ddg_html(body, n - len(results)))
+                    else:
+                        errors.append(f"ddg_html:{status}")
+                except Exception as e:
+                    errors.append(f"ddg_html:{e}")
+            if len(results) < n:
+                try:
+                    status, body, _ = _http_get(f"https://lite.duckduckgo.com/lite/?q={urllib_quote(q)}", timeout=25.0)
+                    if status == 200:
+                        results.extend(self._parse_ddg_lite(body, n - len(results)))
+                    else:
+                        errors.append(f"ddg_lite:{status}")
+                except Exception as e:
+                    errors.append(f"ddg_lite:{e}")
+            if len(results) < n:
+                try:
+                    status, body, _ = _http_get(
+                        f"https://api.duckduckgo.com/?q={urllib_quote(q)}&format=json&no_html=1&skip_disambig=1",
+                        timeout=15.0,
+                    )
+                    if status == 200:
+                        data = json.loads(body)
+                        if data.get("AbstractURL"):
+                            results.append({"title": data.get("Heading") or q, "url": data.get("AbstractURL") or "",
+                                            "snippet": data.get("AbstractText") or ""})
+                        for topic in data.get("RelatedTopics") or []:
+                            items = topic.get("Topics") if isinstance(topic, dict) and topic.get("Topics") else [topic]
+                            for sub in items:
+                                if isinstance(sub, dict) and sub.get("FirstURL"):
+                                    results.append({
+                                        "title": re.sub(r"<.*?>", "", sub.get("Text") or "")[:120],
+                                        "url": sub.get("FirstURL") or "",
+                                        "snippet": re.sub(r"<.*?>", "", sub.get("Text") or ""),
+                                    })
+                except Exception as e:
+                    errors.append(f"ddg_api:{e}")
+            seen, unique = set(), []
+            for r in results:
+                u = (r.get("url") or "").strip()
+                if not u or u in seen:
+                    continue
+                seen.add(u)
+                unique.append(r)
+                if len(unique) >= n:
+                    break
+            if not unique:
+                return ToolResult("", error=(
+                    f"No results for {q!r}. Details: {'; '.join(errors) or 'unknown'}. "
+                    "Try alternate spelling (oiioii.ai vs oioi.com) or browse_page on a known URL."
+                ), is_error=True)
+            lines = [f"Web search results for: {q}", f"Returned {len(unique)} result(s).", ""]
+            for i, r in enumerate(unique, 1):
+                lines.append(f"{i}. {r.get('title') or '(no title)'}")
+                lines.append(f"   URL: {r.get('url')}")
+                if r.get("snippet"):
+                    lines.append(f"   {r['snippet'][:300]}")
+                lines.append("")
+            return ToolResult("\n".join(lines))
+        except Exception as e:
+            return ToolResult("", error=str(e), is_error=True)
+
+    @staticmethod
+    def _parse_ddg_html(html: str, limit: int) -> List[Dict[str, str]]:
+        out = []
+        for m in re.finditer(
+            r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?class="result__snippet"[^>]*>(.*?)</(?:a|td|div)',
+            html, re.I | re.S,
+        ):
+            url = WebSearchTool._clean_ddg_url(m.group(1))
+            title = re.sub(r"<[^>]+>", "", m.group(2)).strip()
+            snippet = re.sub(r"<[^>]+>", "", m.group(3)).strip()
+            if url:
+                out.append({"title": title, "url": url, "snippet": snippet})
+            if len(out) >= limit:
+                break
+        if not out:
+            for m in re.finditer(r'<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', html, re.I | re.S):
+                url = WebSearchTool._clean_ddg_url(m.group(1))
+                title = re.sub(r"<[^>]+>", "", m.group(2)).strip()
+                if url:
+                    out.append({"title": title, "url": url, "snippet": ""})
+                if len(out) >= limit:
+                    break
+        return out
+
+    @staticmethod
+    def _parse_ddg_lite(html: str, limit: int) -> List[Dict[str, str]]:
+        out = []
+        for m in re.finditer(r' rel="nofollow" href="(https?://[^"]+)"[^>]*>(.*?)</a>', html, re.I | re.S):
+            url, title = m.group(1).strip(), re.sub(r"<[^>]+>", "", m.group(2)).strip()
+            if "duckduckgo.com" in url:
+                continue
+            out.append({"title": title, "url": url, "snippet": ""})
+            if len(out) >= limit:
+                break
+        return out
+
+    @staticmethod
+    def _clean_ddg_url(url: str) -> str:
+        from urllib.parse import unquote, parse_qs, urlparse
+        url = url.replace("&amp;", "&")
+        if "uddg=" in url:
+            try:
+                qs = parse_qs(urlparse(url).query)
+                if "uddg" in qs:
+                    return unquote(qs["uddg"][0])
+            except Exception:
+                pass
+        if url.startswith("//"):
+            url = "https:" + url
+        return url
+
+
+class BrowsePageTool(Tool):
+    name = "browse_page"
+    description = (
+        "Fetch a URL and return readable text (HTML stripped). "
+        "Use after web_search for docs, product pages, API references."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string"},
+            "max_chars": {"type": "integer", "default": 12000},
+            "start_line": {"type": "integer", "default": 1},
+        },
+        "required": ["url"],
+    }
+
+    def execute(self, url: str, max_chars: int = 12000, start_line: int = 1) -> ToolResult:
+        try:
+            u = (url or "").strip()
+            if not u:
+                return ToolResult("", error="url is required", is_error=True)
+            if not re.match(r"^https?://", u, re.I):
+                u = "https://" + u
+            host = re.sub(r"^https?://", "", u, flags=re.I).split("/")[0].lower()
+            allow_local = getattr(self, "allow_local_network", False)
+            if not allow_local and (
+                host in ("localhost", "127.0.0.1", "0.0.0.0") or host.endswith(".local")
+            ):
+                return ToolResult(
+                    "",
+                    error=f"Refusing local host: {host} (enable full_access / allow_local_network)",
+                    is_error=True,
+                )
+            status, body, final_url = _http_get(u, timeout=30.0)
+            if status >= 400:
+                return ToolResult("", error=f"HTTP {status} fetching {final_url or u}", is_error=True)
+            low = body[:2000].lower()
+            text = _strip_html(body) if ("<html" in low or "<!doctype" in low or "<body" in low) else body
+            lines = text.splitlines()
+            start = max(0, int(start_line or 1) - 1)
+            sliced = "\n".join(lines[start:])
+            max_c = max(1000, min(int(max_chars or 12000), 50000))
+            trunc = len(sliced) > max_c
+            if trunc:
+                sliced = sliced[:max_c] + f"\n\n… [truncated at {max_c} chars]"
+            header = f"URL: {final_url}\nStatus: {status}\nLines: {len(lines)} (from {start+1})\nTruncated: {trunc}\n{'─'*40}\n"
+            return ToolResult(header + sliced)
+        except Exception as e:
+            return ToolResult("", error=f"browse_page failed: {e}", is_error=True)
+
+
+def build_tools(cwd: Path, full_access: bool = True, allow_outside: bool = False,
+                allow_local: bool = True, bash_confirm: bool = False) -> Dict[str, Tool]:
+    """Build tools. File I/O is always project-sandboxed; full_access = unrestricted bash in-project."""
     tool_list: List[Tool] = [
         ReadTool(cwd), WriteTool(cwd), EditTool(cwd),
         SearchTool(cwd), GlobTool(cwd), LsTool(cwd),
-        BashTool(cwd), TaskTool(cwd), TodoTool(cwd),
+        BashTool(cwd), WebSearchTool(cwd), BrowsePageTool(cwd),
+        TaskTool(cwd), ModulesTool(cwd), TodoTool(cwd),
     ]
-    return {t.name: t for t in tool_list}
+    tools = {t.name: t for t in tool_list}
+    # Paths: always project-only (ignore allow_outside for file tools)
+    for t in tools.values():
+        t.allow_outside_project = False
+    local = bool(allow_local or full_access)
+    if "browse_page" in tools:
+        tools["browse_page"].allow_local_network = local
+    if "bash" in tools:
+        # full_access default: no destructive confirm; cwd remains project_dir
+        tools["bash"].confirm_destructive = bool(bash_confirm) and not full_access
+        tools["bash"].description = (
+            "Execute a shell command with cwd=project directory. "
+            "File tools cannot leave the project folder. "
+            + (
+                "Destructive commands allowed without confirm (in-project full permission)."
+                if full_access and not bash_confirm
+                else "Destructive commands require confirm=true."
+            )
+        )
+    return tools
 
 
 def tools_schema(tools: Dict[str, Tool]) -> List[Dict[str, Any]]:
@@ -1556,53 +2101,102 @@ class ContextManager:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 SYSTEM_PROMPT_TEMPLATE = """You are Neon Architect, an expert autonomous software engineering team.
-Your mission: write, edit, read, search, and execute code using Test-Driven Development (TDD).
+Your mission: research, plan, write, edit, test, and ship code using TDD — with minimal wasted turns.
 
-CRITICAL RULES:
-1. ALWAYS use the native JSON function calling API for tools. Never output raw XML or markdown code blocks for tool calls.
-2. If you need to use a tool, CALL IT IMMEDIATELY in the same response. Do NOT announce your intention and stop.
-3. Read files before editing them. Search before writing new files to avoid duplication.
-4. Write clean, documented code. Follow the project's existing style.
-5. After making changes, verify with tests or by reading the modified file.
-6. If a task is complex, break it into sub-tasks using the 'task' tool.
-7. Use the 'todo' tool to track multi-step tasks.
+CRITICAL RULES (anti-fumble):
+1. ALWAYS use the native JSON function calling API for tools. Never output raw XML for tool calls.
+2. If you need a tool, CALL IT in the same response. Do NOT say "Let me..." and stop.
+3. ONE focused tool action per turn when exploring. Do not re-run the same failed command.
+4. If a tool fails twice the same way, CHANGE STRATEGY (different tool, query, or path).
+5. Prefer web_search + browse_page over bash curl for internet research.
+6. Read before edit. Search before creating duplicate files.
+7. Keep working memory accurate: facts you already know need not be rediscovered.
+8. Phase completion is decided by the orchestrator via gates (PLAN.md, ARCHITECTURE.md, todos, tests) — do not claim a phase is done without producing those artifacts.
 
-TDD METHODOLOGY (Default):
-- RED: Write a failing test that defines the expected behavior
-- GREEN: Write the minimum code to make the test pass
-- REFACTOR: Clean up the code while keeping tests green
-- ALWAYS run tests after implementation to verify
-- If no test framework exists, set one up first
+TDD: RED (failing test) → GREEN (minimum code) → REFACTOR. Run tests after changes.
 
-PERSONA SYSTEM:
-You adopt different professional roles depending on the task:
-- Architect: System design, APIs, data models, structure
-- Designer: UI/UX, components, styling, accessibility
-- Engineer: Implementation, algorithms, business logic
-- Tester: TDD, test writing, validation, coverage
-- Debugger: Bug diagnosis, root cause analysis, fixes
-- Reviewer: Code quality, security, performance audit
-- DevOps: Deployment, CI/CD, infrastructure, Docker
-Your current persona is injected below. Stay in character.
+PERSONA: Architect | Designer | Engineer | Tester | Debugger | Reviewer | DevOps — stay in the injected persona.
 
 WORKING DIRECTORY: {project_dir}
 CURRENT MODEL: {model_name}
 
-You have access to these tools:
-- read(path, offset, limit) — read file contents
-- write(path, content) — create/overwrite a file
-- edit(path, old_text, new_text, replace_all) — precise string replacement
-- search(pattern, path) — regex search across files
-- glob(pattern, path) — find files by glob pattern
-- ls(path) — list directory contents
-- bash(command, timeout) — run shell commands
-- task(description, prompt) — delegate to sub-agent
-- todo(action, id, content, status) — manage task tracker
+Tools:
+- read / write / edit — local files (edit returns a diff)
+- search / glob / ls / modules — local discovery & import graph
+- bash — tests, installs, builds (not for web search; destructive needs confirm=true)
+- web_search(query, num_results) — internet search
+- browse_page(url, max_chars, start_line) — fetch page text
+- todo — task tracker
+- task — specialist explorer (search/read summary; does not write)
 
-The user may set a goal with /goal and start /autopilot for god mode.
-In autopilot mode, you cycle through SDLC phases autonomously: planning → architecture → design → implementation → testing → review → deployment → verification.
-You must self-direct: decide when a phase is complete and signal completion so the next phase begins.
+External products: web_search first; confirm real domain (e.g. oiioii.ai vs oioi.com) before cloning.
+Autopilot: planning → architecture → design → implementation → testing → review → deployment → verification.
 """
+
+
+
+# ── Durable project state (survives compaction / session restore) ─────────────
+
+def _default_project_state() -> Dict[str, Any]:
+    return {
+        "version": 1,
+        "goal": None,
+        "phase": "planning",
+        "completed_phases": [],
+        "stack": [],
+        "entrypoints": [],
+        "test_command": None,
+        "key_modules": [],
+        "last_failures": [],
+        "open_todos": [],
+        "decisions": [],
+        "blockers": [],
+        "next_action": None,
+        "research_notes": [],
+        "src_write_paths": [],
+        "updated_at": None,
+    }
+
+
+def load_project_state(project_dir: Path, filename: str = ".neon_project_state.json") -> Dict[str, Any]:
+    state = _default_project_state()
+    fp = project_dir / filename
+    try:
+        if fp.is_file():
+            data = json.loads(fp.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                state.update({k: data[k] for k in state.keys() if k in data})
+    except Exception:
+        pass
+    return state
+
+
+def save_project_state(project_dir: Path, state: Dict[str, Any], filename: str = ".neon_project_state.json") -> None:
+    try:
+        state = dict(state)
+        state["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        fp = project_dir / filename
+        fp.write_text(json.dumps(state, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    except Exception:
+        pass
+
+
+def plan_has_sections(text: str, headers: tuple) -> bool:
+    low = (text or "").lower()
+    return all(h in low for h in headers)
+
+
+def goal_looks_external(goal: str) -> bool:
+    g = (goal or "").lower()
+    if not g:
+        return False
+    if re.search(r"\bhttps?://", g):
+        return True
+    if re.search(r"\b[a-z0-9-]+\.(com|ai|io|dev|app|sh|net|org)\b", g):
+        return True
+    if any(w in g for w in ("clone of", "clone", "replica of", "like ", "similar to")):
+        return True
+    return False
 
 
 class NeonArchitect:
@@ -1615,7 +2209,15 @@ class NeonArchitect:
         self.model_cfg = MODELS.get(self.model_key, MODELS["glm-5.2"])
 
         self.pool = build_pool(config)
-        self.tools = build_tools(self.project_dir)
+        self.full_access = bool(config.get("full_access", True))
+        self.tools = build_tools(
+            self.project_dir,
+            full_access=self.full_access,
+            allow_outside=False,  # hard policy: project folder only
+            allow_local=bool(config.get("allow_local_network", True)),
+            bash_confirm=bool(config.get("bash_confirm_destructive", False)),
+        )
+        self.config["allow_path_outside_project"] = False
         self.ctx = ContextManager(
             compact_threshold=config.get("compact_threshold", 0.75),
             ctx_window=self.model_cfg.get("ctx_window", 131072),
@@ -1633,18 +2235,35 @@ class NeonArchitect:
         self.sdlc_phase_idx = 0
         self.sdlc_completed: set[str] = set()
         self.autopilot_rounds = 0
-        self.max_autopilot_rounds = int(config.get("max_autopilot_rounds", 500))
-        # Phase-stuck detection: force-advance after N rounds with no signal
-        self._phase_rounds = 0
-        self._max_phase_rounds = int(config.get("max_phase_rounds", 4))
-        # Deterministic phase-completion tracking: counts of tool calls made
-        # DURING the current phase, and whether a bash call in this phase
-        # succeeded (exit code 0). Reset every time the phase advances.
+        self.max_autopilot_rounds = int(config.get("max_autopilot_rounds", 0) or 0)
+        self._phase_rounds = 0  # telemetry only — never force-advances
+        self._max_phase_rounds = int(config.get("max_phase_rounds", 0) or 0)
         self._phase_tool_counts: Dict[str, int] = {}
         self._phase_bash_ok = False
         self.current_turn_tool_calls = False
         self._last_persist = 0.0
-        self._persist_every = 3  # autosave every N turns
+        self._persist_every = 3
+        self.plan_artifact = str(config.get("plan_artifact") or "PLAN.md")
+        self.architecture_artifact = str(config.get("architecture_artifact") or "ARCHITECTURE.md")
+        self.working_memory_file = str(config.get("working_memory_file") or ".neon_working_memory.md")
+        self.max_same_tool_failures = int(config.get("max_same_tool_failures", 3) or 3)
+        # Recent tool fingerprint → failure count (anti-loop)
+        self._tool_fail_counts: Dict[str, int] = {}
+        self._recent_tool_keys: deque = deque(maxlen=24)
+        self._strategy_hints: List[str] = []
+        self.project_state_file = str(config.get("project_state_file") or ".neon_project_state.json")
+        self.project_state: Dict[str, Any] = load_project_state(self.project_dir, self.project_state_file)
+        self._src_write_paths: List[str] = list(self.project_state.get("src_write_paths") or [])
+        self._last_test_digest: str = ""
+        self._research_done: bool = bool(self.project_state.get("research_notes"))
+        # TDD red→green tracking (mitigation)
+        self._tdd_saw_red: bool = False
+        self._tdd_saw_green: bool = False
+        if "bash" in self.tools:
+            if self.full_access:
+                self.tools["bash"].confirm_destructive = False
+            else:
+                self.tools["bash"].confirm_destructive = bool(config.get("bash_confirm_destructive", True))
 
         # Restore previous session ONLY for THIS project path.
         # Never import last_goal / SDLC from global config — that leaked old
@@ -1682,6 +2301,14 @@ class NeonArchitect:
 
         UI.separator()
         UI.ok(f"Initialized in {self.project_dir}")
+        UI.info(
+            "Permissions: project-folder only for files | "
+            f"full_in_project={self.full_access} | "
+            f"bash_confirm={bool(self.tools.get('bash') and getattr(self.tools['bash'], 'confirm_destructive', False))} | "
+            f"local_net={bool(config.get('allow_local_network', True))} | "
+            f"worktree={bool(config.get('git_worktree_on_autopilot'))} | "
+            f"tdd={bool(config.get('tdd_enforce_red_green'))}"
+        )
         UI.info(
             f"Thinking: {self.config.get('thinking_effort')} | "
             f"show={self.config.get('show_thinking')} | "
@@ -1730,29 +2357,80 @@ class NeonArchitect:
             project_dir=str(self.project_dir),
             model_name=self.model_cfg["name"],
         )
-        # Add active persona directive
         persona = PERSONAS.get(self.persona_key, PERSONAS["adaptive"])
         prompt += f"\n\n[CURRENT PERSONA: {persona['name']}]\n{persona['prompt']}"
         if self.goal:
-            prompt += f"\n\n[CURRENT GOAL]\n{self.goal}\nYou must focus all actions toward achieving this goal."
-        # Add SDLC phase directive when in autopilot
+            prompt += f"\n\n[CURRENT GOAL]\n{self.goal}\nFocus all actions on this goal."
+        # Durable project state snapshot
+        try:
+            ps = self.project_state or {}
+            snap = []
+            if ps.get("test_command"):
+                snap.append(f"test_command: {ps['test_command']}")
+            if ps.get("entrypoints"):
+                snap.append("entrypoints: " + ", ".join(ps["entrypoints"][:8]))
+            if ps.get("key_modules"):
+                snap.append("key_modules: " + ", ".join(ps["key_modules"][:12]))
+            if ps.get("next_action"):
+                snap.append(f"next_action: {ps['next_action']}")
+            if ps.get("blockers"):
+                snap.append("blockers: " + "; ".join(str(b) for b in ps["blockers"][-3:]))
+            if snap:
+                prompt += "\n\n[PROJECT STATE — durable]\n" + "\n".join(snap)
+        except Exception:
+            pass
         if self.autopilot and self.sdlc_phase_idx < len(SDLC_PHASES):
             phase = SDLC_PHASES[self.sdlc_phase_idx]
             phase_prompt = SDLC_PHASE_PROMPTS.get(phase, "")
             completed = ", ".join(self.sdlc_completed) if self.sdlc_completed else "none"
-            prompt += f"\n\n[SDLC PHASE: {phase.upper()}]\n{phase_prompt}\n\nCompleted phases: {completed}"
+            prompt += (
+                f"\n\n[SDLC PHASE: {phase.upper()}]\n{phase_prompt}\n"
+                f"Completed: {completed}\n"
+                "Turns are NOT limited by a fixed count. Produce required artifacts; orchestrator advances gates."
+            )
+            handoff = self._phase_handoff_block(phase)
+            if handoff:
+                prompt += f"\n\n{handoff}"
+        wm = self._read_working_memory()
+        if wm:
+            prompt += f"\n\n[WORKING MEMORY — do not rediscover these facts]\n{wm}"
+        if self._strategy_hints:
+            prompt += "\n\n[STRATEGY CORRECTIONS — obey these]\n" + "\n".join(f"- {h}" for h in self._strategy_hints[-5:])
+        if self._last_test_digest:
+            prompt += f"\n\n[LAST TEST DIGEST — fix these failures]\n{self._last_test_digest[:3000]}"
         if self.ctx.compaction_summary:
             prompt += f"\n\n[COMPACTED HISTORY]\n{self.ctx.compaction_summary}"
         self.ctx.add_system(prompt)
+
+    def _sync_project_state(self) -> None:
+        """Write orchestrator facts into PROJECT_STATE and disk."""
+        try:
+            st = self.project_state
+            st["goal"] = self.goal
+            st["phase"] = SDLC_PHASES[self.sdlc_phase_idx] if self.sdlc_phase_idx < len(SDLC_PHASES) else "complete"
+            st["completed_phases"] = sorted(self.sdlc_completed)
+            st["open_todos"] = [
+                {"id": tid, **todo} for tid, todo in list(TodoTool._todos.items())[:40]
+            ]
+            st["src_write_paths"] = list(self._src_write_paths)[-40:]
+            if self._last_test_digest:
+                fails = list(st.get("last_failures") or [])
+                fails.append(self._last_test_digest[:500])
+                st["last_failures"] = fails[-10:]
+            save_project_state(self.project_dir, st, self.project_state_file)
+        except Exception:
+            pass
 
     def _advance_sdlc(self) -> bool:
         """Advance to next SDLC phase. Returns True if there are more phases."""
         current = SDLC_PHASES[self.sdlc_phase_idx]
         self.sdlc_completed.add(current)
         self.sdlc_phase_idx += 1
-        self._phase_rounds = 0  # reset stuck counter on every advance
-        self._phase_tool_counts = {}  # reset deterministic tool-call tracking
+        self._phase_rounds = 0
+        self._phase_tool_counts = {}
         self._phase_bash_ok = False
+        self._sync_project_state()
+        self._update_working_memory(f"phase complete: {current} → next")
         if self.sdlc_phase_idx >= len(SDLC_PHASES):
             UI.ok("All SDLC phases complete — goal pipeline finished.")
             if self.autopilot:
@@ -1775,28 +2453,45 @@ class NeonArchitect:
         self.persist(force=True)
         return True
 
-    def _start_autopilot(self):
-        """Enter god autopilot mode for the current goal."""
+    def _start_autopilot(self, restart: bool = False):
+        """Enter god autopilot. Resumes saved phase unless restart=True."""
         if not self.goal:
             UI.err("No goal set. Use /goal <description> first.")
             return False
         self.autopilot = True
-        self.sdlc_phase_idx = 0
-        self.sdlc_completed.clear()
-        self.autopilot_rounds = 0
-        self.round = 0
+        if restart or self.sdlc_phase_idx >= len(SDLC_PHASES):
+            self.sdlc_phase_idx = 0
+            self.sdlc_completed.clear()
+            self.autopilot_rounds = 0
+            self.round = 0
+            self._phase_tool_counts = {}
+            self._phase_bash_ok = False
+            if hasattr(self, "_tool_fail_counts"):
+                self._tool_fail_counts = {}
+            if hasattr(self, "_strategy_hints"):
+                self._strategy_hints = []
+            UI.info("Autopilot starting from PLANNING (fresh cycle).")
+        else:
+            UI.info(
+                f"Autopilot resuming at {SDLC_PHASES[self.sdlc_phase_idx].upper()} "
+                f"(completed: {', '.join(sorted(self.sdlc_completed)) or 'none'}). "
+                "Use /autopilot restart for a full restart."
+            )
         self._phase_rounds = 0
-        self._phase_tool_counts = {}
-        self._phase_bash_ok = False
-        # Set initial persona for planning phase
-        initial_persona = SDLC_PERSONA_MAP.get("planning", "adaptive")
+        phase = SDLC_PHASES[min(self.sdlc_phase_idx, len(SDLC_PHASES) - 1)]
+        initial_persona = SDLC_PERSONA_MAP.get(phase, "adaptive")
         self._switch_persona(initial_persona, reason="auto")
         self._rebuild_system()
         UI.separator("GOD AUTOPILOT ENGAGED")
         UI.ok(f"Goal: {self.goal}")
-        UI.info(f"Starting SDLC phase: {SDLC_PHASES[0].upper()}")
-        UI.info("The agent will now autonomously cycle through planning → architecture → design → implementation → testing → review → deployment → verification")
-        UI.info("Type /stop to halt autopilot, /status to check progress")
+        UI.info(f"Current SDLC phase: {phase.upper()}")
+        UI.info("SDLC: planning → architecture → design → implementation → testing → review → deployment → verification")
+        UI.info(
+            f"Gates: {getattr(self, 'plan_artifact', 'PLAN.md')} + todos; "
+            f"{getattr(self, 'architecture_artifact', 'ARCHITECTURE.md')} + stubs. "
+            "No fixed turn force-advance."
+        )
+        UI.info("Type /stop to halt, /status for progress")
         return True
 
     def _stop_autopilot(self):
@@ -1829,22 +2524,143 @@ class NeonArchitect:
         remaining = [p for p in SDLC_PHASES if p not in self.sdlc_completed]
         UI.info(f"Remaining: {', '.join(remaining)}")
 
+    def _read_artifact_snippet(self, relative_path: str, max_chars: int = 3500) -> str:
+        try:
+            fp = (self.project_dir / relative_path).resolve()
+            fp.relative_to(self.project_dir.resolve())
+            if not fp.is_file():
+                return ""
+            text = fp.read_text(encoding="utf-8", errors="replace").strip()
+            return text if len(text) <= max_chars else text[:max_chars] + f"\n… [{len(text)} chars total]"
+        except Exception:
+            return ""
+
+    def _todo_handoff_text(self) -> str:
+        if not TodoTool._todos:
+            return "(no todos yet)"
+        return "\n".join(
+            f"- [{t.get('status','pending')}] {tid}: {t.get('content','')}"
+            for tid, t in TodoTool._todos.items()
+        )
+
+    def _phase_handoff_block(self, phase: str) -> str:
+        parts: List[str] = []
+        plan_name = getattr(self, "plan_artifact", "PLAN.md")
+        arch_name = getattr(self, "architecture_artifact", "ARCHITECTURE.md")
+        if phase != "planning":
+            plan = self._read_artifact_snippet(plan_name)
+            parts.append(f"[PLAN — follow]\nSource: {plan_name}\n{plan}" if plan else f"[PLAN MISSING] {plan_name}")
+        if phase not in ("planning", "architecture"):
+            arch = self._read_artifact_snippet(arch_name)
+            parts.append(f"[ARCHITECTURE — follow]\nSource: {arch_name}\n{arch}" if arch else f"[ARCHITECTURE MISSING] {arch_name}")
+        parts.append(f"[TODOS]\n{self._todo_handoff_text()}")
+        return "\n\n".join(parts)
+
+    def _working_memory_path(self) -> Path:
+        return self.project_dir / getattr(self, "working_memory_file", ".neon_working_memory.md")
+
+    def _read_working_memory(self) -> str:
+        try:
+            fp = self._working_memory_path()
+            if fp.is_file():
+                return fp.read_text(encoding="utf-8", errors="replace").strip()[:4000]
+        except Exception:
+            pass
+        return ""
+
+    def _update_working_memory(self, note: str, section: str = "Facts") -> None:
+        """Structured durable memory: Facts / Decisions / Blockers / Next action."""
+        try:
+            fp = self._working_memory_path()
+            prev = self._read_working_memory()
+            sections = {"Facts": [], "Decisions": [], "Blockers": [], "Next action": []}
+            cur = "Facts"
+            if prev:
+                for ln in prev.splitlines():
+                    s = ln.strip()
+                    if s.startswith("## "):
+                        title = s[3:].strip()
+                        if title in sections:
+                            cur = title
+                        continue
+                    if s.startswith("#"):
+                        continue
+                    if s:
+                        sections.setdefault(cur, []).append(s)
+            stamp = datetime.now().strftime("%H:%M:%S")
+            entry = f"- [{stamp}] {note.strip()[:300]}"
+            sec = section if section in sections else "Facts"
+            sections[sec].append(entry)
+            # Cap each section
+            for k in list(sections.keys()):
+                sections[k] = sections[k][-15:]
+            body_lines = ["# Neon working memory (auto)", ""]
+            for title in ("Facts", "Decisions", "Blockers", "Next action"):
+                body_lines.append(f"## {title}")
+                body_lines.extend(sections.get(title) or ["- (none)"])
+                body_lines.append("")
+            fp.write_text("\n".join(body_lines), encoding="utf-8")
+            with ReadTool._cache_lock:
+                ReadTool._cache.pop(str(fp.resolve()), None)
+            # Mirror into project_state
+            if section == "Decisions":
+                self.project_state.setdefault("decisions", []).append(note[:200])
+                self.project_state["decisions"] = self.project_state["decisions"][-20:]
+            elif section == "Blockers":
+                self.project_state.setdefault("blockers", []).append(note[:200])
+                self.project_state["blockers"] = self.project_state["blockers"][-10:]
+            elif section == "Next action":
+                self.project_state["next_action"] = note[:300]
+        except Exception:
+            pass
+
+    def _tool_fingerprint(self, name: str, args: Dict[str, Any]) -> str:
+        key_args = {}
+        for k in ("path", "command", "query", "url", "pattern", "action", "id"):
+            if k in args and args[k] is not None:
+                key_args[k] = str(args[k])[:200]
+        return f"{name}:{json.dumps(key_args, sort_keys=True, ensure_ascii=False)}"
+
     def _autopilot_prompt(self) -> str:
-        """Generate the next autopilot prompt based on current phase."""
         if self.sdlc_phase_idx >= len(SDLC_PHASES):
-            return "The SDLC is complete. Verify all acceptance criteria are met and summarize the deliverables."
+            return "SDLC complete. Verify PLAN.md acceptance criteria and summarize deliverables."
         phase = SDLC_PHASES[self.sdlc_phase_idx]
+        plan_name = getattr(self, "plan_artifact", "PLAN.md")
+        arch_name = getattr(self, "architecture_artifact", "ARCHITECTURE.md")
         prompts = {
-            "planning": "PLANNING ONLY: Call the todo tool at least 5 times (action=add). Do NOT read the whole codebase. Do NOT implement yet. Summarize in 5 bullets after todos.",
-            "architecture": "Design the system architecture. Create the directory structure and write interface stubs. Do NOT write full implementations yet.",
-            "design": "Design the UI/UX. Create component structure, styles, and layout. Focus on frontend structure only.",
-            "implementation": "Implement the features using TDD. For each feature: 1) write a failing test, 2) write code to pass it, 3) refactor. Run tests frequently.",
-            "testing": "Run the full test suite. Fix any failures. Add tests for edge cases. Ensure coverage is adequate. Do NOT add new features.",
-            "review": "Review the entire codebase for quality, security, and consistency. Refactor as needed. Ensure all tests pass.",
-            "deployment": "Create deployment artifacts: Dockerfile, docker-compose, CI/CD config. Add health checks and documentation.",
-            "verification": "Run final integration tests. Verify the goal is fully achieved. Update todos to complete. If gaps exist, identify them.",
+            "planning": (
+                f"PLANNING: (1) web_search any external product in the goal, browse_page top URLs "
+                f"(confirm domain, e.g. oiioii.ai vs oioi.com). (2) Write {plan_name} with requirements, "
+                f"risks, phased tasks, acceptance criteria. (3) todo add ≥5. Do NOT implement app code. "
+                f"Gate: {plan_name} ≥200 chars AND ≥5 todos. Call a tool NOW."
+            ),
+            "architecture": (
+                f"ARCHITECTURE: follow {plan_name}. Write {arch_name} + interface stubs (≥2 write/edit). "
+                f"No full features yet. Call a tool NOW."
+            ),
+            "design": f"DESIGN following {plan_name}/{arch_name}. ≥3 write/edit. Call a tool NOW.",
+            "implementation": (
+                f"IMPLEMENT following {plan_name}/{arch_name} with TDD (RED→GREEN). "
+                f"Prefer write failing tests under tests/ then minimal code under src/. "
+                f"≥8 write/edit with ≥4 under src/app/backend/frontend/lib/tests. "
+                f"Use modules/task before inventing parallel systems. Call a tool NOW."
+            ),
+            "testing": (
+                f"TEST against {plan_name}. Run the project test command to exit 0. "
+                f"If failures appear, fix code (GREEN) — do not skip. Call a tool NOW."
+            ),
+            "review": f"REVIEW vs {plan_name}/{arch_name}. ≥3 read/edit/search. Call a tool NOW.",
+            "deployment": f"DEPLOY aligned with {arch_name}. Dockerfile/compose/CI. Call a tool NOW.",
+            "verification": f"VERIFY all {plan_name} criteria. Tests must exit 0. Call a tool NOW.",
         }
-        return prompts.get(phase, "Continue working toward the goal.")
+        body = prompts.get(phase, "Continue the goal. Call a tool NOW.")
+        handoff = self._phase_handoff_block(phase)
+        hints = ""
+        if self._strategy_hints:
+            hints = "\n\n[STRATEGY — do not repeat failed approaches]\n" + "\n".join(
+                f"- {h}" for h in self._strategy_hints[-4:]
+            )
+        return f"{body}\n\n{handoff}{hints}"
 
     def _detect_persona(self, user_input: str) -> Optional[str]:
         """Auto-detect persona from user input keywords."""
@@ -1880,6 +2696,10 @@ class NeonArchitect:
         now = time.monotonic()
         if not force and (now - self._last_persist) < 2.0:
             return
+        try:
+            self._sync_project_state()
+        except Exception:
+            pass
         if save_session(self, also_config=True):
             self._last_persist = now
 
@@ -2298,60 +3118,115 @@ class NeonArchitect:
             else:
                 print(f"* {name}({preview})")
 
-            result = execute_tool(self.tools, name, args)
-            UI.tool_result(name, result.text()[:500], result.is_error)
+            # Anti-loop: identical failing fingerprints
+            fp_key = self._tool_fingerprint(name, args)
+            prior_fails = self._tool_fail_counts.get(fp_key, 0)
+            if prior_fails >= self.max_same_tool_failures:
+                msg = (
+                    f"[BLOCKED REPEAT] {name} with the same arguments already failed "
+                    f"{prior_fails} times. Change strategy: different path, query, URL, or tool."
+                )
+                UI.warn(msg)
+                self._strategy_hints.append(msg)
+                result = ToolResult("", error=msg, is_error=True)
+            else:
+                result = execute_tool(self.tools, name, args)
+                if result.is_error:
+                    self._tool_fail_counts[fp_key] = prior_fails + 1
+                    if self._tool_fail_counts[fp_key] >= 2:
+                        hint = (
+                            f"Tool {name} failed {self._tool_fail_counts[fp_key]}x with same args. "
+                            f"Do NOT retry identically — change approach."
+                        )
+                        self._strategy_hints.append(hint)
+                        UI.warn(hint)
+                else:
+                    self._tool_fail_counts[fp_key] = 0
+                    if name == "web_search":
+                        self._research_done = True
+                        q = str(args.get("query", ""))[:120]
+                        self._update_working_memory(f"web_search: {q}")
+                        self.project_state.setdefault("research_notes", []).append(f"search:{q}")
+                    elif name == "browse_page":
+                        self._research_done = True
+                        u = str(args.get("url", ""))[:160]
+                        self._update_working_memory(f"browsed: {u}")
+                        self.project_state.setdefault("research_notes", []).append(f"browse:{u}")
+                    elif name in ("write", "edit"):
+                        rel = str(args.get("path") or "").replace("\\", "/").lstrip("./")
+                        self._update_working_memory(f"{name}: {rel}")
+                        prefixes = self.config.get("implementation_path_prefixes") or [
+                            "src/", "app/", "backend/", "frontend/", "lib/", "tests/"
+                        ]
+                        low = rel.lower()
+                        if any(low.startswith(p.lower()) or f"/{p.lower()}" in f"/{low}" for p in prefixes):
+                            if rel not in self._src_write_paths:
+                                self._src_write_paths.append(rel)
+                            self._phase_tool_counts["src_write"] = self._phase_tool_counts.get("src_write", 0) + 1
+                    elif name == "todo" and args.get("action") == "add":
+                        self._update_working_memory(f"todo: {str(args.get('content',''))[:120]}", section="Next action")
+                    elif name == "bash":
+                        digest = getattr(BashTool, "last_test_digest", "") or ""
+                        if digest:
+                            self._last_test_digest = digest
+                            if result.is_error:
+                                self._update_working_memory("test failure — see LAST TEST DIGEST", section="Blockers")
+                            else:
+                                cmd = str(args.get("command") or "")[:120]
+                                self.project_state["test_command"] = cmd
+                                self._update_working_memory(f"tests ok: {cmd}", section="Decisions")
 
-            # Deterministic phase-completion tracking (orchestrator-owned facts,
-            # not model self-reports). Only meaningful in autopilot, but cheap
-            # to track always. Scoped to the CURRENT phase only — TodoTool._todos
-            # itself is a class-level counter that persists for the whole
-            # session, so we track "add" actions separately per-phase rather
-            # than reading that global count (a restored session with old
-            # todos already present would otherwise satisfy planning instantly).
+            self._recent_tool_keys.append(fp_key)
+            out_preview = result.text()[:800] if not result.is_error else result.text()[:500]
+            UI.tool_result(name, out_preview, result.is_error)
+
             self.current_turn_tool_calls = True
             self._phase_tool_counts[name] = self._phase_tool_counts.get(name, 0) + 1
             if name == "todo" and args.get("action") == "add" and not result.is_error:
                 self._phase_tool_counts["todo_add"] = self._phase_tool_counts.get("todo_add", 0) + 1
-            if name == "bash" and not result.is_error:
+            if name == "bash":
                 cmd = str(args.get("command") or "").lower()
-                # dir/ls/echo must NOT complete TESTING
-                if any(
+                is_test = any(
                     x in cmd
                     for x in (
-                        "pytest",
-                        "python -m pytest",
-                        "python -m unittest",
-                        "unittest",
-                        "npm test",
-                        "npx jest",
-                        "cargo test",
-                        "go test",
-                        "test_core.py",
-                        "test_agents.py",
+                        "pytest", "python -m pytest", "python -m unittest", "unittest",
+                        "npm test", "npx jest", "cargo test", "go test",
+                        "test_core.py", "test_agents.py",
                     )
-                ):
+                )
+                if is_test and result.is_error:
+                    self._tdd_saw_red = True
+                    if BashTool.last_test_digest:
+                        self._last_test_digest = BashTool.last_test_digest
+                if is_test and not result.is_error:
                     self._phase_bash_ok = True
+                    if self._tdd_saw_red:
+                        self._tdd_saw_green = True
+                        self._update_working_memory("TDD green after red", section="Decisions")
 
             ctx_tokens = self.ctx.estimate_tokens()
             max_tool_len = max(2000, (self.model_cfg["ctx_window"] - ctx_tokens) * 4)
             self.ctx.add_tool_result(tc["id"], name, result.text()[:max_tool_len])
 
+        self._sync_project_state()
         return True
 
     def _should_nudge(self, content: str) -> bool:
-        """Detect if the assistant announced intent without calling a tool."""
+        """Detect announce-without-tool. Stricter to cut wasted turns."""
         if not self.config.get("auto_nudge", True):
             return False
-        if self.nudges >= self.config.get("max_nudges", 3):
+        if self.nudges >= self.config.get("max_nudges", 2):
             return False
-        if len(content) > 1000:
+        if len(content) > 800:
             return False
+        lower = content.lower()
         phrases = [
             "let me", "i will", "i'll", "i need to", "i'm going to",
-            "allow me to", "i should", "here is the plan", "first, i",
-            "next, i", "i can", "i would like to", "i shall", "i intend to"
+            "allow me to", "i should", "first, i", "next, i",
+            "i can", "i shall", "i intend to", "i am going to",
+            "going to search", "going to read", "going to check",
+            "will now", "now i will",
         ]
-        lower = content.lower()
         return any(p in lower for p in phrases)
 
     def run_turn(self, user_input: str):
@@ -2376,31 +3251,25 @@ class NeonArchitect:
             else:
                 print(f">>> {user_input}")
 
-        # Cap = max(max_rounds, max_autopilot_rounds) so autopilot never dies at 100
-        _cap = int(self.config.get("max_rounds", 500))
-        if self.autopilot:
-            _cap = max(_cap, int(self.config.get("max_autopilot_rounds", self.max_autopilot_rounds)))
-        while self.round < _cap:
+        _max_rounds = int(self.config.get("max_rounds", 0) or 0)
+        _max_ap = int(self.config.get("max_autopilot_rounds", self.max_autopilot_rounds) or 0)
+        while True:
+            if not self.autopilot and _max_rounds > 0 and self.round >= _max_rounds:
+                UI.warn(f"Interactive max_rounds ({_max_rounds}) reached. Stopping.")
+                break
+            if self.autopilot and _max_ap > 0 and self.autopilot_rounds >= _max_ap:
+                UI.warn(
+                    f"Autopilot advisory limit ({_max_ap}) reached — stopping without force-advancing. "
+                    "Raise max_autopilot_rounds or /autopilot to resume."
+                )
+                self._stop_autopilot()
+                break
+
             self.round += 1
             self.current_turn_tool_calls = False
             if self.autopilot:
                 self.autopilot_rounds += 1
-                max_ap = int(self.config.get("max_autopilot_rounds", self.max_autopilot_rounds))
-                if self.autopilot_rounds > max_ap:
-                    # Soft limit: do NOT abandon the goal. Extend budget and
-                    # force-advance a stuck phase so autopilot can finish.
-                    UI.warn(
-                        f"Autopilot round budget ({max_ap}) reached — extending +100 "
-                        f"(goal not complete; phase={SDLC_PHASES[self.sdlc_phase_idx] if self.sdlc_phase_idx < len(SDLC_PHASES) else 'done'})"
-                    )
-                    self.max_autopilot_rounds = max_ap + 100
-                    self.config["max_autopilot_rounds"] = self.max_autopilot_rounds
-                    # Force phase advance if still stuck in early phases
-                    if self.sdlc_phase_idx < len(SDLC_PHASES) - 1:
-                        UI.warn("Force-advancing SDLC phase so work can continue toward the goal.")
-                        self._advance_sdlc()
 
-            # Periodic autosave (every N turns)
             if self.round % max(1, self._persist_every) == 0:
                 self.persist()
 
@@ -2465,42 +3334,20 @@ class NeonArchitect:
                     self.persist(force=True)
                 delay = float(self.config.get("inter_turn_delay", 0.1))
                 time.sleep(max(0.1, delay))
-                # In autopilot, after tools execute, continue to next round automatically
                 if self.autopilot:
+                    self._phase_rounds += 1
                     phase_name = SDLC_PHASES[min(self.sdlc_phase_idx, len(SDLC_PHASES) - 1)]
-                    stuck_limit = int(self.config.get("max_phase_rounds", 4))
-                    if phase_name in ("implementation", "testing"):
-                        stuck_limit = max(stuck_limit, 20)
-                    elif phase_name in ("architecture", "design"):
-                        stuck_limit = max(stuck_limit, 8)
-                    force_phase = self._phase_rounds >= stuck_limit
-                    if force_phase and phase_name == "implementation":
-                        we = (
-                            self._phase_tool_counts.get("write", 0)
-                            + self._phase_tool_counts.get("edit", 0)
-                        )
-                        if we < 8:
-                            force_phase = False
-                            if self._phase_rounds % 5 == 0:
-                                UI.warn(
-                                    f"IMPLEMENTATION needs more coding "
-                                    f"(write/edit={we}/8) — keep implementing under project dir"
-                                )
-                    if force_phase and not self._phase_requirements_met():
-                        UI.warn(
-                            f"Phase stuck ({self._phase_rounds} turns in "
-                            f"{phase_name.upper()}) — force-advancing"
-                        )
-                    if (
-                        self._phase_requirements_met()
-                        or self._should_advance_phase(content)
-                        or force_phase
-                    ):
+                    if self._phase_requirements_met():
                         if not self._advance_sdlc():
                             UI.separator("GOAL ACHIEVED")
                             UI.ok("All SDLC phases complete!")
                             self._stop_autopilot()
                             break
+                    elif self._phase_rounds % 10 == 0:
+                        UI.info(
+                            f"Still in {phase_name.upper()} (turn {self._phase_rounds}). "
+                            f"Counts: {dict(self._phase_tool_counts)}. Gates not met — continuing."
+                        )
                     continue
                 continue
 
@@ -2510,20 +3357,18 @@ class NeonArchitect:
             # Auto-nudge if assistant announced but didn't act
             if self._should_nudge(content):
                 self.nudges += 1
-                if self.nudges >= self.config.get("max_nudges", 3) and self.autopilot:
-                    # Nudge cap hit in autopilot — inject a hard imperative and reset counter
-                    UI.warn("Nudge cap hit in autopilot. Injecting hard command...")
+                if self.nudges >= self.config.get("max_nudges", 2) and self.autopilot:
+                    UI.warn("Nudge cap — hard tool command.")
                     self.ctx.add_user(
-                        "SYSTEM OVERRIDE: Stop planning and talking. Execute a tool call RIGHT NOW. "
-                        "Pick the most important next action and call the tool immediately. "
-                        "Do not explain. Do not ask. Just call the tool."
+                        "SYSTEM OVERRIDE: Do not explain. Call exactly ONE tool now "
+                        "(prefer web_search, browse_page, write, or todo). "
+                        "If the last tool failed, use a DIFFERENT approach."
                     )
                     self.nudges = 0
                 else:
-                    UI.warn("Agent paused without action. Nudging...")
+                    UI.warn("Paused without tool — nudging.")
                     self.ctx.add_user(
-                        "Please proceed and execute the tool you just mentioned. "
-                        "Do not ask for permission. Call the tool now."
+                        "Call the tool you need NOW. No preamble. One tool call only."
                     )
                 time.sleep(0.5)  # was 1.5s — reduced
                 continue
@@ -2546,153 +3391,125 @@ class NeonArchitect:
 
             break
 
-        else:
-            UI.warn("Max rounds reached. Stopping.")
-            if self.autopilot:
-                self._stop_autopilot()
+    def _artifact_ok(self, relative_path: str, min_chars: int = 200):
+        try:
+            fp = (self.project_dir / relative_path).resolve()
+            fp.relative_to(self.project_dir.resolve())
+            if not fp.is_file():
+                return False, 0
+            try:
+                n = len(fp.read_text(encoding="utf-8", errors="replace").strip())
+            except Exception:
+                n = fp.stat().st_size
+            return n >= min_chars, n
+        except Exception:
+            return False, 0
+
+    def _artifact_ok(self, relative_path: str, min_chars: int = 200):
+        try:
+            fp = (self.project_dir / relative_path).resolve()
+            fp.relative_to(self.project_dir.resolve())
+            if not fp.is_file():
+                return False, 0
+            try:
+                n = len(fp.read_text(encoding="utf-8", errors="replace").strip())
+            except Exception:
+                n = fp.stat().st_size
+            return n >= min_chars, n
+        except Exception:
+            return False, 0
 
     def _phase_requirements_met(self) -> bool:
-        """ORCHESTRATOR-OWNED, DETERMINISTIC phase-completion check.
-
-        This is the primary gate. It checks observable facts produced by real
-        tool execution during the CURRENT phase only (todos created, files
-        written, a bash command that actually exited 0) — never the model's
-        own claims about its progress. A thinking model is probabilistic and
-        will not reliably say "planning complete"; it will, however,
-        deterministically either have called todo(add) three times or not.
-
-        The textual/heuristic check in _should_advance_phase remains as a
-        secondary signal and the stuck-round timer remains as a last resort,
-        but this is what should fire in the common case.
-        """
-        if not self.autopilot:
-            return False
-        if self.sdlc_phase_idx >= len(SDLC_PHASES):
+        """Primary gate: durable artifacts, schema sections, research, src writes, tests."""
+        if not self.autopilot or self.sdlc_phase_idx >= len(SDLC_PHASES):
             return False
         phase = SDLC_PHASES[self.sdlc_phase_idx]
         reqs = SDLC_PHASE_REQUIREMENTS.get(phase)
         if not reqs:
             return False
-
         kind = reqs.get("kind")
-
+        if kind == "plan_complete":
+            artifact = reqs.get("artifact") or getattr(self, "plan_artifact", "PLAN.md")
+            ok, n = self._artifact_ok(artifact, int(reqs.get("min_chars", 400)))
+            added = self._phase_tool_counts.get("todo_add", 0)
+            plan_text = self._read_artifact_snippet(artifact, max_chars=20000)
+            headers = tuple(h.lower() for h in (reqs.get("require_sections") or PLAN_REQUIRED_HEADERS))
+            sections_ok = plan_has_sections(plan_text, headers) if plan_text else False
+            research_ok = True
+            if reqs.get("require_research") and self.config.get("require_research_for_external", True):
+                if goal_looks_external(self.goal or ""):
+                    research_ok = (
+                        self._research_done
+                        or self._phase_tool_counts.get("web_search", 0) > 0
+                        or self._phase_tool_counts.get("browse_page", 0) > 0
+                        or bool(self.project_state.get("research_notes"))
+                    )
+            met = ok and added >= int(reqs.get("min_todos", 5)) and sections_ok and research_ok
+            if met:
+                UI.info(f"Gate met: {artifact} ({n}c) + todos={added} + sections + research → {phase.upper()}")
+            return met
+        if kind == "architecture_complete":
+            artifact = reqs.get("artifact") or getattr(self, "architecture_artifact", "ARCHITECTURE.md")
+            ok, n = self._artifact_ok(artifact, int(reqs.get("min_chars", 300)))
+            total = sum(self._phase_tool_counts.get(x, 0) for x in reqs.get("any_tool", ["write", "edit"]))
+            arch_text = self._read_artifact_snippet(artifact, max_chars=20000)
+            headers = tuple(h.lower() for h in (reqs.get("require_sections") or ARCH_REQUIRED_HEADERS))
+            sections_ok = plan_has_sections(arch_text, headers) if arch_text else False
+            met = ok and total >= int(reqs.get("min_calls", 2)) and sections_ok
+            if met:
+                UI.info(f"Gate met: {artifact} ({n}c) + writes={total} + sections → {phase.upper()}")
+            return met
+        if kind == "implementation_complete":
+            total = sum(self._phase_tool_counts.get(x, 0) for x in reqs.get("any_tool", ["write", "edit"]))
+            src_n = self._phase_tool_counts.get("src_write", 0)
+            min_src = int(reqs.get("min_src_writes", self.config.get("min_implementation_src_writes", 4)))
+            met = total >= int(reqs.get("min_calls", 8)) and src_n >= min_src
+            if met:
+                UI.info(f"Gate met: write/edit={total}, src_writes={src_n} → {phase.upper()}")
+            return met
         if kind == "todo_count":
-            min_todos = reqs.get("min_todos", 3)
-            added_this_phase = self._phase_tool_counts.get("todo_add", 0)
-            met = added_this_phase >= min_todos
+            added = self._phase_tool_counts.get("todo_add", 0)
+            met = added >= reqs.get("min_todos", 3)
             if met:
-                UI.info(f"Deterministic gate met: {added_this_phase} todo(s) added this phase (>= {min_todos}) → advancing from {phase.upper()}")
+                UI.info(f"Gate met: {added} todos → {phase.upper()}")
             return met
-
         if kind == "tool_calls":
-            any_tool = reqs.get("any_tool", [])
-            min_calls = reqs.get("min_calls", 1)
-            total = sum(self._phase_tool_counts.get(t, 0) for t in any_tool)
-            met = total >= min_calls
+            total = sum(self._phase_tool_counts.get(x, 0) for x in reqs.get("any_tool", []))
+            met = total >= reqs.get("min_calls", 1)
             if met:
-                UI.info(f"Deterministic gate met: {total} call(s) to {any_tool} (>= {min_calls}) → advancing from {phase.upper()}")
+                UI.info(f"Gate met: {total} tool calls → {phase.upper()}")
             return met
-
         if kind == "bash_success":
-            met = self._phase_bash_ok
-            if met:
-                UI.info(f"Deterministic gate met: a bash command exited 0 in this phase → advancing from {phase.upper()}")
-            return met
-
+            if not self._phase_bash_ok:
+                return False
+            # Optional RED→GREEN: prefer seeing a failure then a pass in testing/verification
+            if self.config.get("tdd_enforce_red_green") and phase in ("testing", "verification"):
+                if self._tdd_saw_red and not self._tdd_saw_green:
+                    UI.info("TDD: saw RED but not GREEN yet — keep fixing until tests pass after a failure.")
+                    return False
+                # If never saw red, still allow advance on green (legacy suites already passing)
+            UI.info(f"Gate met: test exit 0 → {phase.upper()}")
+            return True
         return False
 
     def _should_advance_phase(self, content: str) -> bool:
-        """Heuristic FALLBACK: determine if the current SDLC phase is complete.
-
-        This is now the SECONDARY signal. _phase_requirements_met() (checked
-        first by the caller) is the primary, deterministic gate based on
-        actual tool execution. This method exists for cases where the model
-        clearly announces completion in prose before the deterministic
-        threshold is hit, plus the stuck-round timer as a last-resort escape
-        hatch if neither the deterministic check nor prose ever fires.
-        """
+        """Secondary prose signal only. NEVER force-advances on turn count."""
         if not self.autopilot:
             return False
-        lower = content.lower()
         phase = SDLC_PHASES[self.sdlc_phase_idx] if self.sdlc_phase_idx < len(SDLC_PHASES) else ""
-
-        # Count every turn in this phase (tool spam used to freeze the stuck-timer)
         self._phase_rounds += 1
-
-        # IMPLEMENTATION / TESTING: prose alone must NEVER advance — only tool gates
-        if phase in ("implementation", "testing", "verification"):
+        if phase in ("planning", "architecture", "implementation", "testing", "verification"):
             return False
-
-        # Phase-specific completion signals — broader to catch thinking-model phrasing
+        lower = (content or "").lower()
         signals = {
-            "planning": [
-                "plan complete", "todo list created", "todos added",
-                "planning complete", "breakdown complete", "planning is done",
-                "ready for architecture",
-            ],
-            "architecture": [
-                "architecture complete", "design done", "structure defined", "interfaces created",
-                "architecture is complete", "architecture done", "system design complete",
-                "directory structure", "have defined the", "have designed the",
-                "ready for implementation", "ready to implement",
-            ],
-            "design": [
-                "design complete", "ui designed", "components ready", "layout done",
-                "design is complete", "ui complete", "ux done", "frontend ready",
-                "have designed", "have created the components",
-            ],
-            "implementation": [
-                "implementation complete", "feature done", "all tests pass", "code written",
-                "implementation is complete", "implementation done", "feature complete",
-                "have implemented", "code is complete", "features implemented",
-                "tests are passing", "tests pass",
-            ],
-            "testing": [
-                "tests pass", "coverage complete", "all green", "testing done",
-                "testing complete", "all tests pass", "test suite complete",
-                "have written tests", "tests are complete", "coverage is",
-            ],
-            "review": [
-                "review complete", "refactoring done", "code clean", "audit passed",
-                "review is complete", "code review done", "refactoring complete",
-                "have reviewed", "code is clean", "review done",
-            ],
-            "deployment": [
-                "deployment ready", "docker complete", "ci/cd configured", "deployed",
-                "deployment complete", "dockerfile created", "docker-compose",
-                "have created the dockerfile", "ci/cd complete", "deployment done",
-            ],
-            "verification": [
-                "verification complete", "goal achieved", "all criteria met", "ready for release",
-                "verification done", "all verified", "goal is achieved",
-                "have verified", "everything works", "complete and working",
-            ],
+            "design": ["design complete", "ui designed", "design is complete"],
+            "review": ["review complete", "review is complete", "code review done"],
+            "deployment": ["deployment ready", "deployment complete", "dockerfile created"],
         }
-
         for signal in signals.get(phase, []):
-            if signal in lower:
-                UI.info(f"Phase signal detected: '{signal}' → advancing from {phase.upper()}")
+            if signal in lower and self._phase_requirements_met():
+                UI.info(f"Signal+gate: '{signal}' → {phase.upper()}")
                 return True
-
-        # Generic "moving on" language
-        generic_advance = [
-            "moving to", "next phase", "proceed to", "let's move",
-            "moving on to", "transitioning to", "advancing to",
-            "now proceed", "now move", "phase is complete", "phase complete",
-        ]
-        if any(p in lower for p in generic_advance):
-            UI.info(f"Generic advance signal detected → advancing from {phase.upper()}")
-            return True
-
-        # Stuck-timer fallback: force-advance if we've been in this phase too long
-        max_rounds = self._max_phase_rounds
-        if self._phase_rounds >= max_rounds:
-            UI.warn(
-                f"Phase {phase.upper()} stuck for {self._phase_rounds} rounds "
-                f"(limit: {max_rounds}). Force-advancing."
-            )
-            return True
-
         return False
 
     def cmd_files(self):
@@ -2708,9 +3525,17 @@ class NeonArchitect:
 
     def cmd_compact(self):
         before = self.ctx.estimate_tokens()
+        # Fold critical facts into working memory before shrinking chat
+        self._update_working_memory(
+            f"compact at phase={SDLC_PHASES[self.sdlc_phase_idx] if self.sdlc_phase_idx < len(SDLC_PHASES) else 'done'}; "
+            f"goal={(self.goal or '')[:120]}",
+            section="Facts",
+        )
+        self._sync_project_state()
         if self.ctx.compact(keep_recent=8):
             after = self.ctx.estimate_tokens()
-            UI.ok(f"Compacted: ~{before:,} → ~{after:,} tokens")
+            UI.ok(f"Compacted: ~{before:,} → ~{after:,} tokens (state + working memory preserved)")
+            self._rebuild_system()
         else:
             UI.info("Nothing to compact yet.")
 
@@ -2773,8 +3598,8 @@ class NeonArchitect:
             available = ", ".join(PERSONAS.keys())
             UI.err(f"Unknown persona '{persona_key}'. Available: {available}")
 
-    def cmd_autopilot(self):
-        """Start or resume god autopilot mode."""
+    def cmd_autopilot(self, restart: bool = False):
+        """Start or resume god autopilot. restart=True forces PLANNING from scratch."""
         if self.autopilot:
             UI.info("Autopilot is already running.")
             self._autopilot_status()
@@ -2782,9 +3607,106 @@ class NeonArchitect:
         if not self.goal:
             UI.err("No goal set. Use /goal <description> first.")
             return
-        self._start_autopilot()
-        # Immediately trigger first turn with autopilot prompt
+        if self.config.get("git_worktree_on_autopilot"):
+            self.cmd_worktree(auto=True)
+        self._start_autopilot(restart=restart)
         self.run_turn(self._autopilot_prompt())
+
+    def cmd_permission(self, mode: str = "status") -> None:
+        """Permission modes. File access is ALWAYS project-folder only.
+
+        full     — default: unrestricted bash in project, local net, no destructive confirm
+        strict   — bash destructive commands require confirm=true
+        local    — enable localhost browse
+        nolo     — disable localhost browse
+        status   — show flags
+        """
+        mode = (mode or "status").strip().lower()
+        if mode in ("status", "show", ""):
+            UI.separator("PERMISSIONS")
+            UI.info("File access: PROJECT FOLDER ONLY (hard limit)")
+            UI.info(f"full_access (in-project) = {self.full_access}")
+            UI.info(f"allow_local_network = {bool(self.config.get('allow_local_network'))}")
+            bash = self.tools.get("bash")
+            UI.info(f"bash_confirm_destructive = {getattr(bash, 'confirm_destructive', False)}")
+            UI.info(f"git_worktree_on_autopilot = {bool(self.config.get('git_worktree_on_autopilot'))}")
+            UI.info(f"tdd_enforce_red_green = {bool(self.config.get('tdd_enforce_red_green'))}")
+            UI.info("Commands: /permission full | strict | local | nolo | status")
+            return
+        if mode in ("full", "default"):
+            self.full_access = True
+            self.config["full_access"] = True
+            self.config["allow_path_outside_project"] = False
+            self.config["allow_local_network"] = True
+            self.config["bash_confirm_destructive"] = False
+            self.tools = build_tools(
+                self.project_dir, full_access=True, allow_outside=False,
+                allow_local=True, bash_confirm=False,
+            )
+            UI.ok("Full in-project permission (default). Files stay inside project folder.")
+            return
+        if mode in ("strict", "sandbox", "safe"):
+            self.full_access = False
+            self.config["full_access"] = False
+            self.config["bash_confirm_destructive"] = True
+            self.tools = build_tools(
+                self.project_dir, full_access=False, allow_outside=False,
+                allow_local=bool(self.config.get("allow_local_network", True)),
+                bash_confirm=True,
+            )
+            UI.ok("Strict mode: destructive bash requires confirm=true. Files still project-only.")
+            return
+        if mode == "local":
+            self.config["allow_local_network"] = True
+            if "browse_page" in self.tools:
+                self.tools["browse_page"].allow_local_network = True
+            UI.ok("Local network browse allowed.")
+            return
+        if mode in ("nolo", "nolocal"):
+            self.config["allow_local_network"] = False
+            if "browse_page" in self.tools:
+                self.tools["browse_page"].allow_local_network = False
+            UI.ok("Local network browse disabled.")
+            return
+        if mode == "outside":
+            UI.warn(
+                "Outside-project file access is disabled by policy. "
+                "All file tools are limited to the project folder."
+            )
+            return
+        UI.err(f"Unknown permission mode: {mode}. Use full | strict | local | nolo | status")
+
+    def cmd_worktree(self, auto: bool = False) -> None:
+        """Create a git worktree branch for isolated autopilot work (mitigates messy main)."""
+        branch = f"neon/{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        path = self.project_dir / ".neon_worktrees" / branch.replace("/", "_")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # Ensure git repo
+            chk = subprocess.run(
+                ["git", "rev-parse", "--is-inside-work-tree"],
+                cwd=str(self.project_dir), capture_output=True, text=True, timeout=15,
+            )
+            if chk.returncode != 0:
+                if auto:
+                    UI.info("Not a git repo — skipping worktree.")
+                    return
+                UI.err("Not a git repository. Run git init first, or ignore worktree.")
+                return
+            r = subprocess.run(
+                ["git", "worktree", "add", "-b", branch, str(path)],
+                cwd=str(self.project_dir), capture_output=True, text=True, timeout=60,
+            )
+            if r.returncode != 0:
+                UI.warn(f"worktree failed: {(r.stderr or r.stdout or '')[:300]}")
+                return
+            UI.ok(f"Git worktree ready: {path} (branch {branch})")
+            UI.info("Point future work there manually or re-launch with -p to that path.")
+            self._update_working_memory(f"worktree: {path} branch={branch}", section="Decisions")
+            self.project_state["worktree"] = {"path": str(path), "branch": branch}
+            self._sync_project_state()
+        except Exception as e:
+            UI.warn(f"worktree error: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2901,9 +3823,9 @@ def load_config() -> Dict[str, Any]:
         "inter_turn_delay": 0.35,
         "compact_threshold": 0.3,
         "startup_compact_tokens": 60000,
-        "max_rounds": 500,
-        "max_autopilot_rounds": 500,
-        "max_phase_rounds": 4,
+        "max_rounds": 0,
+        "max_autopilot_rounds": 0,
+        "max_phase_rounds": 0,
         "rpm_safety": 0.80,
         "thinking_effort": "high",
         "show_thinking": True,
@@ -3199,6 +4121,12 @@ def main():
     parser.add_argument("--model", "-m", default=None, help="Model key (glm-5.2, nemotron-ultra, ...)")
     parser.add_argument("--fresh", action="store_true",
                         help="Start a clean session (do not restore prior goal/messages/todos)")
+    parser.add_argument("--full-access", action="store_true",
+                        help="Unrestricted mode: any path, any bash (no destructive confirm), local network browse")
+    parser.add_argument("--allow-outside", action="store_true",
+                        help="Allow file tools to touch paths outside the project directory")
+    parser.add_argument("--allow-local-net", action="store_true",
+                        help="Allow browse_page to localhost / .local hosts")
     args = parser.parse_args()
 
     root_cfg = load_config()
@@ -3216,6 +4144,18 @@ def main():
         save_project_settings(root_cfg, project, default_model=args.model)
     if args.fresh:
         cfg["_fresh"] = True
+    # Defaults already: full in-project access, paths locked to project.
+    if args.full_access:
+        cfg["full_access"] = True
+        cfg["allow_path_outside_project"] = False  # never leave project folder
+        cfg["allow_local_network"] = True
+        cfg["bash_confirm_destructive"] = False
+    if args.allow_outside:
+        # Policy: outside paths are not granted even if flag is passed
+        UI.warn("--allow-outside ignored: file access is limited to the project folder only.")
+        cfg["allow_path_outside_project"] = False
+    if args.allow_local_net:
+        cfg["allow_local_network"] = True
 
     if not ensure_api_key(cfg, project_dir=project):
         sys.exit(1)
@@ -3269,7 +4209,7 @@ def main():
         UI.warn("No API key for this project — set with /apikey")
     UI.info(f"Config: {CONFIG_FILE}  ·  {_nproj} project entr{'y' if _nproj == 1 else 'ies'}")
     UI.info("Type your request. Empty Enter = proceed.")
-    UI.info("Commands: /new /apikey /files /cost /clear /reset /compact /model /todo /goal /persona /autopilot /status /stop /exit")
+    UI.info("Commands: /new /apikey /files /cost /clear /reset /compact /model /todo /goal /persona /autopilot /status /stop /permission /worktree /exit")
     UI.info(
         f"First token: {agent.config.get('first_token_timeout', 5)}s | "
         f"Retries: {agent.config.get('retry_max', 2)} | "
@@ -3329,14 +4269,24 @@ def main():
         if raw == "/persona":
             agent.cmd_persona()
             continue
-        if raw == "/autopilot":
-            agent.cmd_autopilot()
+        if raw == "/autopilot" or raw.startswith("/autopilot "):
+            agent.cmd_autopilot(restart="restart" in raw.lower())
             continue
         if raw == "/status":
             agent._autopilot_status()
             continue
         if raw == "/stop":
             agent._stop_autopilot()
+            continue
+        if raw == "/permission" or raw.startswith("/permission "):
+            arg = raw.split(None, 1)[1] if " " in raw else "status"
+            agent.cmd_permission(arg)
+            continue
+        if raw == "/worktree":
+            agent.cmd_worktree(auto=False)
+            continue
+        if raw == "/full-access" or raw == "/fullaccess":
+            agent.cmd_permission("full")
             continue
         if raw.startswith("/apikey"):
             parts = raw.split(None, 1)
