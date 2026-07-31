@@ -125,7 +125,7 @@ if LEGACY_WIN_CONSOLE:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 APP_NAME = "NEON ARCHITECT"
-APP_VERSION = "4.3.4"
+APP_VERSION = "4.3.5"
 APP_TAGLINE = "GLM-5.2 · NVIDIA NIM · Zero Bottlenecks · Self-Healing"
 
 CONFIG_DIR = Path.home() / ".neon_architect"
@@ -279,19 +279,19 @@ DEFAULT_CONFIG = {
     "retry_max": 8,
     "retry_base_delay": 2.5,
     "enable_openrouter": True,
-    "stream_content_timeout": 180.0,
-    "first_token_timeout": 90.0,
+    "stream_content_timeout": 200.0,
+    "first_token_timeout": 120.0,
     "http_read_timeout": 180.0,
     "http_connect_timeout": 15.0,
     "max_retries_per_provider": 3,
-    "thinking_effort": "high",
+    "thinking_effort": "medium",
     "inter_turn_delay": 0.35,
     # 0 = unlimited autopilot; stop on gates or /stop only.
     "max_autopilot_rounds": 0,
     # 0 = no force-advance on phase round count.
     "max_phase_rounds": 0,
     "startup_compact_tokens": 60000,
-    "autopilot_thinking": True,
+    "autopilot_thinking": False,
     "plan_artifact": "PLAN.md",
     "architecture_artifact": "ARCHITECTURE.md",
     "working_memory_file": ".neon_working_memory.md",
@@ -1199,19 +1199,22 @@ class ReadTool(Tool):
 class WriteTool(Tool):
     name = "write"
     description = (
-        "Create or overwrite a file. path MUST be project-relative "
-        "(e.g. src/core/agents/pm.py), never omit path. Creates parent dirs."
+        "Create or overwrite a file (or append). path MUST be project-relative "
+        "(e.g. src/app.py). Prefer SMALL files (<4000 chars per write). "
+        "For long docs use multiple writes with append=true. Creates parent dirs."
     )
     parameters = {
         "type": "object",
         "properties": {
             "path": {"type": "string", "description": "Project-relative path"},
             "content": {"type": "string"},
+            "append": {"type": "boolean", "default": False, "description": "Append instead of overwrite"},
         },
         "required": ["path", "content"],
     }
+    WARN_CHARS = 12000
 
-    def execute(self, path: str = "", content: str = None) -> ToolResult:
+    def execute(self, path: str = "", content: str = None, append: bool = False) -> ToolResult:
         try:
             if not path or not str(path).strip():
                 return ToolResult(
@@ -1224,12 +1227,28 @@ class WriteTool(Tool):
             fp = self._safe_path(path)
             fp.parent.mkdir(parents=True, exist_ok=True)
             data = content if isinstance(content, str) else str(content)
-            with open(fp, "w", encoding="utf-8", newline="\n") as f:
+            mode = "a" if append else "w"
+            with open(fp, mode, encoding="utf-8", newline="\n") as f:
                 f.write(data)
             with ReadTool._cache_lock:
                 ReadTool._cache.pop(str(fp), None)
             size = fp.stat().st_size if fp.is_file() else 0
-            return ToolResult(f"Written {len(data)} chars ({size} bytes on disk) to {path}")
+            notes = []
+            if len(data) >= self.WARN_CHARS:
+                notes.append(
+                    f"WARN: payload {len(data)} chars is large — prefer smaller chunks + append=true "
+                    "to avoid model/stream truncation."
+                )
+            # Heuristic: unfinished markdown fence or mid-token cut
+            stripped = data.rstrip()
+            if stripped.count("```") % 2 == 1:
+                notes.append("WARN: odd number of ``` fences — content may be truncated; append the rest.")
+            if any(stripped.endswith(x) for x in ("{", "(", "[", ",")) or stripped.endswith("className="):
+                notes.append("WARN: content ends mid-syntax — likely truncated; continue with append=true.")
+            msg = f"{'Appended' if append else 'Written'} {len(data)} chars ({size} bytes on disk) to {path}"
+            if notes:
+                msg += "\n" + "\n".join(notes)
+            return ToolResult(msg)
         except Exception as e:
             return ToolResult("", error=str(e), is_error=True)
 
@@ -2320,10 +2339,16 @@ class NeonArchitect:
         if not restored and not skip_restore:
             self._rebuild_system()
 
-        # Hard-pin thinking policy after session/config merge (old sessions had "off")
-        self.config["thinking_effort"] = "high"
-        self.config["show_thinking"] = True
-        self.config["autopilot_thinking"] = True
+        # Thinking policy: prefer config/defaults (medium) to reduce NIM first-token stalls.
+        # Do not force "high" — that was causing 90s buffer timeouts.
+        effort = str(self.config.get("thinking_effort") or DEFAULT_CONFIG.get("thinking_effort") or "medium").lower()
+        if effort not in ("off", "low", "medium", "high"):
+            effort = "medium"
+        self.config["thinking_effort"] = effort
+        self.config["show_thinking"] = bool(self.config.get("show_thinking", True))
+        self.config["autopilot_thinking"] = bool(
+            self.config.get("autopilot_thinking", DEFAULT_CONFIG.get("autopilot_thinking", False))
+        )
         self.config["first_token_timeout"] = float(
             self.config.get("first_token_timeout") or DEFAULT_CONFIG["first_token_timeout"]
         )
@@ -2676,9 +2701,12 @@ class NeonArchitect:
             "design": f"DESIGN following {plan_name}/{arch_name}. ≥3 write/edit. Call a tool NOW.",
             "implementation": (
                 f"IMPLEMENT following {plan_name}/{arch_name} with TDD (RED→GREEN). "
-                f"Prefer write failing tests under tests/ then minimal code under src/. "
+                f"Write REAL application source under src/, backend/, frontend/, tests/ — "
+                f"NOT more DESIGN.md/SPEC.md essays. "
+                f"Each write MUST be SMALL (<4000 chars). Use append=true only to continue the SAME file. "
+                f"Never dump an entire design system in one write. "
                 f"≥8 write/edit with ≥4 under src/app/backend/frontend/lib/tests. "
-                f"Use modules/task before inventing parallel systems. Call a tool NOW."
+                f"If providers time out, write an even smaller next file. Call a tool NOW."
             ),
             "testing": (
                 f"TEST against {plan_name}. Run the project test command to exit 0. "
@@ -3405,6 +3433,12 @@ class NeonArchitect:
                         f"Provider hiccup — sleeping {wait:.0f}s then continuing "
                         f"(phase={phase}, round={self.autopilot_rounds}). /stop to halt."
                     )
+                    if self.autopilot:
+                        self.ctx.add_user(
+                            "SYSTEM: Provider stalled. Do NOT rewrite huge DESIGN.md/SPEC.md. "
+                            "Call write on ONE small source file (<200 lines) under src/ or backend/ or frontend/. "
+                            "path required. No questions."
+                        )
                     time.sleep(wait)
                     continue
                 break
@@ -3974,7 +4008,7 @@ def load_config() -> Dict[str, Any]:
         "max_autopilot_rounds": 0,
         "max_phase_rounds": 0,
         "rpm_safety": 0.80,
-        "thinking_effort": "high",
+        "thinking_effort": "medium",
         "show_thinking": True,
         "autopilot_thinking": True,
     }
