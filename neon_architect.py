@@ -106,7 +106,7 @@ try:
     from rich.align import Align
     from rich.padding import Padding
     from rich.theme import Theme
-    from rich.box import ROUNDED, MINIMAL, SIMPLE_HEAD, DOUBLE_EDGE, HEAVY_EDGE
+    from rich.box import ROUNDED, MINIMAL, SIMPLE_HEAD, DOUBLE_EDGE, HEAVY_EDGE, ASCII
     from rich.live import Live
     from rich.progress import (
         Progress, SpinnerColumn, TextColumn,
@@ -143,7 +143,7 @@ if LEGACY_WIN_CONSOLE:
 
 APP_NAME = "NEON ARCHITECT"
 APP_VERSION = "4.6.4"
-APP_TAGLINE = "GLM-5.2 · NVIDIA NIM · Zero Bottlenecks · Self-Healing"
+APP_TAGLINE = "GLM-5.2 · NVIDIA NIM · Sleek · Zero Bottlenecks"
 
 CONFIG_DIR = Path.home() / ".neon_architect"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -252,7 +252,12 @@ MODELS: Dict[str, Dict[str, Any]] = {
         "name": "GLM-5.2",
         "provider": "NVIDIA NIM",
         "rpm": 40,
-        "max_tokens": 8192,
+        # Was 8192. GLM-5.2 defaults to Think-Max reasoning and can produce
+        # long chains of thought before the tool-call/content tokens even
+        # start; Together's own quickstart warns to "set max_tokens
+        # generously" when thinking is on, or the reasoning can eat the
+        # whole budget and truncate the actual tool call mid-JSON.
+        "max_tokens": 32768,
         "ctx_window": 131072,
         "thinking": False,
         "extra_body": None,
@@ -264,7 +269,7 @@ MODELS: Dict[str, Dict[str, Any]] = {
         "name": "GLM-5.2-FP8",
         "provider": "NVIDIA NIM",
         "rpm": 40,
-        "max_tokens": 8192,
+        "max_tokens": 32768,
         "ctx_window": 131072,
         "thinking": False,
         "extra_body": None,
@@ -324,7 +329,7 @@ DEFAULT_CONFIG = {
     "stream_timeout": 420.0,
     "request_timeout": 420.0,
     "rpm_safety": 0.80,
-    "show_thinking": False,
+    "show_thinking": True,
     "theme": "neon",
     "retry_max": 8,
     "retry_base_delay": 2.5,
@@ -335,7 +340,7 @@ DEFAULT_CONFIG = {
     "http_connect_timeout": 15.0,
     "max_retries_per_provider": 3,
     "nim_shared_rpm": 38.0,
-    "thinking_effort": "off",
+    "thinking_effort": "low",
     "allow_medium_high_thinking": False,
     "first_token_timeout_off": 60.0,
     "first_token_timeout_low": 150.0,
@@ -542,6 +547,7 @@ SDLC_PHASE_REQUIREMENTS: Dict[str, Dict[str, Any]] = {
         "kind": "tool_calls",
         "any_tool": ["write", "edit"],
         "min_calls": 3,
+        "min_chars_written": 300,
     },
     "implementation": {
         "kind": "implementation_complete",
@@ -562,6 +568,7 @@ SDLC_PHASE_REQUIREMENTS: Dict[str, Dict[str, Any]] = {
         "kind": "tool_calls",
         "any_tool": ["write", "edit"],
         "min_calls": 1,
+        "min_chars_written": 100,
     },
     "verification": {
         "kind": "verification_criteria_complete",
@@ -582,64 +589,110 @@ DESTRUCTIVE_BASH_RE = re.compile(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  SECTION 2: TERMINAL THEME & UI SYSTEM
+#  SECTION 2: TERMINAL THEME & UI SYSTEM  —  Aurora Glass
+#  A card-based, full-width, gutter-free presentation modeled after modern
+#  agent CLIs (OpenCode / Crush / Claude Code): wide breathing room, real
+#  panels instead of hand-drawn box characters, a persistent status rail,
+#  and zero raw stdout writes — every pixel goes through Rich so wrapping,
+#  color, and padding are always in sync with the live terminal width.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 if HAS_RICH:
     THEME = Theme({
-        "cc_primary": "#d77757",
-        "cc_primary_bold": "bold #d77757",
-        "cc_shimmer": "#eb9f7f",
-        "cc_tool": "bold #fd5db1",
-        "cc_tool_dim": "#fd5db1",
-        "cc_permission": "#b1b9f9",
-        "cc_success": "bold #4eba65",
-        "cc_warn": "bold #ffc107",
-        "cc_error": "bold #ff6b80",
-        "cc_muted": "#a0a0a0",
-        "cc_subtle": "#6a6a6a",
-        "cc_fg": "bold #ffffff",
-        "cc_body": "#f0f0f0",
-        "cc_user": "bold #ffffff",
-        "cc_surface": "#373737",
-        "cc_thinking": "bold #d77757",
-        "cc_prompt": "bold #d77757",
-        "cc_status": "#b0b0b0",
-        "neon_cyan": "bold #d77757",
-        "neon_magenta": "bold #fd5db1",
-        "neon_green": "bold #4eba65",
-        "neon_yellow": "bold #ffc107",
-        "neon_red": "bold #ff6b80",
-        "neon_blue": "bold #b1b9f9",
-        "neon_white": "bold #ffffff",
-        "neon_dim": "#a0a0a0",
-        "neon_prompt": "bold #d77757",
-        "neon_accent": "bold #fd5db1",
-        "neon_success": "bold #4eba65",
-        "neon_warning": "bold #ffc107",
-        "neon_error": "bold #ff6b80",
-        "neon_info": "bold #b1b9f9",
-        "user": "bold #ffffff",
-        "assistant": "#f0f0f0",
-        "thinking": "bold #d77757",
-        "tool_name": "bold #fd5db1",
-        "tool_args": "#fd5db1",
-        "tool_result": "#a0a0a0",
-        "dim_cyan": "#d77757",
-        "dim_white": "#a0a0a0",
-        "status_ok": "bold #4eba65",
-        "status_warn": "bold #ffc107",
-        "status_err": "bold #ff6b80",
+        # ── Brand ramp (violet → indigo → cyan) ────────────────────────────
+        "brand":            "bold #a78bfa",
+        "brand_dim":        "#7c6fce",
+        "brand_soft":       "#c4b5fd",
+        "cc_primary":       "#38bdf8",
+        "cc_primary_bold":  "bold #38bdf8",
+        "cc_shimmer":       "#7dd3fc",
+        "cc_accent":        "bold #f472b6",
+        "cc_accent_soft":   "#f9a8d4",
+
+        # ── Roles ────────────────────────────────────────────────────────
+        "cc_tool":          "bold #fb923c",
+        "cc_tool_dim":      "#c2740f",
+        "cc_permission":    "bold #c4b5fd",
+        "cc_success":       "bold #4ade80",
+        "cc_success_dim":   "#22c55e",
+        "cc_warn":          "bold #facc15",
+        "cc_warn_dim":      "#ca8a04",
+        "cc_error":         "bold #fb7185",
+        "cc_error_dim":     "#e11d48",
+        "cc_muted":         "#94a3b8",
+        "cc_subtle":        "#64748b",
+        "cc_faint":         "#475569",
+        "cc_fg":            "bold #f1f5f9",
+        "cc_body":          "#e2e8f0",
+        "cc_user":          "bold #f8fafc",
+        "cc_surface":       "#1e293b",
+        "cc_thinking":      "italic #7dd3fc",
+        "cc_thinking_dim":  "italic #64748b",
+        "cc_prompt":        "bold #38bdf8",
+        "cc_status":        "#94a3b8",
+        "cc_card_border":   "#334155",
+        "cc_card_border_hi":"#475569",
+
+        # ── Compatibility aliases (older call-sites keep working) ─────────
+        "neon_cyan":        "bold #38bdf8",
+        "neon_magenta":     "bold #f472b6",
+        "neon_green":       "bold #4ade80",
+        "neon_yellow":      "bold #facc15",
+        "neon_red":         "bold #fb7185",
+        "neon_blue":        "bold #818cf8",
+        "neon_white":       "bold #f8fafc",
+        "neon_dim":         "#94a3b8",
+        "neon_prompt":      "bold #38bdf8",
+        "neon_accent":      "bold #f472b6",
+        "neon_success":     "bold #4ade80",
+        "neon_warning":     "bold #facc15",
+        "neon_error":       "bold #fb7185",
+        "neon_info":        "bold #818cf8",
+        "user":             "bold #f8fafc",
+        "assistant":        "#e2e8f0",
+        "thinking":         "italic #7dd3fc",
+        "tool_name":        "bold #fb923c",
+        "tool_args":        "#c2740f",
+        "tool_result":      "#94a3b8",
+        "dim_cyan":         "#38bdf8",
+        "dim_white":        "#94a3b8",
+        "status_ok":        "bold #4ade80",
+        "status_warn":      "bold #facc15",
+        "status_err":       "bold #fb7185",
     })
+
+    def _detect_width() -> int:
+        """Full terminal width, never artificially narrowed. Floors at 100
+        so the card layout never collapses into a single cramped column,
+        but otherwise always tracks the live terminal."""
+        try:
+            import shutil as _shutil_ui
+            cols = int(_shutil_ui.get_terminal_size(fallback=(112, 32)).columns)
+        except Exception:
+            cols = 112
+        return max(100, cols)
+
     console = Console(
         theme=THEME,
         highlight=False,
-        soft_wrap=True,
+        soft_wrap=False,          # Rich owns wrapping — no raw stdout writes
         color_system="truecolor",
         force_terminal=True,
+        width=_detect_width(),
     )
+
+    def _resync_width() -> None:
+        """Call before any card render so a mid-session terminal resize is
+        always reflected — panels never render stale-narrow."""
+        try:
+            console.width = _detect_width()
+        except Exception:
+            pass
 else:
     console = None
+
+    def _resync_width() -> None:
+        pass
 
 _CC_VERBS = [
     "Thinking", "Cooking", "Percolating", "Ruminating", "Cogitating",
@@ -648,76 +701,162 @@ _CC_VERBS = [
     "Synthesizing", "Harmonizing", "Channeling", "Orchestrating",
     "Conjuring", "Distilling", "Weaving", "Sculpting", "Composing",
 ]
-_CC_SPINNER = ["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"]
+_CC_SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 _CC_THINK_IDX = 0
 
 
 class UI:
-    """Claude Code–style terminal UI: terracotta accent, hot-pink tools, dashed frames."""
+    """Aurora Glass UI — wide cards, real panels, zero raw stdout.
+
+    Design rules that fix the "cramped terminal" complaint:
+      • Every panel is built at the LIVE terminal width (_resync_width()
+        is called first), never a fixed narrow column.
+      • Long-running "thinking" / "streaming" status lives on ONE
+        self-overwriting line via Rich's own control codes — never a
+        loose sys.stdout.write escape sequence that leaves stray
+        fragments behind.
+      • Tool calls/results render as bordered cards with a title row,
+        not `╭│╰` hand-drawn once per line.
+    """
+
+    # Small left gutter — a card border supplies the rest of the framing.
+    _PAD = "  "
 
     @staticmethod
     def esc(text: str) -> str:
         return text.replace("[", "\\[").replace("]", "\\]") if HAS_RICH else text
 
     @staticmethod
+    def _box():
+        return ASCII if LEGACY_WIN_CONSOLE else ROUNDED
+
+    @staticmethod
+    def _card(body: "RenderableType", *, border: str = "cc_card_border",
+               title: str = "", title_style: str = "cc_fg",
+               subtitle: str = "", pad=(0, 1)) -> "Panel":
+        """The one shared building block behind every boxed element —
+        guarantees identical corner radii, padding, and full-width
+        stretch everywhere in the app."""
+        _resync_width()
+        kwargs = dict(
+            border_style=border,
+            box=UI._box(),
+            padding=pad,
+            expand=True,
+        )
+        if title:
+            kwargs["title"] = Text(title, style=title_style)
+            kwargs["title_align"] = "left"
+        if subtitle:
+            kwargs["subtitle"] = Text(subtitle, style="cc_subtle")
+            kwargs["subtitle_align"] = "right"
+        return Panel(body, **kwargs)
+
+    # ── App header / banner ─────────────────────────────────────────────
+    @staticmethod
     def header(model_name: str, project: str) -> "RenderableType":
         if not HAS_RICH:
-            return f"{APP_NAME} v{APP_VERSION}  ·  {model_name}  ·  {project}"
-        line = Text()
-        line.append(f"{APP_NAME}", style="cc_primary_bold")
-        line.append(f"  v{APP_VERSION}", style="cc_muted")
-        line.append("  ·  ", style="cc_subtle")
-        line.append(str(model_name), style="cc_fg")
-        line.append("  ·  ", style="cc_subtle")
-        line.append(UI.esc(str(project)), style="cc_muted")
-        return line
+            return f"{APP_NAME}  v{APP_VERSION}  ·  {model_name}  ·  {project}"
+        row = Table.grid(expand=True, padding=(0, 1))
+        row.add_column(ratio=1)
+        row.add_column(justify="right")
+        left = Text()
+        left.append("◆ ", style="brand")
+        left.append(APP_NAME, style="brand")
+        left.append(f"  v{APP_VERSION}", style="cc_subtle")
+        right = Text()
+        right.append(str(model_name), style="cc_fg")
+        right.append("  ", style="cc_subtle")
+        right.append(str(project), style="cc_muted")
+        row.add_row(left, right)
+        return UI._card(row, border="brand_dim")
 
+    @staticmethod
+    def neon_banner(model_name: str = "NVIDIA NIM"):
+        if not HAS_RICH:
+            print(f"{APP_NAME}  v{APP_VERSION}")
+            print(f"{model_name}  ·  NVIDIA NIM")
+            return
+        _resync_width()
+        console.print()
+        title = Text(justify="center")
+        title.append("◆  ", style="brand")
+        title.append(APP_NAME, style="brand")
+        title.append(f"  v{APP_VERSION}", style="cc_subtle")
+        sub = Text(justify="center")
+        sub.append(str(model_name), style="cc_fg")
+        sub.append("   ·   ", style="cc_subtle")
+        sub.append("NVIDIA NIM", style="cc_primary")
+        sub.append("   ·   ", style="cc_subtle")
+        sub.append("Zero Bottlenecks", style="cc_accent_soft")
+        body = Group(Align.center(title), Text(""), Align.center(sub))
+        console.print(UI._card(body, border="brand_dim", pad=(1, 2)))
+        console.print()
+
+    # ── Turn / status rail ───────────────────────────────────────────────
     @staticmethod
     def turn_indicator(round_num: int, tokens: int, status: str = "") -> "RenderableType":
         if not HAS_RICH:
-            return f"● TURN {round_num:03d}  ·  {tokens:,} tok  {status}"
-        t = Text()
-        t.append("● ", style="cc_primary_bold")
-        t.append(f"TURN {round_num:03d}", style="cc_primary_bold")
-        t.append("  ·  ", style="cc_subtle")
-        t.append(f"{tokens:,} tokens", style="cc_status")
+            return f"{UI._PAD}●  TURN {round_num:03d}  ·  {tokens:,} tokens  {status}"
+        row = Table.grid(expand=True, padding=(0, 1))
+        row.add_column(ratio=1)
+        row.add_column(justify="right")
+        left = Text()
+        left.append("● ", style="brand")
+        left.append(f"TURN {round_num:03d}", style="brand")
+        right = Text()
+        right.append(f"{tokens:,} tokens", style="cc_status")
         if status:
-            t.append("  ·  ", style="cc_subtle")
-            t.append(str(status).upper(), style="cc_tool")
+            right.append("   ", style="cc_faint")
+            right.append(str(status).upper(), style="cc_tool")
+        row.add_row(left, right)
+        return row
+
+    @staticmethod
+    def status_bar(model: str, tokens: int, phase: str = "") -> "RenderableType":
+        if not HAS_RICH:
+            return f"{model}  ·  {tokens:,} tokens  ·  {phase}"
+        t = Text()
+        t.append(" ", style="cc_status")
+        t.append(str(model), style="cc_primary_bold")
+        t.append("  ·  ", style="cc_faint")
+        t.append(f"{tokens:,} tokens", style="cc_status")
+        if phase:
+            t.append("  ·  ", style="cc_faint")
+            t.append(str(phase).upper(), style="cc_tool")
         return t
 
     @staticmethod
+    def separator(title: str = ""):
+        _resync_width()
+        if HAS_RICH:
+            console.print()
+            if title:
+                console.print(Rule(title=Text(f" {title.upper()} ", style="brand"),
+                                    style="cc_faint", align="left"))
+            else:
+                console.print(Rule(style="cc_faint"))
+        else:
+            print(f"── {title} ──" if title else "─" * 40)
+
+    # ── Conversation turns ───────────────────────────────────────────────
+    @staticmethod
     def user_message(text: str) -> "RenderableType":
         text = text or ""
-        lines = text.splitlines() or [""]
-        width = 72
-        dash = "- " * (width // 2)
-        dash = dash[:width].rstrip()
         if not HAS_RICH:
-            out = [dash, f"|  > {lines[0]}"]
-            for ln in lines[1:]:
-                out.append(f"|    {ln}")
-            out.append("|")
-            out.append(dash)
+            out = [f"{UI._PAD}you ›"]
+            for ln in text.splitlines() or [""]:
+                out.append(f"{UI._PAD}  {ln}")
             return "\n".join(out)
-        body = Text()
-        body.append(dash + "\n", style="cc_muted")
-        body.append("|  ", style="cc_muted")
-        body.append("> ", style="cc_prompt")
-        body.append(UI.esc(lines[0]), style="cc_user")
-        body.append("\n")
-        for ln in lines[1:]:
-            body.append("|    ", style="cc_muted")
-            body.append(UI.esc(ln), style="cc_user")
-            body.append("\n")
-        body.append("|", style="cc_muted")
-        body.append("\n" + dash, style="cc_muted")
-        return body
+        body = Text(text, style="cc_user")
+        card = UI._card(body, border="cc_primary", title="you", title_style="cc_primary_bold")
+        return card
 
     @staticmethod
     def assistant_stream() -> "Text":
         return Text("", style="cc_body") if HAS_RICH else Text("")  # type: ignore
 
+    # ── Thinking / streaming heartbeat (single self-clearing line) ──────
     @staticmethod
     def thinking_block(text: str = "") -> "RenderableType":
         global _CC_THINK_IDX
@@ -725,33 +864,150 @@ class UI:
         glyph = _CC_SPINNER[_CC_THINK_IDX % len(_CC_SPINNER)]
         _CC_THINK_IDX += 1
         if not HAS_RICH:
-            return f"  {glyph} {verb}…"
+            return f"{UI._PAD}{glyph} {verb}…"
         t = Text()
-        t.append(f"  {glyph} ", style="cc_thinking")
+        t.append(f"{glyph} ", style="cc_primary_bold")
         t.append(f"{verb}…", style="cc_thinking")
         return t
 
     @staticmethod
+    def thinking_panel(text: str) -> "RenderableType":
+        """Render a *finished* reasoning segment as real markdown inside
+        a card, matching tool_call/tool_result/user_message styling.
+        Markdown needs the whole segment (headers/lists/fences don't
+        parse incrementally), so this is called once a reasoning block
+        ends — the live token-by-token view stays on stream_write for
+        responsiveness, and this replaces it with a properly formatted
+        panel right after."""
+        text = (text or "").strip()
+        if not text:
+            return Text("")
+        if not HAS_RICH:
+            return text
+        body = Markdown(text, code_theme="monokai")
+        return UI._card(body, border="cc_thinking", title="thinking",
+                         title_style="cc_thinking")
+
+    @staticmethod
     def thinking_live(elapsed: float = 0.0) -> None:
+        """Overwrites a single status line in place — no leftover
+        fragments, no raw ANSI, always clipped to the live width."""
         global _CC_THINK_IDX
         verb = _CC_VERBS[_CC_THINK_IDX % len(_CC_VERBS)]
         glyph = _CC_SPINNER[_CC_THINK_IDX % len(_CC_SPINNER)]
         _CC_THINK_IDX += 1
-        msg = f"  {glyph} {verb}…"
-        if elapsed >= 8:
-            msg += f"  ({int(elapsed)}s)"
+        suffix = f"  ({int(elapsed)}s)" if elapsed >= 8 else ""
         if HAS_RICH:
-            console.print(f"[cc_thinking]{msg}[/cc_thinking]", end="\r")
+            _resync_width()
+            line = Text()
+            line.append(f" {glyph} ", style="cc_primary_bold")
+            line.append(f"{verb}…", style="cc_thinking")
+            if suffix:
+                line.append(suffix, style="cc_thinking_dim")
+            pad = max(0, console.width - line.cell_len - 1)
+            console.print(line, " " * pad, end="\r", sep="")
         else:
-            print(msg, end="\r", flush=True)
+            print(f"{UI._PAD}{glyph} {verb}…{suffix}", end="\r", flush=True)
+
+    @staticmethod
+    def streaming_pulse(elapsed: float) -> None:
+        """Lightweight heartbeat once content has started flowing, so a
+        long generation doesn't look frozen — one overwritten line."""
+        if HAS_RICH:
+            _resync_width()
+            line = Text()
+            line.append(" ⟲ ", style="cc_subtle")
+            line.append(f"streaming · {elapsed:.0f}s", style="cc_thinking_dim")
+            pad = max(0, console.width - line.cell_len - 1)
+            console.print(line, " " * pad, end="\r", sep="")
+        else:
+            print(f"  streaming... ({elapsed:.0f}s)", end="\r", flush=True)
 
     @staticmethod
     def clear_live_line() -> None:
         if HAS_RICH:
-            console.print(" " * 60, end="\r")
+            _resync_width()
+            console.print(" " * max(1, console.width - 1), end="\r")
         else:
-            print(" " * 60, end="\r", flush=True)
+            print(" " * 100, end="\r", flush=True)
 
+    # ── Word-wrapped token streaming (replaces raw sys.stdout.write) ────
+    # Streaming the model's output char-by-char through Rich's markup
+    # parser would be far too slow, and writing raw ANSI bypassed all
+    # wrapping/padding — which is exactly what produced the one-word-
+    # per-line, unstyled dump seen in narrow terminals. Instead we keep
+    # a tiny local word buffer, wrap complete words ourselves against
+    # the live terminal width, and emit each finished line through
+    # Rich once, so color + width stay authoritative without per-token
+    # markup-parsing overhead.
+    _stream_col = 0
+    _stream_buf = ""
+    _stream_gutter = "  "
+
+    @staticmethod
+    def _stream_width() -> int:
+        _resync_width()
+        try:
+            return max(40, console.width - len(UI._stream_gutter) - 1)
+        except Exception:
+            return 96
+
+    @staticmethod
+    def stream_write(chunk: str, style: str = "cc_body") -> None:
+        """Append streamed text, wrapping at word boundaries against the
+        live terminal width and writing only *complete* lines through
+        Rich. Never prints a partial word via end="" — on a legacy
+        Windows console (plain cmd.exe, no WT_SESSION/ANSICON/ConEmu)
+        Rich's legacy renderer emits a newline on every print() call
+        regardless of the `end` kwarg, so any per-token print collapses
+        into one fragment per line. Buffering until a full wrapped line
+        is ready fixes that on every console type."""
+        if not chunk:
+            return
+        if not HAS_RICH:
+            print(chunk, end="", flush=True)
+            return
+        limit = UI._stream_width()
+        buf = UI._stream_buf + chunk
+        out_lines = []
+        while True:
+            nl = buf.find("\n")
+            window = buf if nl == -1 else buf[:nl]
+            if len(window) <= limit and nl == -1:
+                break
+            if nl != -1 and nl <= limit:
+                out_lines.append(buf[:nl])
+                buf = buf[nl + 1:]
+                continue
+            break_at = window.rfind(" ", 0, limit)
+            if break_at <= 0:
+                break_at = limit
+            out_lines.append(buf[:break_at])
+            buf = buf[break_at:].lstrip(" ")
+        UI._stream_buf = buf
+        if out_lines:
+            for ln in out_lines:
+                console.print(Text(UI._stream_gutter + ln, style=style))
+            UI._stream_col = 1
+        # No partial-line branch: any leftover partial word/line stays
+        # in UI._stream_buf until the next chunk completes it, or until
+        # stream_flush_line() forces it out at a segment boundary.
+
+    @staticmethod
+    def stream_flush_line() -> None:
+        """Flush any partial word buffer and drop to a fresh line —
+        call between reasoning/content/tool-call segments."""
+        if not HAS_RICH:
+            print()
+            return
+        if UI._stream_buf:
+            prefix = UI._stream_gutter if UI._stream_col == 0 else ""
+            console.print(Text(prefix + UI._stream_buf))
+            UI._stream_buf = ""
+        console.print()
+        UI._stream_col = 0
+
+    # ── Tool calls / results as bordered cards ───────────────────────────
     @staticmethod
     def tool_call(name: str, args_preview: str) -> "RenderableType":
         label = {
@@ -761,56 +1017,56 @@ class UI:
             "modules": "Modules",
         }.get(name, str(name).replace("_", " ").title().replace(" ", ""))
         if not HAS_RICH:
-            return f"  ⏺ {label}" + (f"  {args_preview}" if args_preview else "")
+            return f"{UI._PAD}▸ {label}" + (f"  {args_preview}" if args_preview else "")
         t = Text()
-        t.append("  ⏺ ", style="cc_tool")
+        t.append("▸ ", style="cc_tool")
         t.append(label, style="cc_tool")
         if args_preview:
-            t.append("  ", style="cc_tool")
-            ap = args_preview if len(args_preview) < 90 else args_preview[:87] + "…"
-            t.append(UI.esc(ap), style="cc_muted")
+            t.append("  ", style="cc_faint")
+            ap = args_preview if len(args_preview) < 120 else args_preview[:117] + "…"
+            t.append(ap, style="cc_muted")
         return t
 
     @staticmethod
     def tool_result(name: str, output: str, is_error: bool = False) -> "RenderableType":
         lines = (output or "").splitlines() or [""]
-        max_show = 20
+        max_show = 18
         if len(lines) > max_show:
             shown = lines[:max_show]
-            shown.append(f"… [{len(lines) - max_show} more lines]")
+            shown.append(f"… {len(lines) - max_show} more lines")
         else:
             shown = lines
         if not HAS_RICH:
-            prefix = "  │ " if not is_error else "  ✗ "
-            return "\n".join(prefix + ln for ln in shown) + "\n  └─"
+            prefix = f"{UI._PAD}  " if not is_error else f"{UI._PAD}✗ "
+            return "\n".join(prefix + ln for ln in shown)
         style = "cc_error" if is_error else "cc_body"
-        border = "cc_error" if is_error else "cc_tool_dim"
-        parts = []
-        for ln in shown:
-            row = Text()
-            row.append("  │ ", style=border)
-            row.append(UI.esc(ln[:200]), style=style)
-            parts.append(row)
-        parts.append(Text("  └─", style=border))
-        return Group(*parts) if parts else Text("")
+        border = "cc_error_dim" if is_error else "cc_card_border"
+        body = Text("\n".join(ln[:220] for ln in shown), style=style)
+        card = UI._card(
+            body, border=border,
+            title=("✗ error" if is_error else ""),
+            title_style="cc_error",
+            pad=(0, 2),
+        )
+        return card
 
     @staticmethod
     def permission_prompt(action: str, detail: str = "") -> "RenderableType":
         if not HAS_RICH:
-            return f"\n  [Permission] {action}\n  {detail}\n  Allow? (y/n)\n"
-        body = Text()
-        body.append("  ╭─ Permission ─────────────────────────\n", style="cc_permission")
-        body.append("  │ ", style="cc_permission")
-        body.append(UI.esc(action), style="cc_fg")
-        body.append("\n")
+            return f"\n{UI._PAD}[Permission] {action}\n{UI._PAD}{detail}\n{UI._PAD}Allow? (y/n)\n"
+        rows = [Text(action, style="cc_fg")]
         if detail:
-            body.append("  │ ", style="cc_permission")
-            body.append(UI.esc(detail[:120]), style="cc_muted")
-            body.append("\n")
-        body.append("  │ Allow this action? [y/n]\n", style="cc_permission")
-        body.append("  ╰──────────────────────────────────────", style="cc_permission")
-        return body
+            rows.append(Text(detail[:220], style="cc_muted"))
+        ask = Text()
+        ask.append("Allow this action?  ", style="cc_permission")
+        ask.append("[y/n]", style="bold cc_fg")
+        rows.append(Text(""))
+        rows.append(ask)
+        card = UI._card(Group(*rows), border="cc_permission",
+                         title="permission", title_style="cc_permission")
+        return card
 
+    # ── Files / diffs ─────────────────────────────────────────────────────
     @staticmethod
     def file_tree(root: Path, cwd: Path) -> "RenderableType":
         if not HAS_RICH:
@@ -819,10 +1075,10 @@ class UI:
                 if any(part.startswith(".") for part in p.relative_to(root).parts):
                     continue
                 depth = len(p.relative_to(root).parts) - 1
-                icon = "[dir]" if p.is_dir() else " · "
+                icon = "📁" if p.is_dir() else "·"
                 lines.append("  " * depth + f"{icon} {p.name}")
             return "\n".join(lines[:60])
-        tree = Tree(Text(str(root), style="cc_primary_bold"))
+        tree = Tree(Text(str(root), style="brand"))
         count = 0
         for p in sorted(root.rglob("*")):
             rel = p.relative_to(root)
@@ -831,8 +1087,9 @@ class UI:
             if count > 60:
                 tree.add(Text("…", style="cc_muted"))
                 break
-            style = "cc_muted" if p.is_dir() else "cc_body"
-            tree.add(Text(str(rel), style=style))
+            style = "cc_primary" if p.is_dir() else "cc_body"
+            icon = "📁 " if p.is_dir() else "  "
+            tree.add(Text(f"{icon}{rel}", style=style))
             count += 1
         return tree
 
@@ -840,101 +1097,58 @@ class UI:
     def file_diff(path: str, old: str, new: str) -> "RenderableType":
         if not HAS_RICH:
             return f"--- {path}\n+++ {path}\n"
-        t = Text()
-        t.append(f"  ⏺ Edit  ", style="cc_tool")
-        t.append(UI.esc(path) + "\n", style="cc_muted")
+        rows = []
         n = 0
         for line in difflib.unified_diff(
             (old or "").splitlines(), (new or "").splitlines(), lineterm="",
             n=3,
         ):
             if line.startswith("+++") or line.startswith("---") or line.startswith("@@"):
-                t.append("  │ " + line + "\n", style="cc_subtle")
+                rows.append(Text(line, style="cc_subtle"))
             elif line.startswith("+"):
-                t.append("  │ " + line + "\n", style="cc_success")
+                rows.append(Text(line, style="cc_success"))
                 n += 1
             elif line.startswith("-"):
-                t.append("  │ " + line + "\n", style="cc_error")
+                rows.append(Text(line, style="cc_error"))
                 n += 1
             else:
-                t.append("  │ " + line + "\n", style="cc_muted")
+                rows.append(Text(line, style="cc_muted"))
             if n > 40:
-                t.append("  │ …\n", style="cc_muted")
+                rows.append(Text("…", style="cc_muted"))
                 break
-        t.append("  └─", style="cc_tool")
-        return t
+        card = UI._card(Group(*rows) if rows else Text("(no changes)", style="cc_muted"),
+                         border="cc_tool_dim", title="✎ edit", title_style="cc_tool",
+                         subtitle=path, pad=(0, 2))
+        return card
 
+    # ── One-line status messages ─────────────────────────────────────────
     @staticmethod
     def ok(msg: str):
         if HAS_RICH:
-            console.print(Text.assemble(("  ✓ ", "cc_success"), (msg, "cc_body")))
+            console.print(Text.assemble((f"{UI._PAD}✓ ", "cc_success"), (msg, "cc_body")))
         else:
-            print(f"  ✓ {msg}")
+            print(f"{UI._PAD}✓ {msg}")
 
     @staticmethod
     def warn(msg: str):
         if HAS_RICH:
-            console.print(Text.assemble(("  ⚠ ", "cc_warn"), (msg, "cc_body")))
+            console.print(Text.assemble((f"{UI._PAD}⚠ ", "cc_warn"), (msg, "cc_body")))
         else:
-            print(f"  ⚠ {msg}")
+            print(f"{UI._PAD}⚠ {msg}")
 
     @staticmethod
     def err(msg: str):
         if HAS_RICH:
-            console.print(Text.assemble(("  ✗ ", "cc_error"), (msg, "cc_fg")))
+            console.print(Text.assemble((f"{UI._PAD}✗ ", "cc_error"), (msg, "cc_fg")))
         else:
-            print(f"  ✗ {msg}")
+            print(f"{UI._PAD}✗ {msg}")
 
     @staticmethod
     def info(msg: str):
         if HAS_RICH:
-            console.print(Text.assemble(("  · ", "cc_primary"), (msg, "cc_body")))
+            console.print(Text.assemble((f"{UI._PAD}· ", "cc_primary"), (msg, "cc_body")))
         else:
-            print(f"  · {msg}")
-
-    @staticmethod
-    def separator(title: str = ""):
-        if HAS_RICH:
-            if title:
-                console.print(Text(f"\n  ── {title} ──", style="cc_subtle"))
-            else:
-                console.print(Text("  " + "─" * 48, style="cc_subtle"))
-        else:
-            print(f"── {title} ──" if title else "─" * 40)
-
-    @staticmethod
-    def status_bar(model: str, tokens: int, phase: str = "") -> "RenderableType":
-        if not HAS_RICH:
-            return f"{model}  ·  {tokens:,} tok  ·  {phase}"
-        t = Text()
-        t.append("  ", style="cc_status")
-        t.append(str(model), style="cc_primary_bold")
-        t.append("  ·  ", style="cc_subtle")
-        t.append(f"{tokens:,} tokens", style="cc_status")
-        if phase:
-            t.append("  ·  ", style="cc_subtle")
-            t.append(str(phase).upper(), style="cc_tool")
-        return t
-
-    @staticmethod
-    def neon_banner(model_name: str = "NVIDIA NIM"):
-        if not HAS_RICH:
-            print(f"{APP_NAME} v{APP_VERSION}")
-            print(f"{model_name}  ·  NVIDIA NIM")
-            return
-        console.print()
-        title = Text()
-        title.append("  ", style="cc_primary")
-        title.append(APP_NAME, style="cc_primary_bold")
-        title.append(f"  v{APP_VERSION}", style="cc_muted")
-        console.print(title)
-        sub = Text()
-        sub.append("  ", style="cc_muted")
-        sub.append(str(model_name), style="cc_fg")
-        sub.append("  ·  NVIDIA NIM", style="cc_muted")
-        console.print(sub)
-        console.print(Text("  " + "─" * 52, style="cc_subtle"))
-        console.print()
+            print(f"{UI._PAD}· {msg}")
 
 
 class TokenBucket:
@@ -1152,11 +1366,19 @@ def build_pool(config: Dict[str, Any]) -> ProviderPool:
         providers.append(Provider("NIM-Primary", base_url, api_key, MODELS[model_key],
                                   connect_timeout, read_timeout, get_or_create_bucket(model_key)))
 
+    # Ordered by expected tool-call reliability, not raw size. glm-5.2-fp8
+    # shares GLM-5.2's post-training/tool-calling recipe, so it drifts least
+    # from primary. The
+    # nemotron/llama entries run at temperature=1.0 (nemotron, per NVIDIA's
+    # own recommended settings) or are dated checkpoints with no tool-calling-
+    # specific tuning, and land last since they're more likely to produce the
+    # garbled multi-field JSON that trips [SUSPICIOUS ARGS]/[BLOCKED REPEAT].
+    # qwen3-coder removed: NVIDIA pulled it from the NIM catalog.
     fallbacks = [
+        "glm-5.2-fp8",
         "nemotron-3-super-120b-a12b",
         "nemotron-ultra",
         "llama-3.1-405b",
-        "glm-5.2-fp8",
     ]
     for fb in fallbacks:
         if fb != model_key and fb in MODELS and api_key and MODELS[fb]["id"] not in dead_model_ids:
@@ -1247,6 +1469,13 @@ class Tool:
 
     allow_outside_project: bool = False
 
+    # Chars that only ever show up in a path when the model has started
+    # dumping raw tool-call fragments (braces, quotes, commas from JSON;
+    # '#' from markdown headers) into the path string instead of retrying
+    # cleanly. None of these are valid in a real project-relative path.
+    _JUNK_CHARS = set("{}\"'`#*?<>|")
+    _MAX_PATH_LEN = 200
+
     @staticmethod
     def _sanitize_rel_path(path: str) -> str:
         """Aggressive sanitization for hallucinated paths (PLAN.md, content:...)"""
@@ -1274,6 +1503,52 @@ class Tool:
             return ""
         return raw
 
+    @classmethod
+    def _degenerate_path_reason(cls, raw: str) -> str:
+        """Detect self-inflicted degenerate paths: a model dodging a write/edit
+        refusal by mutating the filename (accreting '.txt.txt.txt...', or
+        stuffing JSON/markdown fragments into the path) instead of retrying
+        with edit/append/force. Returns a non-empty reason string if the path
+        should be rejected outright, else ''.
+        """
+        if len(raw) > cls._MAX_PATH_LEN:
+            return (
+                f"path is {len(raw)} chars, over the {cls._MAX_PATH_LEN}-char limit. "
+                "This usually means a filename got mutated across repeated failed "
+                "calls instead of being retried cleanly. Use the ORIGINAL intended "
+                "path, and use edit/append/force=true to fix content, not a new filename."
+            )
+        if any(ch in cls._JUNK_CHARS for ch in raw):
+            bad = sorted({ch for ch in raw if ch in cls._JUNK_CHARS})
+            return (
+                f"path contains invalid character(s) {bad}. "
+                "This looks like a raw tool-call fragment leaked into the path "
+                "rather than a real filename. Use a plain project-relative path."
+            )
+        name = Path(raw).name
+        # Collapse repeated identical dot-segments, e.g. "foo.txt.txt.txt" ->
+        # segments ['foo','txt','txt','txt']. 3+ identical trailing segments
+        # is never a real extension, only accretion from repeated retries.
+        segs = name.split(".")
+        if len(segs) >= 4:
+            tail = segs[-1]
+            repeat = 0
+            for s in reversed(segs[1:]):
+                if s == tail:
+                    repeat += 1
+                else:
+                    break
+            if repeat >= 3:
+                return (
+                    f"filename '{name}' has the same extension ('.{tail}') repeated "
+                    f"{repeat}x in a row. This is accretion from retrying with a "
+                    "slightly different filename each time rather than fixing the "
+                    "actual call. Use the original filename (e.g. strip back to "
+                    f"'{segs[0]}.{tail}') and use edit/append/force=true instead of "
+                    "renaming."
+                )
+        return ""
+
     def _safe_path(self, path: str) -> Path:
         raw = self._sanitize_rel_path(path)
         if not raw:
@@ -1281,6 +1556,9 @@ class Tool:
                 "path is required (use project-relative paths, e.g. src/app.py or PLAN.md). "
                 f"Got: {path!r}"
             )
+        degenerate = self._degenerate_path_reason(raw)
+        if degenerate:
+            raise ValueError(f"Rejected path '{path}': {degenerate}")
         candidate = Path(raw)
         target = candidate.resolve() if candidate.is_absolute() else (self.cwd / raw).resolve()
         try:
@@ -1547,6 +1825,17 @@ class SearchTool(Tool):
 
     def execute(self, pattern: str, path: str = ".") -> ToolResult:
         try:
+            if not pattern or not str(pattern).strip():
+                return ToolResult(
+                    "",
+                    error=(
+                        "pattern is empty. This usually means the model's tool call "
+                        "was malformed (a field got dropped or merged into another "
+                        "argument) rather than an intentional search. Re-issue the "
+                        "call with a real regex pattern."
+                    ),
+                    is_error=True,
+                )
             base = self._safe_path(path)
             rx = re.compile(pattern, re.IGNORECASE)
             matches: List[str] = []
@@ -1589,6 +1878,17 @@ class GlobTool(Tool):
 
     def execute(self, pattern: str, path: str = ".") -> ToolResult:
         try:
+            if not pattern or not str(pattern).strip():
+                return ToolResult(
+                    "",
+                    error=(
+                        "pattern is empty. This usually means the model's tool call "
+                        "was malformed (a field got dropped or merged into another "
+                        "argument) rather than an intentional glob. Re-issue the "
+                        "call with a real glob pattern, e.g. '**/*.py'."
+                    ),
+                    is_error=True,
+                )
             base = self._safe_path(path)
             matches = list(base.rglob(pattern))
             if not matches:
@@ -3149,6 +3449,8 @@ class NeonArchitect:
         self._phase_rounds = 0
         self._max_phase_rounds = int(config.get("max_phase_rounds", 0) or 0)
         self._phase_tool_counts: Dict[str, int] = {}
+        self._phase_tool_success_counts: Dict[str, int] = {}
+        self._phase_chars_written: int = 0
         self._phase_bash_ok = False
         self.current_turn_tool_calls = False
         self._last_persist = 0.0
@@ -3160,6 +3462,8 @@ class NeonArchitect:
         self.max_same_tool_successes = int(config.get("max_same_tool_successes", 3) or 3)
         self._tool_fail_counts: Dict[str, int] = {}
         self._tool_success_counts: Dict[str, int] = {}
+        self._fp_last_error: Dict[str, str] = {}
+        self._fp_pending_reflection: set = set()
         self._recent_tool_keys: deque = deque(maxlen=24)
         self._strategy_hints: List[str] = []
         self._rate_limit_until: float = 0.0
@@ -3326,8 +3630,14 @@ class NeonArchitect:
         self.sdlc_phase_idx += 1
         self._phase_rounds = 0
         self._phase_tool_counts = {}
+        self._phase_tool_success_counts = {}
+        self._phase_chars_written = 0
         self._tool_fail_counts = {}
         self._tool_success_counts = {}
+        self._fp_pending_reflection = set()
+        # NOTE: _fp_last_error is deliberately NOT cleared here — it's a
+        # cross-phase diagnostic trail so a later halt can still show what
+        # actually failed, even if the phase gate reset the active counters.
         self._phase_bash_ok = False
         if current == "planning":
             # Capture PLAN.md's Acceptance Criteria as a real, structural
@@ -3396,6 +3706,8 @@ class NeonArchitect:
             self.autopilot_rounds = 0
             self.round = 0
             self._phase_tool_counts = {}
+            self._phase_tool_success_counts = {}
+            self._phase_chars_written = 0
             self._phase_bash_ok = False
             if hasattr(self, "_tool_fail_counts"):
                 self._tool_fail_counts = {}
@@ -3403,6 +3715,10 @@ class NeonArchitect:
                 self._tool_success_counts = {}
             if hasattr(self, "_strategy_hints"):
                 self._strategy_hints = []
+            if hasattr(self, "_fp_last_error"):
+                self._fp_last_error = {}
+            if hasattr(self, "_fp_pending_reflection"):
+                self._fp_pending_reflection = set()
             UI.info("Autopilot starting from PLANNING (fresh cycle).")
         else:
             UI.info(
@@ -3442,6 +3758,11 @@ class NeonArchitect:
         UI.separator("AUTOPILOT HALTED")
         UI.info(f"Stopped at phase: {phase.upper()}")
         UI.info(f"Completed: {', '.join(self.sdlc_completed) if self.sdlc_completed else 'none'}")
+        recent_errors = list(dict.fromkeys(self._fp_last_error.values()))[-5:]
+        if recent_errors:
+            UI.info("Last distinct errors seen before halt (most recent last):")
+            for e in recent_errors:
+                UI.info(f"  - {e}")
         UI.info("Type /autopilot to resume from current phase (also offered on next launch).")
         self.persist(force=True)
 
@@ -3559,6 +3880,40 @@ class NeonArchitect:
             parts = [p for p in parts if not re.match(r"^cd\s+", p)]
             c = " && ".join(parts) if parts else c
         return c[:200]
+
+    def _suspicious_bare_args_reason(self, name: str, args: Dict[str, Any]) -> str:
+        """Detect a tool call whose JSON parsed cleanly but where only one
+        required field (out of several) actually has a non-empty value —
+        e.g. path populated, content left "". This is the shape seen when a
+        model (typically a weaker fallback under provider-switch stress)
+        garbles a multi-field tool call by dumping everything into one slot
+        instead of filling in each argument properly. Returns a reason
+        string if suspicious, else ''.
+        """
+        tool_obj = self.tools.get(name)
+        if tool_obj is None or not isinstance(args, dict):
+            return ""
+        required = list((tool_obj.parameters or {}).get("required") or [])
+        if len(required) < 2:
+            return ""
+
+        def _empty(k: str, v: Any) -> bool:
+            if k == "content" and v == "":
+                # An explicit empty string is a deliberate value (e.g. write(...,
+                # content="") to truncate/clear a file) — not evidence of a
+                # garbled call. Missing/None/"null" content is still suspicious.
+                return False
+            return str(v if v is not None else "").strip() in ("", "{}", "null", "None")
+
+        populated = sum(1 for k in required if not _empty(k, args.get(k)))
+        if populated <= 1:
+            empty_fields = [k for k in required if _empty(k, args.get(k))]
+            return (
+                f"only {populated}/{len(required)} required fields populated "
+                f"(empty: {empty_fields}). Looks like a malformed tool call, not "
+                f"an intentional one — re-issue with all required fields filled in."
+            )
+        return ""
 
     def _tool_fingerprint(self, name: str, args: Dict[str, Any]) -> str:
         key_args: Dict[str, Any] = {}
@@ -3852,11 +4207,10 @@ class NeonArchitect:
                         pass
                 elif saw_any_token and elapsed > 20 and int(elapsed) - last_heartbeat >= 15:
                     last_heartbeat = int(elapsed)
-                    msg = f"  · streaming... ({elapsed:.0f}s)"
-                    if HAS_RICH:
-                        console.print(f"  [cc_muted]{msg}[/cc_muted]", end="\r")
-                    else:
-                        print(msg, end="\r", flush=True)
+                    try:
+                        UI.streaming_pulse(elapsed)
+                    except Exception:
+                        pass
 
                 idle = time.monotonic() - last_content_time
                 if saw_any_token and idle > content_timeout:
@@ -3896,7 +4250,6 @@ class NeonArchitect:
                     except Exception:
                         pass
                     if not in_think:
-                        print(" " * 70, end="\r")
                         if self.config.get("show_thinking", True):
                             if HAS_RICH:
                                 console.print(UI.thinking_block(""))
@@ -3905,31 +4258,31 @@ class NeonArchitect:
                         in_think = True
                     reasoning += delta.reasoning_content
                     if self.config.get("show_thinking", True):
-                        if HAS_RICH:
-                            console.print(Text(delta.reasoning_content, style="thinking"), end="")
-                        else:
-                            print(delta.reasoning_content, end="", flush=True)
+                        UI.stream_write(delta.reasoning_content, style="cc_thinking")
 
                 if delta.content:
                     has_content = True
                     saw_any_token = True
                     if in_think:
-                        print()
+                        UI.stream_flush_line()
                         in_think = False
+                        if self.config.get("show_thinking", True) and HAS_RICH:
+                            console.print(UI.thinking_panel(reasoning))
                     content += delta.content
                     new_text = content[printed_len:]
-                    if HAS_RICH:
-                        console.print(Text(new_text, style="assistant"), end="")
-                    else:
-                        print(new_text, end="", flush=True)
+                    UI.stream_write(new_text, style="cc_body")
                     printed_len = len(content)
 
                 if delta.tool_calls:
                     has_content = True
                     saw_any_token = True
                     if in_think:
-                        print()
+                        UI.stream_flush_line()
                         in_think = False
+                        if self.config.get("show_thinking", True) and HAS_RICH:
+                            console.print(UI.thinking_panel(reasoning))
+                    else:
+                        UI.stream_flush_line()
                     for tc in delta.tool_calls:
                         idx = tc.index
                         while len(tool_calls) <= idx:
@@ -3940,7 +4293,10 @@ class NeonArchitect:
                             if tc.function.name:
                                 tool_calls[idx]["name"] += tc.function.name
                                 name = tool_calls[idx]["name"]
-                                print(" " * 70, end="\r")
+                                try:
+                                    UI.clear_live_line()
+                                except Exception:
+                                    pass
                                 if HAS_RICH:
                                     console.print(UI.tool_call(name, "..."))
                                 else:
@@ -3953,6 +4309,12 @@ class NeonArchitect:
 
             if reader_err:
                 raise reader_err[0]
+
+            if in_think:
+                UI.stream_flush_line()
+                in_think = False
+                if self.config.get("show_thinking", True) and HAS_RICH:
+                    console.print(UI.thinking_panel(reasoning))
 
         finally:
             try:
@@ -4109,14 +4471,30 @@ class NeonArchitect:
                 payload["max_tokens"] = provider.model_cfg.get("max_tokens", 8192)
                 
                 p_extra = provider.model_cfg.get("extra_body")
-                if p_extra and not tools_stripped:
-                    p_extra = dict(p_extra)
-                    ctk = dict(p_extra.get("chat_template_kwargs") or {})
+                if not tools_stripped:
+                    # Previously this branch only fired `if p_extra`, so any
+                    # model without a static extra_body template in MODELS
+                    # (glm-5.2, glm-5.2-fp8, llama-3.1-405b) fell
+                    # into the `else: payload.pop("extra_body", None)` branch
+                    # below, silently discarding the enable_thinking value the
+                    # top of this function had just set from thinking_effort.
+                    # That meant the "off"/"low"/"medium"/"high" config never
+                    # reached those models' requests at all — they ran
+                    # whatever the backend's default is (GLM-5.2 defaults to
+                    # Think Max). Build chat_template_kwargs here for every
+                    # provider, layering the provider's own static template
+                    # (e.g. Nemotron's force_nonempty_content) on top so it's
+                    # preserved, instead of choosing one or the other.
+                    merged_extra = dict(p_extra) if p_extra else {}
+                    ctk = dict(merged_extra.get("chat_template_kwargs") or {})
                     effort_now = str(self.config.get("thinking_effort") or "off").lower()
                     if effort_now in ("low", "medium", "high"):
                         ctk["enable_thinking"] = True
-                    p_extra["chat_template_kwargs"] = ctk
-                    payload["extra_body"] = p_extra
+                        ctk["reasoning_effort"] = effort_now
+                    else:
+                        ctk["enable_thinking"] = False
+                    merged_extra["chat_template_kwargs"] = ctk
+                    payload["extra_body"] = merged_extra
                 else:
                     payload.pop("extra_body", None)
 
@@ -4287,6 +4665,11 @@ class NeonArchitect:
                 UI.warn(msg)
                 self._strategy_hints.append(msg)
                 result = ToolResult("", error=msg, is_error=True)
+            elif (bare_reason := self._suspicious_bare_args_reason(name, args)):
+                msg = f"[SUSPICIOUS ARGS] {name}: {bare_reason}"
+                UI.warn(msg)
+                self._strategy_hints.append(msg)
+                result = ToolResult("", error=msg, is_error=True)
             elif prior_ok >= max_ok and name in ("run", "write", "edit"):
                 spam_blocks += 1
                 msg = (
@@ -4336,16 +4719,24 @@ class NeonArchitect:
                     result = execute_tool(self.tools, name, args)
                 if result.is_error:
                     self._tool_fail_counts[fp_key] = prior_fails + 1
+                    self._fp_last_error[fp_key] = str(result.error or "")[:300]
                     if self._tool_fail_counts[fp_key] >= 2:
                         hint = (
-                            f"Tool {name} failed {self._tool_fail_counts[fp_key]}x with same args. "
-                            f"Do NOT retry identically — change approach."
+                            f"Tool {name} failed {self._tool_fail_counts[fp_key]}x with the SAME "
+                            f"arguments. Actual error: {self._fp_last_error[fp_key]!r} "
+                            f"Do NOT retry with a cosmetically different filename/argument — that "
+                            f"still counts as the same failure. Before calling {name} again, your "
+                            f"next message must state, in plain text, which different tool or "
+                            f"genuinely different approach (edit vs write, append=true, force=true, "
+                            f"reading the file first, etc.) you are switching to and why."
                         )
                         self._strategy_hints.append(hint)
+                        self._fp_pending_reflection.add(fp_key)
                         UI.warn(hint)
                 else:
                     self._tool_fail_counts[fp_key] = 0
                     self._tool_success_counts[fp_key] = prior_ok + 1
+                    self._phase_tool_success_counts[name] = self._phase_tool_success_counts.get(name, 0) + 1
                     if name == "web_search":
                         self._research_done = True
                         q = str(args.get("query", ""))[:120]
@@ -4359,6 +4750,11 @@ class NeonArchitect:
                     elif name in ("write", "edit"):
                         rel = str(args.get("path") or "").replace("\\", "/").lstrip("./")
                         self._update_working_memory(f"{name}: {rel}")
+                        # Chars actually written on a successful call — used by
+                        # gates that need to distinguish "wrote real content"
+                        # from "made N calls" (see DESIGN/DEPLOYMENT gates).
+                        content_len = len(str(args.get("content") or "")) if name == "write" else len(str(args.get("new_text") or ""))
+                        self._phase_chars_written += content_len
                         prefixes = self.config.get("implementation_path_prefixes") or [
                             "src/", "app/", "backend/", "frontend/", "lib/", "tests/"
                         ]
@@ -4384,7 +4780,10 @@ class NeonArchitect:
 
             self._recent_tool_keys.append(fp_key)
             out_preview = result.text()[:800] if not result.is_error else result.text()[:500]
-            UI.tool_result(name, out_preview, result.is_error)
+            if HAS_RICH:
+                console.print(UI.tool_result(name, out_preview, result.is_error))
+            else:
+                print(UI.tool_result(name, out_preview, result.is_error))
 
             self.current_turn_tool_calls = True
             self._phase_tool_counts[name] = self._phase_tool_counts.get(name, 0) + 1
@@ -4515,15 +4914,15 @@ class NeonArchitect:
                 bits.append(f"section '{h}': {'ok' if plan_has_sections(text, (h,)) else 'MISSING — edit PLAN.md to add heading'}")
             research = (
                 self._research_done
-                or self._phase_tool_counts.get("web_search", 0) > 0
-                or self._phase_tool_counts.get("browse_page", 0) > 0
+                or self._phase_tool_success_counts.get("web_search", 0) > 0
+                or self._phase_tool_success_counts.get("browse_page", 0) > 0
             )
             bits.append(f"research: {'ok' if research else 'need web_search/browse_page'}")
         elif kind == "architecture_complete":
             art = reqs.get("artifact") or "ARCHITECTURE.md"
             ok, n = self._artifact_ok(art, int(reqs.get("min_chars", 300)))
             bits.append(f"{art}: {'ok' if ok else 'MISSING'} ({n} chars)")
-            bits.append(f"write/edit={sum(self._phase_tool_counts.get(x,0) for x in ('write','edit'))}")
+            bits.append(f"write/edit (successful)={sum(self._phase_tool_success_counts.get(x,0) for x in ('write','edit'))}")
         elif kind == "bash_success":
             # This phase's whole job is confirming correctness, so the hint
             # needs to say more than a generic tool-count dump — report
@@ -5049,8 +5448,8 @@ class NeonArchitect:
                 if goal_looks_external(self.goal or ""):
                     research_ok = (
                         self._research_done
-                        or self._phase_tool_counts.get("web_search", 0) > 0
-                        or self._phase_tool_counts.get("browse_page", 0) > 0
+                        or self._phase_tool_success_counts.get("web_search", 0) > 0
+                        or self._phase_tool_success_counts.get("browse_page", 0) > 0
                         or bool(self.project_state.get("research_notes"))
                     )
             # NOTE: the two round-count "soft-pass"/"hard soft-pass" blocks
@@ -5069,7 +5468,7 @@ class NeonArchitect:
         if kind == "architecture_complete":
             artifact = reqs.get("artifact") or getattr(self, "architecture_artifact", "ARCHITECTURE.md")
             ok, n = self._artifact_ok(artifact, int(reqs.get("min_chars", 300)))
-            total = sum(self._phase_tool_counts.get(x, 0) for x in reqs.get("any_tool", ["write", "edit"]))
+            total = sum(self._phase_tool_success_counts.get(x, 0) for x in reqs.get("any_tool", ["write", "edit"]))
             if ok and n >= 300:
                 total = max(total, 1)
             arch_text = self._read_artifact_snippet(artifact, max_chars=50000)
@@ -5088,7 +5487,7 @@ class NeonArchitect:
                 UI.info(f"Gate met: {artifact} ({n}c) + writes={total} + sections → {phase.upper()}")
             return met
         if kind == "implementation_complete":
-            total = sum(self._phase_tool_counts.get(x, 0) for x in reqs.get("any_tool", ["write", "edit"]))
+            total = sum(self._phase_tool_success_counts.get(x, 0) for x in reqs.get("any_tool", ["write", "edit"]))
             src_n = self._phase_tool_counts.get("src_write", 0)
             min_src = int(reqs.get("min_src_writes", self.config.get("min_implementation_src_writes", 4)))
             met = total >= int(reqs.get("min_calls", 8)) and src_n >= min_src
@@ -5102,10 +5501,23 @@ class NeonArchitect:
                 UI.info(f"Gate met: {added} todos → {phase.upper()}")
             return met
         if kind == "tool_calls":
-            total = sum(self._phase_tool_counts.get(x, 0) for x in reqs.get("any_tool", []))
-            met = total >= reqs.get("min_calls", 1)
+            total = sum(self._phase_tool_success_counts.get(x, 0) for x in reqs.get("any_tool", []))
+            calls_ok = total >= reqs.get("min_calls", 1)
+            min_chars = int(reqs.get("min_chars_written", 0) or 0)
+            chars_ok = self._phase_chars_written >= min_chars if min_chars else True
+            met = calls_ok and chars_ok
             if met:
-                UI.info(f"Gate met: {total} tool calls → {phase.upper()}")
+                UI.info(
+                    f"Gate met: {total} successful tool calls"
+                    + (f" + {self._phase_chars_written} chars written" if min_chars else "")
+                    + f" → {phase.upper()}"
+                )
+            elif calls_ok and not chars_ok:
+                UI.info(
+                    f"Gate NOT met: {total} successful tool calls but only "
+                    f"{self._phase_chars_written}/{min_chars} chars actually written "
+                    f"— calls succeeded without producing real content."
+                )
             return met
         if kind == "bash_success":
             return self._check_tests_pass_gate(phase)
@@ -5179,7 +5591,7 @@ class NeonArchitect:
     def cmd_files(self):
         tree = UI.file_tree(self.project_dir, self.project_dir)
         if HAS_RICH:
-            box_style = MINIMAL if LEGACY_WIN_CONSOLE else ROUNDED
+            box_style = ASCII if LEGACY_WIN_CONSOLE else ROUNDED
             console.print(Panel(tree, title="[neon_cyan]Project Files[/neon_cyan]", border_style="neon_magenta", padding=(1, 2), box=box_style))
         else:
             print(tree)
@@ -5218,7 +5630,7 @@ class NeonArchitect:
         todo_tool = TodoTool(self.project_dir)
         result = todo_tool.execute(action="list")
         if HAS_RICH:
-            box_style = MINIMAL if LEGACY_WIN_CONSOLE else ROUNDED
+            box_style = ASCII if LEGACY_WIN_CONSOLE else ROUNDED
             console.print(Panel(
                 Text.from_markup(f"[neon_yellow]{UI.esc(result.text())}[/neon_yellow]"),
                 title="[neon_cyan]Task Tracker[/neon_cyan]",
@@ -5488,8 +5900,13 @@ def load_config() -> Dict[str, Any]:
         "max_same_tool_successes": 3,
         "post_429_backoff": 25.0,
         "rpm_safety": 0.80,
-        "thinking_effort": "off",
-        "show_thinking": False,
+        # Was hardwired to "off" — every config load silently reset this
+        # back regardless of what was saved. Now hardwired to "low" instead,
+        # per explicit request. allow_medium_high_thinking stays False, so
+        # "low" is the ceiling; raise both together if you want more.
+        "thinking_effort": "low",
+        "allow_medium_high_thinking": False,
+        "show_thinking": True,
         "autopilot_thinking": False,
     }
     for _k, _v in _HARDWIRE.items():
@@ -5754,6 +6171,8 @@ def apply_session(agent: "NeonArchitect", data: Dict[str, Any]) -> None:
 
     agent._phase_rounds = 0
     agent._phase_tool_counts = {}
+    agent._phase_tool_success_counts = {}
+    agent._phase_chars_written = 0
     agent._phase_bash_ok = False
 
     try:
@@ -5811,6 +6230,185 @@ def apply_session(agent: "NeonArchitect", data: Dict[str, Any]) -> None:
     agent._rebuild_system()
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+#  SECTION: TEXTUAL ALTERNATE-SCREEN TUI  (Crush / Hermes style full-screen)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+try:
+    from textual.app import App, ComposeResult
+    from textual.containers import Container, Horizontal, Vertical
+    from textual.widgets import Header, Footer, Input, RichLog, Static
+    from textual.binding import Binding
+    from textual import work
+    HAS_TEXTUAL = True
+except ImportError:
+    HAS_TEXTUAL = False
+
+
+class _TuiLogSink:
+    """Redirect UI prints into the Textual RichLog (thread-safe via call_from_thread)."""
+
+    def __init__(self, app: "NeonTUI"):
+        self.app = app
+
+    def write(self, msg: str) -> None:
+        if not msg:
+            return
+        try:
+            self.app.call_from_thread(self.app.write_log, msg.rstrip("\n"))
+        except Exception:
+            pass
+
+    def flush(self) -> None:
+        pass
+
+
+if HAS_TEXTUAL:
+
+    class NeonTUI(App):
+        """Full-screen alternate-buffer TUI for Neon Architect."""
+
+        CSS = """
+        Screen {
+            background: #0b1220;
+        }
+        #head {
+            dock: top;
+            height: 3;
+            background: #0f172a;
+            color: #22d3ee;
+            padding: 0 2;
+            border: solid #22d3ee;
+        }
+        #log {
+            background: #0b1220;
+            color: #e2e8f0;
+            border: solid #1e293b;
+            padding: 0 1;
+        }
+        #status {
+            dock: bottom;
+            height: 1;
+            background: #0f172a;
+            color: #94a3b8;
+            padding: 0 2;
+        }
+        #input {
+            dock: bottom;
+            margin-bottom: 1;
+            background: #0f172a;
+            border: solid #22d3ee;
+            color: #f8fafc;
+        }
+        """
+
+        BINDINGS = [
+            Binding("ctrl+c", "quit", "Quit", show=True),
+            Binding("ctrl+q", "quit", "Quit", show=False),
+            Binding("escape", "quit", "Quit", show=False),
+        ]
+
+        def __init__(self, agent: "NeonArchitect"):
+            super().__init__()
+            self.agent = agent
+            self._busy = False
+
+        def compose(self) -> ComposeResult:
+            model = self.agent.model_cfg.get("name", "?")
+            proj = str(self.agent.project_dir)
+            yield Static(
+                f" ◆  {APP_NAME}  v{APP_VERSION}   ·   {model}   ·   {proj}",
+                id="head",
+            )
+            yield RichLog(id="log", highlight=True, markup=True, wrap=True, auto_scroll=True)
+            yield Input(placeholder="Type a request · /help · /goal · /autopilot · Enter to continue…", id="input")
+            yield Static(" ready  ·  ctrl+c to quit", id="status")
+
+        def on_mount(self) -> None:
+            log = self.query_one("#log", RichLog)
+            log.write(f"[bold cyan]{APP_NAME}[/] full-screen TUI  ·  model [white]{self.agent.model_cfg.get('name')}[/]")
+            log.write("[dim]Panels · streaming · tools render in this log. Type below and press Enter.[/]")
+            if self.agent.goal:
+                log.write(f"[magenta]Goal:[/] {self.agent.goal}")
+            self.query_one("#input", Input).focus()
+
+        def write_log(self, msg: str) -> None:
+            try:
+                self.query_one("#log", RichLog).write(msg)
+            except Exception:
+                pass
+
+        def set_status(self, text: str) -> None:
+            try:
+                self.query_one("#status", Static).update(f" {text}")
+            except Exception:
+                pass
+
+        def on_input_submitted(self, event: Input.Submitted) -> None:
+            text = (event.value or "").strip()
+            event.input.value = ""
+            if not text:
+                text = "Please proceed with the current task."
+            if text in ("/exit", "/quit"):
+                self.exit()
+                return
+            if self._busy:
+                self.write_log("[yellow]busy — wait for the current turn to finish[/]")
+                return
+            self.run_agent_turn(text)
+
+        @work(thread=True)
+        def run_agent_turn(self, user_text: str) -> None:
+            self._busy = True
+            self.call_from_thread(self.set_status, "thinking…")
+            self.call_from_thread(self.write_log, f"[bold cyan]you[/]  {user_text}")
+
+            # Temporarily tee stdout into the log so stream chunks appear full-width
+            sink = _TuiLogSink(self)
+            old_out, old_err = sys.stdout, sys.stderr
+
+            class _Tee:
+                def __init__(self, primary, secondary):
+                    self.primary = primary
+                    self.secondary = secondary
+                def write(self, data):
+                    try:
+                        self.primary.write(data)
+                    except Exception:
+                        pass
+                    if data and data != "\n":
+                        try:
+                            self.secondary.write(data)
+                        except Exception:
+                            pass
+                def flush(self):
+                    try:
+                        self.primary.flush()
+                    except Exception:
+                        pass
+
+            # In alternate screen, don't write to real stdout — only log
+            class _LogOnly:
+                def __init__(self, s):
+                    self.s = s
+                def write(self, data):
+                    if data:
+                        self.s.write(data)
+                def flush(self):
+                    pass
+
+            sys.stdout = _LogOnly(sink)  # type: ignore
+            sys.stderr = _LogOnly(sink)  # type: ignore
+            try:
+                self.agent.run_turn(user_text)
+            except Exception as e:
+                self.call_from_thread(self.write_log, f"[red]error:[/] {e}")
+            finally:
+                sys.stdout, sys.stderr = old_out, old_err
+                self._busy = False
+                self.call_from_thread(self.set_status, "ready  ·  ctrl+c to quit")
+
+
 def main():
     parser = argparse.ArgumentParser(description=f"{APP_NAME} v{APP_VERSION}")
     parser.add_argument("--project", "-p", default=None,
@@ -5818,6 +6416,8 @@ def main():
     parser.add_argument("--model", "-m", default=None, help="Model key (glm-5.2, nemotron-3-super-120b-a12b, ...)")
     parser.add_argument("--fresh", action="store_true",
                         help="Start a clean session (do not restore prior goal/messages/todos)")
+    parser.add_argument("--tui", action="store_true",
+                        help="Launch full-screen alternate-buffer TUI (Textual / Crush-style)")
     parser.add_argument("--full-access", action="store_true",
                         help="Unrestricted mode: local network browse allowed (destructive git ops still blocked in run tool)")
     parser.add_argument("--allow-outside", action="store_true",
@@ -5891,6 +6491,20 @@ def main():
     except Exception as e:
         UI.warn(f"Could not update config: {e}")
 
+    # Full-screen alternate-buffer TUI (Textual)
+    if getattr(args, "tui", False):
+        if not HAS_TEXTUAL:
+            UI.err("Textual is not installed. Run:  pip install textual")
+            sys.exit(1)
+        app = NeonTUI(agent)
+        app.run()
+        ok = save_session(agent, also_config=True)
+        if ok:
+            print(f"Session saved → {_project_session_path(agent.project_dir)}")
+        print(f"Total usage: {agent.meter.report()}")
+        print("Goodbye.")
+        return
+
     if not cfg.get("_fresh"):
         try:
             if agent.offer_resume_autopilot():
@@ -5910,7 +6524,7 @@ def main():
     _masked = ("***" + _k[-4:]) if len(_k) > 8 else ("***" if _k else None)
     if HAS_RICH:
         summary = Table.grid(padding=(0, 2))
-        summary.add_column(style="cc_muted", justify="right")
+        summary.add_column(style="cc_muted", justify="right", min_width=10)
         summary.add_column(style="cc_body")
         summary.add_row("API key", (f"{_masked}  ({_nproj} project{'s' if _nproj != 1 else ''} configured)"
                                       if _masked else "[cc_warn]not set — use /apikey[/cc_warn]"))
@@ -5921,32 +6535,34 @@ def main():
         console.print(Padding(summary, (0, 2)))
         console.print()
         tip = Text()
-        tip.append("  Type a request, or press ", style="cc_muted")
+        tip.append("  ", style="cc_muted")
+        tip.append("Type a request", style="cc_body")
+        tip.append("  ·  press ", style="cc_muted")
         tip.append("Enter", style="cc_fg")
-        tip.append(" to continue the last task.  ", style="cc_muted")
-        tip.append("/help", style="cc_primary")
-        tip.append(" for commands  ·  ", style="cc_muted")
-        tip.append("/goal", style="cc_primary")
+        tip.append(" to continue  ·  ", style="cc_muted")
+        tip.append("/help", style="cc_primary_bold")
+        tip.append(" commands  ·  ", style="cc_muted")
+        tip.append("/goal", style="cc_primary_bold")
         tip.append(" + ", style="cc_muted")
-        tip.append("/autopilot", style="cc_primary")
-        tip.append(" for full SDLC autopilot", style="cc_muted")
+        tip.append("/autopilot", style="cc_primary_bold")
+        tip.append(" for full SDLC", style="cc_muted")
         console.print(tip)
         console.print()
     else:
         if _masked:
-            print(f"API key: {_masked}  ({_nproj} project(s) configured)")
+            print(f"  API key: {_masked}  ({_nproj} project(s) configured)")
         else:
-            print("No API key for this project — set with /apikey")
-        print(f"Timeouts: first-token {agent.config.get('first_token_timeout', 60):.0f}s, "
+            print("  No API key for this project — set with /apikey")
+        print(f"  Timeouts: first-token {agent.config.get('first_token_timeout', 60):.0f}s, "
               f"retries {agent.config.get('retry_max', 2)}, thinking {agent.config.get('thinking_effort', 'off')}")
-        print("Type a request, or press Enter to continue the last task. /help for commands.")
+        print("  Type a request, or press Enter to continue. /help for commands.")
 
     while True:
         try:
             if HAS_RICH:
-                raw = console.input("[cc_prompt]❯[/cc_prompt] ").strip()
+                raw = console.input("[cc_prompt]  ❯  [/cc_prompt]").strip()
             else:
-                raw = input("> ").strip()
+                raw = input("  > ").strip()
         except (KeyboardInterrupt, EOFError):
             print()
             break
@@ -5994,13 +6610,14 @@ def main():
                     ]),
                 ]
                 for title, rows in groups:
-                    console.print(Text(f"  {title}", style="cc_muted"))
+                    console.print(Text(f"  ◆  {title}", style="cc_primary_bold"))
                     t = Table.grid(padding=(0, 2))
-                    t.add_column(style="cc_primary")
+                    t.add_column(style="cc_primary", min_width=18)
                     t.add_column(style="cc_body")
                     for cmd, desc in rows:
-                        t.add_row(f"    {cmd}", desc)
+                        t.add_row(f"     {cmd}", desc)
                     console.print(t)
+                    console.print()
                 console.print(Text("  Empty Enter continues the last task.", style="cc_subtle"))
                 console.print()
             else:
@@ -6100,6 +6717,8 @@ def main():
             agent.meter.completion = 0
             agent._phase_rounds = 0
             agent._phase_tool_counts = {}
+            agent._phase_tool_success_counts = {}
+            agent._phase_chars_written = 0
             agent._phase_bash_ok = False
             agent.current_turn_tool_calls = False
             TodoTool._todos.clear()
@@ -6132,6 +6751,8 @@ def main():
             agent.meter.completion = 0
             agent._phase_rounds = 0
             agent._phase_tool_counts = {}
+            agent._phase_tool_success_counts = {}
+            agent._phase_chars_written = 0
             agent._phase_bash_ok = False
             TodoTool._todos.clear()
             TodoTool._counter = 0
