@@ -1514,6 +1514,12 @@ class Tool:
         if raw.startswith("\\?\\"):
             raw = raw[4:]
         raw = raw.split("#", 1)[0]
+        # A '?query=string' suffix is never part of a real project-relative
+        # path — it's a tool-call/URL fragment leaking in, same failure mode
+        # as the '#' case above. Strip it the same way instead of letting it
+        # reach _degenerate_path_reason, where it hard-rejects on every retry
+        # because '?' is a junk char but nothing upstream ever removes it.
+        raw = raw.split("?", 1)[0]
         
         low = raw.lower()
         if ", content" in low or ", requirements" in low or ", risks" in low:
@@ -1839,35 +1845,56 @@ class WriteTool(Tool):
                         append = True
                         auto_appended = True
                     elif is_tiny_overwrite:
-                        extra = (
-                            " This file is a plan/spec artifact — tiny scraps are never "
-                            "auto-appended here, edit it properly or use force=true."
-                            if no_auto else ""
-                        )
+                        if no_auto:
+                            # Never suggest force=true for plan/spec artifacts. A
+                            # model that's already thrashing (e.g. resending a
+                            # stale header-only payload across several turns) will
+                            # take force=true at face value and genuinely
+                            # truncate PLAN.md/ARCHITECTURE.md/etc if offered it
+                            # as an escape hatch — edit/append is always the
+                            # correct fix here, so don't hand it a worse one.
+                            extra = (
+                                " This file is a plan/spec artifact — tiny scraps are never "
+                                "auto-appended here. This content also does not belong in "
+                                "IMPLEMENTATION/TESTING/REVIEW phases; if you didn't mean to "
+                                "touch this file, drop this call entirely and act on the real "
+                                "target instead (e.g. run the test command, or edit source code)."
+                            )
+                            force_hint = ""
+                        else:
+                            extra = ""
+                            force_hint = " or write(..., force=true) if you really mean to truncate the file."
                         return ToolResult(
                             "",
                             error=(
                                 f"Refused tiny overwrite of {path} "
                                 f"(existing ~{existing_len} bytes, new payload {len(data)} chars). "
-                                f"Use edit (old_text/new_text), write(..., append=true) to extend, "
-                                f"or write(..., force=true) if you really mean to truncate the file."
+                                f"Use edit (old_text/new_text), write(..., append=true) to extend,"
+                                f"{force_hint}"
                                 f"{extra}"
                             ),
                             is_error=True,
                         )
                     else:
-                        extra = (
-                            " This file is a plan/spec artifact — tiny scraps are never "
-                            "auto-appended here, edit it properly or use force=true."
-                            if no_auto else ""
-                        )
+                        if no_auto:
+                            extra = (
+                                " This file is a plan/spec artifact — tiny scraps are never "
+                                "auto-appended here. This content also does not belong in "
+                                "IMPLEMENTATION/TESTING/REVIEW phases; if you didn't mean to "
+                                "touch this file, drop this call entirely and act on the real "
+                                "target instead (e.g. run the test command, or edit source code)."
+                            )
+                            force_hint = ""
+                        else:
+                            extra = ""
+                            force_hint = " or write(..., force=true) if you really mean to truncate the file."
                         return ToolResult(
                             "",
                             error=(
                                 f"Refused shrinking overwrite of {path} "
                                 f"(existing ~{existing_len} bytes → {len(data)} chars). "
-                                f"Pass the complete new file content, use edit/append, "
-                                f"or write(..., force=true) if you really mean to truncate the file."
+                                f"Pass the complete new file content, use edit/append,"
+                                f"{force_hint}"
                                 f"{extra}"
                             ),
                             is_error=True,
@@ -2658,16 +2685,50 @@ class TodoTool(Tool):
                 TodoTool._todos[tid] = {"content": content, "status": "pending"}
                 return ToolResult(f"Added todo {tid}: {content}")
             elif action == "update":
+                if not id or not str(id).strip():
+                    return ToolResult(
+                        "",
+                        error=(
+                            'Missing "id" for todo update — call requires an existing todo ID '
+                            '(e.g. "T003"), not just action+status/content. Call /todo list or '
+                            'todo(action="list") first if you don\'t have the ID, then retry with '
+                            'it, e.g.: {"action":"update","id":"T003","status":"done"}'
+                        ),
+                        is_error=True,
+                    )
                 if id not in TodoTool._todos:
-                    return ToolResult("", error=f"Todo {id} not found", is_error=True)
+                    return ToolResult(
+                        "",
+                        error=(
+                            f"Todo {id!r} not found — it doesn't exist or was already removed. "
+                            f"Call todo(action=\"list\") to see current IDs before retrying."
+                        ),
+                        is_error=True,
+                    )
                 if content:
                     TodoTool._todos[id]["content"] = content
                 if status:
                     TodoTool._todos[id]["status"] = status
                 return ToolResult(f"Updated todo {id}")
             elif action == "remove":
+                if not id or not str(id).strip():
+                    return ToolResult(
+                        "",
+                        error=(
+                            'Missing "id" for todo remove — call requires an existing todo ID '
+                            '(e.g. "T003"). Call todo(action="list") first if unsure.'
+                        ),
+                        is_error=True,
+                    )
                 if id not in TodoTool._todos:
-                    return ToolResult("", error=f"Todo {id} not found", is_error=True)
+                    return ToolResult(
+                        "",
+                        error=(
+                            f"Todo {id!r} not found — it doesn't exist or was already removed. "
+                            f"Call todo(action=\"list\") to see current IDs before retrying."
+                        ),
+                        is_error=True,
+                    )
                 del TodoTool._todos[id]
                 return ToolResult(f"Removed todo {id}")
             elif action == "list":
@@ -4841,8 +4902,34 @@ class NeonArchitect:
 
         MAX_PARALLEL_TOOLS = 7
         if len(tool_calls) > MAX_PARALLEL_TOOLS:
-            UI.warn(f"Truncating {len(tool_calls)} parallel tools to {MAX_PARALLEL_TOOLS} to prevent sprawl.")
+            dropped = tool_calls[MAX_PARALLEL_TOOLS:]
             tool_calls = tool_calls[:MAX_PARALLEL_TOOLS]
+            UI.warn(f"Truncating {len(dropped) + len(tool_calls)} parallel tools to {MAX_PARALLEL_TOOLS} to prevent sprawl.")
+            # Previously this just sliced the list with no signal anywhere:
+            # the dropped calls never even entered context (add_assistant
+            # runs on the truncated list below), so the model had no way to
+            # know some of its own requested actions never happened at all —
+            # from its side it asked for N things, saw results for 7, and
+            # had no reason to think the rest weren't simply "still coming."
+            # Surface exactly which calls got dropped so it can decide
+            # whether to re-request any of them next turn instead of
+            # silently assuming they succeeded or will appear later.
+            dropped_desc = []
+            for tc in dropped:
+                dname = tc.get("name") or "?"
+                try:
+                    dargs = json.loads(tc.get("arguments") or "{}")
+                except Exception:
+                    dargs = {}
+                dpreview = json.dumps(dargs, ensure_ascii=False)[:80]
+                dropped_desc.append(f"{dname}({dpreview})")
+            self.ctx.add_user(
+                f"SYSTEM: {len(dropped)} of your {len(dropped) + len(tool_calls)} tool calls this turn "
+                f"were dropped (only the first {MAX_PARALLEL_TOOLS} ran) to prevent call sprawl. "
+                f"None of these ran — they are NOT pending, NOT queued, and will NOT appear later: "
+                f"{'; '.join(dropped_desc)}. If any of these are still needed, call them again "
+                f"explicitly in a future turn; do not assume they happened."
+            )
 
         formatted = sanitize_tool_calls([
             {
