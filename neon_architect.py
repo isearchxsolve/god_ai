@@ -366,6 +366,17 @@ DEFAULT_CONFIG = {
     "working_memory_file": ".neon_working_memory.md",
     "project_state_file": ".neon_project_state.json",
     "max_same_tool_failures": 3,
+    # Per-phase model override. Autopilot runs a single model for the whole
+    # SDLC by default (default_model); this lets specific phases opt into a
+    # stronger/different model without paying for it everywhere. Empty/absent
+    # phase -> falls back to default_model. Keys must be SDLC_PHASES entries,
+    # values must be MODELS keys. testing/verification default to the 120B
+    # Nemotron since that's where GLM-5.2 was observed getting stuck
+    # producing collapsed-source writes it couldn't self-correct.
+    "phase_models": {
+        "testing": "nemotron-3-super-120b-a12b",
+        "verification": "nemotron-3-super-120b-a12b",
+    },
     "require_research_for_external": True,
     "full_access": True,
     "allow_path_outside_project": False,
@@ -1343,11 +1354,11 @@ class ProviderPool:
         return min(waits + bucket_waits) if (waits or bucket_waits) else 2.0
 
 
-def build_pool(config: Dict[str, Any]) -> ProviderPool:
+def build_pool(config: Dict[str, Any], model_key_override: Optional[str] = None) -> ProviderPool:
     providers: List[Provider] = []
     api_key = config.get("api_key", "")
     base_url = config.get("base_url", NIM_BASE_URL)
-    model_key = config.get("default_model", "glm-5.2")
+    model_key = model_key_override if model_key_override in MODELS else config.get("default_model", "glm-5.2")
     read_timeout = config.get("http_read_timeout", 20.0)
     connect_timeout = config.get("http_connect_timeout", 10.0)
     _pd_raw = config.get("project_dir")
@@ -1366,20 +1377,38 @@ def build_pool(config: Dict[str, Any]) -> ProviderPool:
         providers.append(Provider("NIM-Primary", base_url, api_key, MODELS[model_key],
                                   connect_timeout, read_timeout, get_or_create_bucket(model_key)))
 
-    # Ordered by expected tool-call reliability, not raw size. glm-5.2-fp8
-    # shares GLM-5.2's post-training/tool-calling recipe, so it drifts least
-    # from primary. The
-    # nemotron/llama entries run at temperature=1.0 (nemotron, per NVIDIA's
-    # own recommended settings) or are dated checkpoints with no tool-calling-
-    # specific tuning, and land last since they're more likely to produce the
-    # garbled multi-field JSON that trips [SUSPICIOUS ARGS]/[BLOCKED REPEAT].
+    # Base fallback order, used when no phase override is active: ordered by
+    # expected tool-call reliability, not raw size. glm-5.2-fp8 shares
+    # GLM-5.2's post-training/tool-calling recipe, so it drifts least from
+    # primary. The nemotron/llama entries run at temperature=1.0 (nemotron,
+    # per NVIDIA's own recommended settings) or are dated checkpoints with no
+    # tool-calling-specific tuning, and land last since they're more likely
+    # to produce the garbled multi-field JSON that trips
+    # [SUSPICIOUS ARGS]/[BLOCKED REPEAT].
     # qwen3-coder removed: NVIDIA pulled it from the NIM catalog.
-    fallbacks = [
+    base_fallbacks = [
         "glm-5.2-fp8",
         "nemotron-3-super-120b-a12b",
         "nemotron-ultra",
         "llama-3.1-405b",
     ]
+    if model_key_override is not None and model_key_override != config.get("default_model", "glm-5.2"):
+        # A phase override (e.g. testing/verification -> a stronger model)
+        # exists specifically because glm-5.2/glm-5.2-fp8 got stuck in this
+        # phase before. If the override model itself rate-limits or errors,
+        # ProviderPool.rotate() walks this same list — so leaving
+        # glm-5.2-fp8 first would silently hand the phase right back to the
+        # model it was overridden to avoid. Push the OTHER strong models
+        # first instead, and demote glm-5.2/glm-5.2-fp8 to last-resort: still
+        # available so a fully exhausted pool doesn't hard-fail, but only
+        # reached after every stronger option is gone.
+        strong_first = [m for m in base_fallbacks if m not in ("glm-5.2-fp8",)]
+        demoted = [m for m in base_fallbacks if m in ("glm-5.2-fp8",)]
+        if config.get("default_model", "glm-5.2") == "glm-5.2":
+            demoted = ["glm-5.2"] + demoted if "glm-5.2" not in demoted else demoted
+        fallbacks = strong_first + demoted
+    else:
+        fallbacks = base_fallbacks
     for fb in fallbacks:
         if fb != model_key and fb in MODELS and api_key and MODELS[fb]["id"] not in dead_model_ids:
             providers.append(Provider(f"NIM-{fb}", base_url, api_key, MODELS[fb],
@@ -1518,6 +1547,13 @@ class Tool:
                 "calls instead of being retried cleanly. Use the ORIGINAL intended "
                 "path, and use edit/append/force=true to fix content, not a new filename."
             )
+        low = raw.lower()
+        if low.count(".mdx.dump") >= 1 or low.count(".dump.") >= 2:
+            return (
+                "path looks like a hallucinated backup/dump accretion "
+                "(e.g. PLAN.md.backup.mdx.dump...). Use the ORIGINAL filename only "
+                "(PLAN.md / ARCHITECTURE.md / etc.), never invent dump suffixes."
+            )
         if any(ch in cls._JUNK_CHARS for ch in raw):
             bad = sorted({ch for ch in raw if ch in cls._JUNK_CHARS})
             return (
@@ -1645,6 +1681,8 @@ class WriteTool(Tool):
     description = (
         "Create or overwrite a file (or append). path MUST be project-relative "
         "(e.g. src/app.py). Prefer coherent chunks (<4000 chars). "
+        "CRITICAL: content MUST include REAL newlines between statements/lines — "
+        "never collapse a whole Python/JS/TS file onto one line (SyntaxError). "
         "NEVER overwrite an existing file with a tiny fragment — that destroys it. "
         "To change part of a file use edit. To continue a long write use append=true. "
         "Creates parent dirs."
@@ -1653,7 +1691,13 @@ class WriteTool(Tool):
         "type": "object",
         "properties": {
             "path": {"type": "string", "description": "Project-relative path"},
-            "content": {"type": "string"},
+            "content": {
+                "type": "string",
+                "description": (
+                    "Full file text with real newline characters between lines. "
+                    "Do NOT join statements with spaces only."
+                ),
+            },
             "append": {"type": "boolean", "default": False, "description": "Append instead of overwrite"},
             "force": {
                 "type": "boolean",
@@ -1668,6 +1712,86 @@ class WriteTool(Tool):
     # replace it (markdown headers, bullet lists, etc). Used to auto-append
     # instead of hard-failing on the tiny/shrinking-overwrite guard below.
     _ADDITION_MARKERS = ("#", "-", "*", "1.", "```")
+    # Plan/spec artifacts where a tiny "section-looking" scrap must NOT be
+    # silently auto-appended — these are hand-curated, order-sensitive docs
+    # where a stray fragment landing in the wrong place is worse than a
+    # loud refusal. Real edits go through edit(), or write(..., force=true)
+    # for an intentional full overwrite.
+    _NO_AUTO_APPEND = {"plan.md", "architecture.md", "verification.md", "design.md"}
+    # Multi-statement source code with almost no newlines — the classic
+    # "model collapsed an entire file onto one line" failure. This must
+    # NOT fire on a single legitimate statement that happens to contain
+    # two keywords from the list (e.g. "from __future__ import
+    # annotations" contains both "from" and "import" but is one atomic
+    # statement). So instead of matching any two keywords anywhere in the
+    # string, require a statement BOUNDARY between them: a colon opening
+    # a block body, a semicolon, or a second statement-starting keyword
+    # appearing after the first statement has already ended (heuristically:
+    # preceded by whitespace and not immediately following "from"/"import"
+    # dotted-path tokens).
+    _COLLAPSED_SRC_RE = re.compile(
+        r"\b(def|class|import|from|function|const|let|var|export|package|fn|pub)\b"
+        r"[^\n]{0,200}?"
+        r"[:;]\s*"
+        r"[^\n]{4,}?"
+        r"\b(def|class|import|from|function|const|let|var|export|package|fn|pub|return|assert)\b",
+        re.S,
+    )
+    # A single "from X import Y[, Z...]" / "import X[, Y...]" line is
+    # always one legitimate statement, no matter how long, and must never
+    # be treated as collapsed source on its own.
+    _SINGLE_IMPORT_LINE_RE = re.compile(
+        r"^\s*(from\s+[\w.]+\s+import\s+[\w., *()\n]+|import\s+[\w., ]+)\s*$"
+    )
+
+    @staticmethod
+    def _normalize_content(data: str) -> str:
+        """When a payload looks collapsed (almost no real newlines, but
+        contains literal \\n / \\t escape sequences), expand those escapes
+        into real newlines/tabs before we even run the collapsed-source
+        check. This recovers the common case where the model meant to
+        send real lines but the string got escaped somewhere upstream."""
+        if not data:
+            return data
+        if data.count("\n") < 2 and ("\\n" in data or "\\t" in data):
+            data = (
+                data.replace("\\r\\n", "\n")
+                .replace("\\n", "\n")
+                .replace("\\t", "\t")
+                .replace("\\r", "\n")
+            )
+        return data
+
+    @classmethod
+    def _looks_collapsed_source(cls, data: str, path: str) -> bool:
+        """Detect multi-statement source code crammed onto (almost) one
+        line — this is what turns into SyntaxErrors downstream. Only
+        applies to source-code extensions; markdown/config/data files are
+        exempt since single-line content is often legitimate there.
+        A lone import/from-import statement is exempt outright — that's
+        one real statement, not collapsed code, no matter its length.
+        Very short payloads are also exempt: there isn't room for two
+        real statements to be jammed together under ~40 chars, so this
+        is far more likely a genuinely tiny file (a one-line stub,
+        __init__.py re-export, etc.) than truncated multi-statement code."""
+        if data.count("\n") >= 3:
+            return False
+        stripped = data.strip()
+        if cls._SINGLE_IMPORT_LINE_RE.match(stripped):
+            return False
+        if len(stripped) < 40:
+            return False
+        ext = Path(path or "").suffix.lower()
+        if ext not in {
+            ".py", ".pyi", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
+            ".go", ".rs", ".java", ".kt", ".cs", ".rb", ".php", ".swift",
+        }:
+            return False
+        if cls._COLLAPSED_SRC_RE.search(data):
+            return True
+        if len(data) > 120 and data.count("\n") == 0 and data.count("  ") >= 2:
+            return True
+        return False
 
     def execute(self, path: str = "", content: str = None, append: bool = False, force: bool = False) -> ToolResult:
         try:
@@ -1682,6 +1806,19 @@ class WriteTool(Tool):
             fp = self._safe_path(path)
             fp.parent.mkdir(parents=True, exist_ok=True)
             data = content if isinstance(content, str) else str(content)
+            data = self._normalize_content(data)
+            if self._looks_collapsed_source(data, path) and not force:
+                return ToolResult(
+                    "",
+                    error=(
+                        f"REFUSED collapsed source write to {path}: content has almost no "
+                        f"newlines but looks like multi-statement code ({len(data)} chars, "
+                        f"{data.count(chr(10))} newlines). Re-send content with REAL newline "
+                        f"characters between imports/defs/statements. "
+                        f"(force=true bypasses this guard only if you truly mean one line.)"
+                    ),
+                    is_error=True,
+                )
             auto_appended = False
             if not append and not force and fp.is_file():
                 try:
@@ -1691,8 +1828,9 @@ class WriteTool(Tool):
                 looks_like_addition = data.strip().startswith(self._ADDITION_MARKERS)
                 is_tiny_overwrite = existing_len >= 80 and len(data) < 40
                 is_shrinking_overwrite = existing_len >= 200 and len(data) < max(40, existing_len // 5)
+                no_auto = fp.name.lower() in self._NO_AUTO_APPEND
                 if is_tiny_overwrite or is_shrinking_overwrite:
-                    if looks_like_addition:
+                    if looks_like_addition and not no_auto:
                         # Small, section-shaped content against a large existing
                         # file is almost always an attempt to ADD a section, not
                         # replace the file. Auto-append instead of forcing the
@@ -1701,6 +1839,11 @@ class WriteTool(Tool):
                         append = True
                         auto_appended = True
                     elif is_tiny_overwrite:
+                        extra = (
+                            " This file is a plan/spec artifact — tiny scraps are never "
+                            "auto-appended here, edit it properly or use force=true."
+                            if no_auto else ""
+                        )
                         return ToolResult(
                             "",
                             error=(
@@ -1708,10 +1851,16 @@ class WriteTool(Tool):
                                 f"(existing ~{existing_len} bytes, new payload {len(data)} chars). "
                                 f"Use edit (old_text/new_text), write(..., append=true) to extend, "
                                 f"or write(..., force=true) if you really mean to truncate the file."
+                                f"{extra}"
                             ),
                             is_error=True,
                         )
                     else:
+                        extra = (
+                            " This file is a plan/spec artifact — tiny scraps are never "
+                            "auto-appended here, edit it properly or use force=true."
+                            if no_auto else ""
+                        )
                         return ToolResult(
                             "",
                             error=(
@@ -1719,6 +1868,7 @@ class WriteTool(Tool):
                                 f"(existing ~{existing_len} bytes → {len(data)} chars). "
                                 f"Pass the complete new file content, use edit/append, "
                                 f"or write(..., force=true) if you really mean to truncate the file."
+                                f"{extra}"
                             ),
                             is_error=True,
                         )
@@ -3624,6 +3774,34 @@ class NeonArchitect:
         except Exception:
             pass
 
+    def _apply_phase_model(self, phase: str):
+        """Swap the primary model for phases configured in phase_models
+        (e.g. testing/verification -> a stronger model than default_model).
+        Falls back to the user's chosen default_model for any phase without
+        an override, and never touches self.model_key/config['default_model']
+        itself — this is a temporary per-phase swap, not a user model change,
+        so /model and this don't fight each other over what "the" model is.
+        """
+        phase_models = self.config.get("phase_models") or {}
+        override = phase_models.get(phase)
+        if override is not None and override not in MODELS:
+            UI.warn(f"phase_models['{phase}'] = '{override}' is not a known model; ignoring override.")
+            override = None
+        target_key = override or self.model_key
+        current_id = self.pool.current().model_id if self.pool.providers else None
+        target_id = MODELS.get(target_key, {}).get("id")
+        if current_id == target_id:
+            return
+        try:
+            self.pool = build_pool(self.config, model_key_override=override)
+            label = MODELS.get(target_key, {}).get("name", target_key)
+            if override:
+                UI.info(f"Phase model: {phase.upper()} -> {label} (phase_models override)")
+            else:
+                UI.info(f"Phase model: {phase.upper()} -> {label} (default)")
+        except Exception as e:
+            UI.warn(f"Phase model switch for {phase} failed, keeping current pool: {e}")
+
     def _advance_sdlc(self) -> bool:
         current = SDLC_PHASES[self.sdlc_phase_idx]
         self.sdlc_completed.add(current)
@@ -3673,6 +3851,7 @@ class NeonArchitect:
         next_phase = SDLC_PHASES[self.sdlc_phase_idx]
         next_persona = SDLC_PERSONA_MAP.get(next_phase, "adaptive")
         self._switch_persona(next_persona, reason="auto")
+        self._apply_phase_model(next_phase)
         UI.ok(f"SDLC: {current.upper()} complete → {next_phase.upper()}")
         if next_phase == "implementation":
             UI.info(
@@ -3730,6 +3909,7 @@ class NeonArchitect:
         phase = SDLC_PHASES[min(self.sdlc_phase_idx, len(SDLC_PHASES) - 1)]
         initial_persona = SDLC_PERSONA_MAP.get(phase, "adaptive")
         self._switch_persona(initial_persona, reason="auto")
+        self._apply_phase_model(phase)
         self._rebuild_system()
         UI.separator("GOD AUTOPILOT ENGAGED")
         UI.ok(f"Goal: {self.goal}")
@@ -3915,6 +4095,29 @@ class NeonArchitect:
             )
         return ""
 
+    # A canonical path already survived _sanitize_rel_path but may still carry
+    # a junk suffix bolted on by a model that's dodging a write/edit refusal
+    # by renaming rather than fixing content (test_ac1_auth.py.newtmp2023...,
+    # ...lock20240801103257-0-003..., ...locked...). None of these ever reach
+    # disk (_degenerate_path_reason rejects them), but each one is still a
+    # DIFFERENT string, so keying the spam fingerprint on the raw canonical
+    # path lets an unlimited number of them dodge the 3-strikes counter.
+    # Strip back to "<original stem>.<original ext>" so every mutation of the
+    # same intended file collapses onto one fingerprint.
+    _PATH_JUNK_SUFFIX_RE = re.compile(
+        r"\.(newtmp|tmp|lock|locked|backup|dump|bak)[\w.\-]*$", re.IGNORECASE
+    )
+
+    @classmethod
+    def _path_family_root(cls, path: str) -> str:
+        prev = None
+        cur = path
+        # Strip repeatedly: "foo.py.locked2024...tmp" needs more than one pass.
+        while prev != cur:
+            prev = cur
+            cur = cls._PATH_JUNK_SUFFIX_RE.sub("", cur)
+        return cur or path
+
     def _tool_fingerprint(self, name: str, args: Dict[str, Any]) -> str:
         key_args: Dict[str, Any] = {}
         if name == "run":
@@ -3945,10 +4148,29 @@ class NeonArchitect:
                     # indefinitely without ever fixing the real problem.
                     canon = Tool._sanitize_rel_path(val)
                     val = canon or val
+                    # Further collapse to the FILENAME ROOT: a model dodging a
+                    # rejection by mutating the path itself (test_ac1_auth.py
+                    # -> test_ac1_auth.py.newtmp2023... -> ...lock2024...)
+                    # produces a different canonical path on every single
+                    # attempt, so the fingerprint above never repeats and the
+                    # 3-strikes counter never accumulates. Strip any accreted
+                    # junk suffix back to the original stem+ext so all such
+                    # mutations collapse onto ONE fingerprint and actually
+                    # trip the spam breaker.
+                    val = self._path_family_root(val)
                 key_args[k] = val
         if name in ("write", "todo") and args.get("content") is not None:
             c = str(args.get("content") or "")
-            key_args["content"] = c[:80] + f"|len={len(c)}"
+            # Key on shape, not exact text. A model retrying a rejected
+            # collapsed-source write rarely resends byte-identical content —
+            # it re-orders imports, adds/removes a trailing space, etc. Exact
+            # text (or even a raw prefix) gives each cosmetic variant its own
+            # fingerprint and lets it dodge the failure counter indefinitely.
+            # "Collapsed-ness" (near-zero newlines relative to length) is the
+            # actual failure mode, so key on that shape plus a coarse length
+            # bucket instead of the literal text.
+            newline_bucket = "collapsed" if (len(c) > 40 and c.count("\n") < 3) else "normal"
+            key_args["content"] = f"{newline_bucket}|len~{len(c) // 50 * 50}"
         if name == "edit":
             if args.get("old_text") is not None:
                 ot = str(args.get("old_text") or "")
@@ -4655,12 +4877,15 @@ class NeonArchitect:
             prior_fails = self._tool_fail_counts.get(fp_key, 0)
             prior_ok = self._tool_success_counts.get(fp_key, 0)
             max_ok = int(getattr(self, "max_same_tool_successes", 3) or 3)
-            
-            if prior_fails >= self.max_same_tool_failures:
+            force_override = name == "write" and bool(args.get("force"))
+
+            if prior_fails >= self.max_same_tool_failures and not force_override:
                 spam_blocks += 1
                 msg = (
                     f"[BLOCKED REPEAT] {name} with the same arguments already failed "
-                    f"{prior_fails} times. Change strategy: different path, query, URL, or tool."
+                    f"{prior_fails} times. Change strategy: different path, query, URL, or tool. "
+                    + ("Add force=true if you deliberately mean this exact content."
+                       if name == "write" else "")
                 )
                 UI.warn(msg)
                 self._strategy_hints.append(msg)
@@ -5619,7 +5844,17 @@ class NeonArchitect:
             self.model_key = name
             self.model_cfg = MODELS[name]
             self.config["default_model"] = name
-            UI.ok(f"Switched to {self.model_cfg['name']}")
+            # self.model_cfg alone is cosmetic: _build_payload() sources the
+            # actual API model/params from self.pool.current(), and the pool
+            # is a fixed provider list built once at startup from whatever
+            # default_model was at that time. Without rebuilding it here,
+            # /model <name> updates the display/config but every real
+            # request keeps hitting whichever model was primary at launch.
+            try:
+                self.pool = build_pool(self.config)
+                UI.ok(f"Switched to {self.model_cfg['name']}")
+            except Exception as e:
+                UI.err(f"Switched config to {self.model_cfg['name']} but pool rebuild failed: {e}")
             self._rebuild_system()
             self.persist(force=True)
         else:
