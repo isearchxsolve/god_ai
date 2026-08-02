@@ -1746,6 +1746,11 @@ class WriteTool(Tool):
     # replace it (markdown headers, bullet lists, etc). Used to auto-append
     # instead of hard-failing on the tiny/shrinking-overwrite guard below.
     _ADDITION_MARKERS = ("#", "-", "*", "1.", "```")
+    # A marker with (almost) nothing after it — e.g. a bare "```python" or
+    # a lone "#" — is a malformed/truncated payload, not a real section
+    # being added. Require a minimum body length beyond the marker itself
+    # before the auto-append heuristic below is allowed to fire.
+    _MIN_ADDITION_BODY_CHARS = 20
     # Plan/spec artifacts where a tiny "section-looking" scrap must NOT be
     # silently auto-appended — these are hand-curated, order-sensitive docs
     # where a stray fragment landing in the wrong place is worse than a
@@ -1934,10 +1939,48 @@ class WriteTool(Tool):
                     existing_len = fp.stat().st_size
                 except OSError:
                     existing_len = 0
-                looks_like_addition = data.strip().startswith(self._ADDITION_MARKERS)
+                target_ext = fp.suffix.lower()
+                is_source_file = target_ext in {
+                    ".py", ".pyi", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
+                    ".go", ".rs", ".java", ".kt", ".cs", ".rb", ".php", ".swift",
+                }
+                stripped_for_marker_check = data.strip()
+                looks_like_addition = (
+                    not is_source_file
+                    and stripped_for_marker_check.startswith(self._ADDITION_MARKERS)
+                    and len(stripped_for_marker_check) >= self._MIN_ADDITION_BODY_CHARS
+                )
                 is_tiny_overwrite = existing_len >= 80 and len(data) < 40
                 is_shrinking_overwrite = existing_len >= 200 and len(data) < max(40, existing_len // 5)
-                no_auto = fp.name.lower() in self._NO_AUTO_APPEND
+                no_auto = fp.name.lower() in self._NO_AUTO_APPEND or is_source_file
+                def _no_auto_explanation() -> str:
+                    # Never suggest force=true here. A model that's already
+                    # thrashing (e.g. resending a stale header-only payload,
+                    # or a stray fenced-code scrap, across several turns)
+                    # will take force=true at face value and genuinely
+                    # truncate/corrupt the file if offered it as an escape
+                    # hatch — edit/append is always the correct fix here,
+                    # so don't hand it a worse one. Wording differs by WHY
+                    # auto-append is disabled, since these are genuinely
+                    # different situations for the model to reason about.
+                    if is_source_file:
+                        return (
+                            " This is a source-code file — tiny/partial payloads (including "
+                            "a bare code-fence marker like ```python with no body) are never "
+                            "auto-appended here, since that silently produces invalid syntax. "
+                            "If you meant to add code, use edit (old_text/new_text) or "
+                            "write(..., append=true) with the REAL content, not just a fence. "
+                            "If you didn't mean to touch this file at all, drop this call "
+                            "and act on the real target instead."
+                        )
+                    return (
+                        " This file is a plan/spec artifact — tiny scraps are never "
+                        "auto-appended here. This content also does not belong in "
+                        "IMPLEMENTATION/TESTING/REVIEW phases; if you didn't mean to "
+                        "touch this file, drop this call entirely and act on the real "
+                        "target instead (e.g. run the test command, or edit source code)."
+                    )
+
                 if is_tiny_overwrite or is_shrinking_overwrite:
                     if looks_like_addition and not no_auto:
                         # Small, section-shaped content against a large existing
@@ -1949,20 +1992,7 @@ class WriteTool(Tool):
                         auto_appended = True
                     elif is_tiny_overwrite:
                         if no_auto:
-                            # Never suggest force=true for plan/spec artifacts. A
-                            # model that's already thrashing (e.g. resending a
-                            # stale header-only payload across several turns) will
-                            # take force=true at face value and genuinely
-                            # truncate PLAN.md/ARCHITECTURE.md/etc if offered it
-                            # as an escape hatch — edit/append is always the
-                            # correct fix here, so don't hand it a worse one.
-                            extra = (
-                                " This file is a plan/spec artifact — tiny scraps are never "
-                                "auto-appended here. This content also does not belong in "
-                                "IMPLEMENTATION/TESTING/REVIEW phases; if you didn't mean to "
-                                "touch this file, drop this call entirely and act on the real "
-                                "target instead (e.g. run the test command, or edit source code)."
-                            )
+                            extra = _no_auto_explanation()
                             force_hint = ""
                         else:
                             extra = ""
@@ -1980,13 +2010,7 @@ class WriteTool(Tool):
                         )
                     else:
                         if no_auto:
-                            extra = (
-                                " This file is a plan/spec artifact — tiny scraps are never "
-                                "auto-appended here. This content also does not belong in "
-                                "IMPLEMENTATION/TESTING/REVIEW phases; if you didn't mean to "
-                                "touch this file, drop this call entirely and act on the real "
-                                "target instead (e.g. run the test command, or edit source code)."
-                            )
+                            extra = _no_auto_explanation()
                             force_hint = ""
                         else:
                             extra = ""
@@ -2049,6 +2073,67 @@ class EditTool(Tool):
         "required": ["path", "old_text", "new_text"],
     }
 
+    @staticmethod
+    def _diagnose_no_match(old_text: str, original: str) -> str:
+        """Pinpoint *why* old_text isn't found, instead of a generic
+        'check whitespace' hint. Blind retries of a mismatched old_text
+        are the single biggest cause of failed-edit loops — this exists
+        so the model gets a specific, actionable reason on the first try
+        rather than discovering it after 3+ identical failures."""
+        if not old_text:
+            return " (old_text is empty)"
+
+        # 1. Line-ending mismatch: old_text has \r\n. Note `original` is read
+        # via text-mode open() with universal newlines, so it can never
+        # itself contain \r\n by the time it gets here — the only real case
+        # is old_text carrying CRLF (e.g. pasted/typed with it) against an
+        # LF-normalized file.
+        if "\r\n" in old_text:
+            return " (old_text contains \\r\\n but the file's line endings are normalized to \\n — strip \\r)"
+
+        # 2. Whitespace-only difference: normalize both and compare. This
+        # must catch differences in LEADING indentation too (not just
+        # trailing whitespace or blank-line spacing) — a wrong indent
+        # level on a copied snippet is one of the most common real causes
+        # of edit mismatches, so collapse all runs of whitespace on each
+        # line to a single space rather than only rstrip-ing.
+        def _norm(s: str) -> str:
+            return "\n".join(
+                re.sub(r"[ \t]+", " ", line).strip()
+                for line in s.replace("\r\n", "\n").split("\n")
+            ).strip()
+
+        if _norm(old_text) and _norm(old_text) in _norm(original):
+            return (
+                " (content matches after normalizing whitespace — old_text has "
+                "different indentation, trailing spaces, or blank-line spacing than "
+                "the file; re-view the file and copy old_text verbatim, not from memory)"
+            )
+
+        # 3. Partial/prefix match: a meaningful chunk of old_text is present,
+        # but not the whole thing — likely the file changed since old_text
+        # was written (e.g. a prior edit already touched this region), or
+        # old_text spans a boundary that shifted.
+        sn = old_text[:40]
+        if sn and sn in original:
+            # Find how much of old_text actually matches contiguously from that point.
+            idx = original.find(sn)
+            window = original[idx: idx + len(old_text) + 40]
+            common_len = len(os.path.commonprefix([old_text, window]))
+            return (
+                f" (partial match: first {common_len} of {len(old_text)} chars of old_text "
+                f"match at that location, then diverge — the file has likely changed since "
+                f"you last read it; re-view the file before editing again)"
+            )
+
+        # 4. No match at all, even partially — old_text likely targets
+        # content that doesn't exist in this file (wrong file, or content
+        # was never written the way old_text assumes).
+        return (
+            " (no match at all, even partially — old_text likely doesn't exist in this "
+            "file; re-view the file to confirm the target text is actually there)"
+        )
+
     def execute(self, path: str, old_text: str, new_text: str, replace_all: bool = False) -> ToolResult:
         try:
             fp = self._safe_path(path)
@@ -2057,10 +2142,7 @@ class EditTool(Tool):
             with open(fp, "r", encoding="utf-8", errors="replace") as f:
                 original = f.read()
             if old_text not in original:
-                hint = ""
-                sn = (old_text or "")[:40]
-                if sn and sn in original:
-                    hint = " (partial match exists — check whitespace)"
+                hint = self._diagnose_no_match(old_text, original)
                 return ToolResult("", error=f"old_text not found in {path}{hint}", is_error=True)
             if replace_all:
                 count = original.count(old_text)
