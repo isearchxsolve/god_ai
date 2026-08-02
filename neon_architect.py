@@ -1782,6 +1782,14 @@ class WriteTool(Tool):
     _SINGLE_IMPORT_LINE_RE = re.compile(
         r"^\s*(from\s+[\w.]+\s+import\s+[\w., *()\n]+|import\s+[\w., ]+)\s*$"
     )
+    # Markdown collapse detector: real Markdown headings each start their
+    # own line. Three or more '#'-heading markers appearing mid-string
+    # (i.e. not just at position 0) with almost no real newlines means the
+    # document's structure has been flattened onto one line — every
+    # section/heading/list-item boundary downstream parsers rely on
+    # (extract_acceptance_criteria, plan_missing_sections, etc.) is gone,
+    # even though the text itself looks superficially complete.
+    _COLLAPSED_MD_HEADING_RE = re.compile(r"(?:^|\s)#{1,6}\s+\S")
 
     @staticmethod
     def _normalize_content(data: str) -> str:
@@ -1859,10 +1867,13 @@ class WriteTool(Tool):
 
     @classmethod
     def _looks_collapsed_source(cls, data: str, path: str) -> bool:
-        """Detect multi-statement source code crammed onto (almost) one
-        line — this is what turns into SyntaxErrors downstream. Only
-        applies to source-code extensions; markdown/config/data files are
-        exempt since single-line content is often legitimate there.
+        """Detect multi-statement source code, OR multi-section Markdown,
+        crammed onto (almost) one line — this is what turns into
+        SyntaxErrors (for code) or silently-unparseable documents (for
+        Markdown, where downstream section/heading extraction depends on
+        real line breaks) further down the pipeline. Config/data files
+        other than the two categories below are exempt, since single-line
+        content is often legitimate there (e.g. minified JSON).
         A lone import/from-import statement is exempt outright — that's
         one real statement, not collapsed code, no matter its length.
         Very short payloads are also exempt: there isn't room for two
@@ -1877,6 +1888,15 @@ class WriteTool(Tool):
         if len(stripped) < 40:
             return False
         ext = Path(path or "").suffix.lower()
+        if ext in {".md", ".markdown"}:
+            # A short single-line note ("# TODO") is fine; a long document
+            # with several heading markers flattened onto one line is not
+            # — it means every section boundary a later parser relies on
+            # has been lost. Require several headings AND real length so
+            # we don't flag e.g. a single long unwrapped paragraph.
+            if len(stripped) > 300 and len(cls._COLLAPSED_MD_HEADING_RE.findall(data)) >= 3:
+                return True
+            return False
         if ext not in {
             ".py", ".pyi", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
             ".go", ".rs", ".java", ".kt", ".cs", ".rb", ".php", ".swift",
@@ -1922,13 +1942,26 @@ class WriteTool(Tool):
                     )
                     data = repaired
             if self._looks_collapsed_source(data, path) and not force:
+                is_md = Path(path or "").suffix.lower() in {".md", ".markdown"}
+                if is_md:
+                    detail = (
+                        "looks like a multi-section Markdown document with several headings "
+                        "flattened onto one line. Re-send content with REAL newline characters "
+                        "between headings, list items, and paragraphs — otherwise downstream "
+                        "section parsers (acceptance-criteria extraction, section checks, etc.) "
+                        "will silently see it as empty or malformed."
+                    )
+                else:
+                    detail = (
+                        "looks like multi-statement code. Re-send content with REAL newline "
+                        "characters between imports/defs/statements."
+                    )
                 return ToolResult(
                     "",
                     error=(
-                        f"REFUSED collapsed source write to {path}: content has almost no "
-                        f"newlines but looks like multi-statement code ({len(data)} chars, "
-                        f"{data.count(chr(10))} newlines). Re-send content with REAL newline "
-                        f"characters between imports/defs/statements. "
+                        f"REFUSED collapsed write to {path}: content has almost no "
+                        f"newlines but {detail} ({len(data)} chars, "
+                        f"{data.count(chr(10))} newlines). "
                         f"(force=true bypasses this guard only if you truly mean one line.)"
                     ),
                     is_error=True,
@@ -2201,6 +2234,22 @@ class SearchTool(Tool):
             base = self._safe_path(path)
             rx = re.compile(pattern, re.IGNORECASE)
             matches: List[str] = []
+            if base.is_file():
+                try:
+                    with open(base, "r", encoding="utf-8", errors="replace") as f:
+                        for i, line in enumerate(f, 1):
+                            if rx.search(line):
+                                rel = base.relative_to(self.cwd)
+                                matches.append(f"{rel}:{i}:{line.rstrip()}")
+                                if len(matches) >= 100:
+                                    break
+                except Exception as e:
+                    return ToolResult("", error=f"could not read file '{path}': {e}", is_error=True)
+                if not matches:
+                    return ToolResult(f"No matches for pattern: {pattern} (searched single file: {path})")
+                return ToolResult("\n".join(matches))
+            if not base.is_dir():
+                return ToolResult("", error=f"path '{path}' does not exist", is_error=True)
             for root, dirs, files in os.walk(base):
                 dirs[:] = [d for d in dirs if d not in self.SKIP_DIRS and not d.startswith(".")]
                 for fn in files:
@@ -2252,6 +2301,16 @@ class GlobTool(Tool):
                     is_error=True,
                 )
             base = self._safe_path(path)
+            if base.is_file():
+                if fnmatch.fnmatch(base.name, pattern):
+                    return ToolResult(str(base.relative_to(self.cwd)))
+                return ToolResult(
+                    f"'{path}' is a file, not a directory, and its name does not match "
+                    f"pattern '{pattern}'. Glob matches filenames within a directory tree; "
+                    f"pass the containing directory instead if you meant to search within it."
+                )
+            if not base.is_dir():
+                return ToolResult("", error=f"path '{path}' does not exist", is_error=True)
             matches = list(base.rglob(pattern))
             if not matches:
                 return ToolResult("No files found")
@@ -2549,6 +2608,56 @@ class RunTool(Tool):
             return True
         return False
 
+    @staticmethod
+    def _missing_test_path_targets(program: str, run_args: List[str], cwd: Path) -> List[str]:
+        """For a pytest-style invocation, return any positional path-like
+        arguments that don't exist relative to cwd. Used to short-circuit
+        with a clear, specific cause (missing file, likely from an earlier
+        failed write) instead of letting the run fail generically on a
+        target that was never created — which otherwise looks identical
+        to a real test failure and burns the same-arguments retry budget
+        without ever telling the model what to actually fix.
+
+        Deliberately conservative: only flags things that look like a
+        real file/dir path argument (contains '/' or ends in a known test
+        file suffix, or is a bare existing-looking relative segment) and
+        skips option flags and their values (anything starting with '-',
+        and pytest's own value-taking options like -k/-m/--maxfail so we
+        never misread an expression like '-k test_foo' as a path).
+        """
+        program = (program or "").lower()
+        if program not in ("pytest",) and not (
+            program == "python" and any("pytest" in str(a).lower() for a in run_args)
+        ):
+            return []
+        skip_next = False
+        # pytest options that consume the following token as a value, not
+        # a path — never treat these values as path targets.
+        value_flags = {"-k", "-m", "--maxfail", "-n", "--timeout", "--cov",
+                        "--junitxml", "--html", "-p"}
+        missing: List[str] = []
+        for a in run_args:
+            a = str(a)
+            if skip_next:
+                skip_next = False
+                continue
+            if a in value_flags:
+                skip_next = True
+                continue
+            if a.startswith("-"):
+                continue
+            # A pytest node id can carry ::TestClass::test_name — only
+            # check the file-path portion before the first '::'.
+            path_part = a.split("::", 1)[0]
+            if not path_part:
+                continue
+            candidate = (cwd / path_part) if not Path(path_part).is_absolute() else Path(path_part)
+            looks_path_like = ("/" in path_part or "\\" in path_part
+                                or path_part.endswith(".py") or path_part in (".", "tests"))
+            if looks_path_like and not candidate.exists():
+                missing.append(path_part)
+        return missing
+
     def execute(self, program: str = "", args: Optional[List[str]] = None,
                 cwd_subpath: Optional[str] = None, timeout: int = 120,
                 _confirmed_destructive: bool = False) -> ToolResult:
@@ -2596,6 +2705,21 @@ class RunTool(Tool):
                 cwd = self._safe_cwd(cwd_subpath)
             except (PermissionError, FileNotFoundError) as e:
                 return ToolResult("", error=str(e), is_error=True)
+
+            if self._is_test_invocation(program, args):
+                missing = self._missing_test_path_targets(program, args, cwd)
+                if missing:
+                    return ToolResult(
+                        "",
+                        error=(
+                            f"Target path(s) do not exist, so no tests can run: "
+                            f"{', '.join(missing)}. This usually means an earlier "
+                            f"write to that path failed or was never sent — check "
+                            f"for a prior write/edit error on this exact path before "
+                            f"retrying the same test command again."
+                        ),
+                        is_error=True,
+                    )
 
             resolved = self._resolve_executable(program, project_root=self.cwd)
             if not resolved:
@@ -2733,13 +2857,27 @@ class TaskTool(Tool):
 
             findings: List[str] = []
             paths_hit: List[str] = []
+            glob_errors: List[str] = []
+            glob_attempts = 0
 
             globber = GlobTool(self.cwd)
+            glob_fail_count = 0
             for pattern in ("**/*.py", "**/*.ts", "**/*.tsx", "**/*.js", "**/package.json", "**/requirements.txt"):
                 res = globber.execute(pattern=pattern, path=".")
-                if not res.is_error and res.output:
+                glob_attempts += 1
+                if res.is_error:
+                    glob_fail_count += 1
+                    if res.error and res.error not in glob_errors:
+                        glob_errors.append(res.error)
+                    continue
+                if res.output:
                     for line in res.output.splitlines()[:40]:
                         line = line.strip()
+                        # GlobTool's own "no results" sentinel isn't a
+                        # path — guard the same way as the search loop
+                        # below, or it gets indexed as a fake source file.
+                        if line == "No files found":
+                            continue
                         if line and line not in paths_hit:
                             paths_hit.append(line)
                 if len(paths_hit) > 80:
@@ -2747,14 +2885,53 @@ class TaskTool(Tool):
 
             searcher = SearchTool(self.cwd)
             match_files: Dict[str, int] = {}
+            search_errors: List[str] = []
+            search_attempts = 0
+            search_fail_count = 0
             for k in keys[:5]:
                 res = searcher.execute(pattern=re.escape(k), path=".")
-                if res.is_error or not res.output:
+                search_attempts += 1
+                if res.is_error:
+                    search_fail_count += 1
+                    if res.error and res.error not in search_errors:
+                        search_errors.append(res.error)
+                    continue
+                if not res.output:
                     continue
                 for line in res.output.splitlines()[:30]:
+                    # SearchTool's own "no matches" / "no matches ... single
+                    # file" messages contain a ':' but are not a real
+                    # "path:line:content" match row — guard against
+                    # misreading them as a matched file.
+                    if line.startswith("No matches for pattern"):
+                        continue
                     path = line.split(":", 1)[0].strip() if ":" in line else ""
                     if path and not path.startswith("["):
                         match_files[path] = match_files.get(path, 0) + 1
+
+            # If every single glob AND search call errored (as opposed to
+            # succeeding with zero results), the "0 candidates / 0 matches"
+            # numbers below are meaningless — they mean "the sub-search
+            # never actually ran", not "this project has no matching
+            # content". Surface that distinctly instead of reporting a
+            # deceptively clean-looking empty success. Compare against the
+            # actual failure COUNT, not the deduped error-message list —
+            # several identical failures collapse to one message but must
+            # still count as every attempt failing.
+            all_globs_failed = glob_attempts > 0 and glob_fail_count >= glob_attempts
+            all_searches_failed = search_attempts > 0 and search_fail_count >= search_attempts
+            if all_globs_failed and all_searches_failed:
+                sample_err = (glob_errors + search_errors)[0]
+                return ToolResult(
+                    "",
+                    error=(
+                        f"task sub-agent could not search this project at all — every "
+                        f"glob and search call failed (e.g. \"{sample_err}\"). This is "
+                        f"NOT \"no matches found\"; the exploration never actually ran. "
+                        f"Check that the project path/cwd is valid before retrying."
+                    ),
+                    is_error=True,
+                )
 
             ranked = sorted(match_files.items(), key=lambda x: -x[1])[:12]
             reader = ReadTool(self.cwd)
@@ -2810,7 +2987,9 @@ class ModulesTool(Tool):
     def execute(self, path: str = "src", max_files: int = 80) -> ToolResult:
         try:
             base = self._safe_path(path if path else ".")
+            fell_back = False
             if not base.exists():
+                fell_back = True
                 base = self.cwd
             py_files = []
             for fp in sorted(base.rglob("*.py")):
@@ -2820,7 +2999,13 @@ class ModulesTool(Tool):
                 if len(py_files) >= max(10, min(int(max_files or 80), 200)):
                     break
             import_re = re.compile(r"^\s*(?:from\s+([\w.]+)\s+import|import\s+([\w.]+))", re.M)
-            lines = [f"Modules under {base.relative_to(self.cwd) if base != self.cwd else '.'} ({len(py_files)} files)", ""]
+            header = f"Modules under {base.relative_to(self.cwd) if base != self.cwd else '.'} ({len(py_files)} files)"
+            if fell_back:
+                header = (
+                    f"NOTE: path '{path}' does not exist — showing project root instead.\n"
+                    + header
+                )
+            lines = [header, ""]
             for fp in py_files:
                 rel = str(fp.relative_to(self.cwd)).replace("\\", "/")
                 try:
@@ -3517,6 +3702,22 @@ def save_project_state(project_dir: Path, state: Dict[str, Any], filename: str =
         pass
 
 
+# A section-name phrase only counts as a real section marker if it
+# appears at the start of a line (after an optional heading marker,
+# numbering, bullet, and/or markdown bold-open, in any combination),
+# not buried mid-sentence. Without this, prose like "this project has
+# no risks section; acceptance criteria: not written yet" satisfies
+# both checks by substring match alone, even though it explicitly says
+# neither section exists.
+def _section_phrase_present(text_low: str, phrase: str) -> bool:
+    pattern = re.compile(
+        r"(?:^|\n)\s*(?:#{1,6}\s*)?(?:\d+[.)]\s*)?(?:[-*]\s*)?(?:\*\*\s*)?"
+        + re.escape(phrase),
+        re.IGNORECASE,
+    )
+    return bool(pattern.search(text_low))
+
+
 def plan_has_sections(text: str, headers: tuple) -> bool:
     low = (text or "").lower()
     synonyms = {
@@ -3544,7 +3745,7 @@ def plan_has_sections(text: str, headers: tuple) -> bool:
     for h in headers:
         key = h.lower().strip()
         opts = synonyms.get(key, (key,))
-        if not any(o in low for o in opts):
+        if not any(_section_phrase_present(low, o) for o in opts):
             return False
     return True
 
@@ -3580,7 +3781,7 @@ def plan_missing_sections(text: str, headers: tuple) -> List[str]:
     for h in headers:
         key = h.lower().strip()
         opts = synonyms.get(key, (key,))
-        if not any(o in low for o in opts):
+        if not any(_section_phrase_present(low, o) for o in opts):
             missing.append(h)
     return missing
 
@@ -3609,6 +3810,17 @@ def extract_acceptance_criteria(text: str) -> List[str]:
     against, so it needs to exist independently of whatever the model
     later claims about "criteria met".
 
+    Tolerates two ways a model commonly writes list items under the
+    section: real bullets/numbered items (`- x`, `1. x`), and — since
+    some models structure a flat plan doc with sub-headings acting as
+    pseudo-bullets instead — a heading that is STRICTLY DEEPER than the
+    Acceptance Criteria heading itself (e.g. `###` items under a `##`
+    section, or `####` under `###`). A heading at the SAME level or
+    shallower still correctly ends the section; only a deeper one is
+    read as "this is a sub-point of the section", matching how such
+    documents are actually structured even when newlines/list markers
+    are inconsistent.
+
     Returns an empty list if no matching heading is found, or the
     heading exists but has no list items beneath it before the next
     heading (both are legitimate "nothing to extract" states — callers
@@ -3617,17 +3829,29 @@ def extract_acceptance_criteria(text: str) -> List[str]:
     """
     lines = (text or "").splitlines()
     in_section = False
+    section_depth = 0
     items: List[str] = []
     for line in lines:
         m_head = _MD_HEADING_RE.match(line)
         if m_head:
+            depth_m = re.match(r"^\s{0,3}(#{1,6})", line)
+            depth = len(depth_m.group(1))
             title = m_head.group(1).strip().lower()
             if any(syn in title for syn in _ACCEPTANCE_HEADING_SYNONYMS):
                 in_section = True
+                section_depth = depth
                 continue
             if in_section:
-                # Hit the next heading — the Acceptance Criteria section
-                # has ended.
+                if depth > section_depth:
+                    # Deeper heading = pseudo-bullet under this section,
+                    # not the next section starting. Treat its title text
+                    # as the item, same as a real list item would be.
+                    item = m_head.group(1).strip()
+                    if item:
+                        items.append(item)
+                    continue
+                # Same or shallower heading — the Acceptance Criteria
+                # section has genuinely ended.
                 break
             continue
         if in_section:
@@ -3758,17 +3982,33 @@ def match_criteria_to_verification(
     containment in either direction, since a criterion may be trimmed or
     lightly reworded when copied into VERIFICATION.md by the model, and
     exact-string matching would produce false "missing" results for
-    what's actually the same criterion."""
+    what's actually the same criterion.
+
+    The contained (shorter) side of a containment match must itself carry
+    enough real content — at least 4 words or 20 characters — to count.
+    Without this floor, a deliberately vague VERIFICATION.md row like
+    "- [x] must — test: ..." or "- [x] test — test: ..." is a substring
+    of nearly every real criterion and would spuriously mark all of them
+    "covered" by one row, defeating the whole point of the linkage check.
+    Genuine trimmed/paraphrased criteria (the case this containment logic
+    exists for) are unaffected — they're long enough to clear the floor."""
+    MIN_WORDS, MIN_CHARS = 4, 20
     normalized_rows = [
         (_normalize_criterion_text(r["criterion"]), r["test_ref"]) for r in verification_rows
     ]
     covered, missing = [], []
     for c in criteria:
         key = _normalize_criterion_text(c)
-        found = any(
-            key and (key in row_key or row_key in key)
-            for row_key, _ in normalized_rows
-        )
+        found = False
+        for row_key, _ in normalized_rows:
+            if not key or not row_key:
+                continue
+            shorter, longer = (key, row_key) if len(key) <= len(row_key) else (row_key, key)
+            if shorter not in longer:
+                continue
+            if len(shorter.split()) >= MIN_WORDS or len(shorter) >= MIN_CHARS:
+                found = True
+                break
         (covered if found else missing).append(c)
     return covered, missing
 
