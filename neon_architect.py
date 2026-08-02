@@ -1300,6 +1300,18 @@ class Provider:
         self.model_cfg = model_cfg
         self.model_id = model_cfg["id"]
         self.bucket = bucket if bucket is not None else TokenBucket(model_cfg.get("rpm", 20), safety=0.80)
+        # Identity of the account/endpoint this provider talks to. Used
+        # solely to find "sibling" providers that share the same real
+        # quota (same base_url + api_key) when one of them gets a LIVE
+        # 429 from the server — see ProviderPool.propagate_shared_cooldown.
+        # Providers already share a TokenBucket instance when they share
+        # this key (see build_pool's get_or_create_bucket), which correctly
+        # prevents new *local* over-request; this additional identity is
+        # for the separate case of a 429 that has already happened on the
+        # wire, where every sibling provider should skip straight to its
+        # own cooldown instead of each one having to independently
+        # round-trip to the server and get its own 429 first.
+        self._account_key = (base_url, api_key)
 
         if HAS_OPENAI and HAS_HTTPX:
             # Relaxed pool limits to prevent connection drops on heavy retry/sprawl
@@ -1363,6 +1375,31 @@ class ProviderPool:
     def should_rotate(self, max_per_provider: int = 3) -> bool:
         self.attempts_on_current += 1
         return self.attempts_on_current >= max_per_provider
+
+    def propagate_shared_cooldown(self, source: "Provider", cooldown: float) -> List[str]:
+        """After `source` gets a LIVE 429 from the server, apply the same
+        cooldown to every other provider sharing its (base_url, api_key)
+        — i.e. the same real account quota. The shared TokenBucket already
+        stops new *local* over-request between siblings, but a 429 that
+        already happened on the wire means the account is confirmed over
+        quota right now; without this, next_available() will still hand
+        out sibling providers (they pass their own, still-fresh
+        cooldown_until and their own try_acquire on the shared bucket
+        might still succeed depending on timing) and each one burns a
+        real network round-trip just to get its own 429 and its own
+        cooldown, which is exactly the back-to-back
+        NIM-Primary / NIM-minimax-m3 / NIM-laguna-xs-2.1 429 sequence
+        this exists to shorten. Returns the names of siblings that were
+        cooled down, for logging.
+        """
+        cooled: List[str] = []
+        for p in self.providers:
+            if p is source or getattr(p, "permanently_disabled", False):
+                continue
+            if getattr(p, "_account_key", None) == getattr(source, "_account_key", None):
+                p.cooldown_until = max(p.cooldown_until, time.monotonic() + cooldown)
+                cooled.append(p.name)
+        return cooled
 
     def shortest_wait(self) -> float:
         active = [p for p in self.providers if not getattr(p, "permanently_disabled", False)]
@@ -1949,12 +1986,19 @@ class WriteTool(Tool):
                         "flattened onto one line. Re-send content with REAL newline characters "
                         "between headings, list items, and paragraphs — otherwise downstream "
                         "section parsers (acceptance-criteria extraction, section checks, etc.) "
-                        "will silently see it as empty or malformed."
+                        "will silently see it as empty or malformed. "
+                        "If you keep producing this same flattened text, STOP resending the "
+                        "full document at once — instead write() just the first section (e.g. "
+                        "'# Title\\n\\n## Requirements\\n...' with real \\n between lines) and "
+                        "then write(..., append=true) each remaining section one at a time; "
+                        "smaller chunks are far less likely to collapse than one giant string."
                     )
                 else:
                     detail = (
                         "looks like multi-statement code. Re-send content with REAL newline "
-                        "characters between imports/defs/statements."
+                        "characters between imports/defs/statements. If this keeps recurring, "
+                        "write the file in smaller chunks via write(...) then "
+                        "write(..., append=true) instead of one large payload."
                     )
                 return ToolResult(
                     "",
@@ -2635,6 +2679,18 @@ class RunTool(Tool):
         # a path — never treat these values as path targets.
         value_flags = {"-k", "-m", "--maxfail", "-n", "--timeout", "--cov",
                         "--junitxml", "--html", "-p"}
+        # Flags whose PATH VALUE is embedded via '=' rather than passed as
+        # a separate argv element. These were previously falling through
+        # the blanket `if a.startswith("-"): continue` below and never
+        # getting existence-checked at all — a truncated or misspelled
+        # --ignore=backend/tests/test_nim_endp (missing the real suffix)
+        # would silently match nothing, so pytest still collected the
+        # file the model believed it had excluded, producing a failure
+        # that looks like a real test failure but is actually a
+        # never-validated exclusion path. Checking these here surfaces
+        # that cause immediately instead of burning a retry cycle on a
+        # misleading generic failure.
+        embedded_path_flags = ("--ignore=", "--ignore-glob=", "--rootdir=", "--confcutdir=")
         missing: List[str] = []
         for a in run_args:
             a = str(a)
@@ -2643,6 +2699,15 @@ class RunTool(Tool):
                 continue
             if a in value_flags:
                 skip_next = True
+                continue
+            embedded = next((pfx for pfx in embedded_path_flags if a.startswith(pfx)), None)
+            if embedded:
+                path_part = a[len(embedded):]
+                if not path_part:
+                    continue
+                candidate = (cwd / path_part) if not Path(path_part).is_absolute() else Path(path_part)
+                if not candidate.exists():
+                    missing.append(a)
                 continue
             if a.startswith("-"):
                 continue
@@ -2709,17 +2774,29 @@ class RunTool(Tool):
             if self._is_test_invocation(program, args):
                 missing = self._missing_test_path_targets(program, args, cwd)
                 if missing:
-                    return ToolResult(
-                        "",
-                        error=(
+                    embedded_prefixes = ("--ignore=", "--ignore-glob=", "--rootdir=", "--confcutdir=")
+                    flag_misses = [m for m in missing if m.startswith(embedded_prefixes)]
+                    target_misses = [m for m in missing if m not in flag_misses]
+                    parts = []
+                    if target_misses:
+                        parts.append(
                             f"Target path(s) do not exist, so no tests can run: "
-                            f"{', '.join(missing)}. This usually means an earlier "
+                            f"{', '.join(target_misses)}. This usually means an earlier "
                             f"write to that path failed or was never sent — check "
                             f"for a prior write/edit error on this exact path before "
                             f"retrying the same test command again."
-                        ),
-                        is_error=True,
-                    )
+                        )
+                    if flag_misses:
+                        parts.append(
+                            f"The following flag(s) point at a path that does not exist, "
+                            f"so they will silently exclude NOTHING (pytest treats a "
+                            f"non-matching --ignore path as a no-op, not an error) — the "
+                            f"test(s) you meant to exclude will still be collected and can "
+                            f"fail: {', '.join(flag_misses)}. Re-view the actual file/dir "
+                            f"name (it is very likely truncated or misspelled) and re-send "
+                            f"the full, exact path."
+                        )
+                    return ToolResult("", error=" ".join(parts), is_error=True)
 
             resolved = self._resolve_executable(program, project_root=self.cwd)
             if not resolved:
@@ -5409,6 +5486,13 @@ class NeonArchitect:
                     )
                     provider.record_failure(cooldown=cooldown)
                     provider.bucket.penalize(cooldown)
+                    sibling_names = self.pool.propagate_shared_cooldown(provider, cooldown)
+                    if sibling_names:
+                        UI.warn(
+                            f"Same account key as {provider.name} — also cooling down "
+                            f"{', '.join(sibling_names)} for {cooldown:.0f}s "
+                            f"(avoids each one round-tripping to its own 429)."
+                        )
                     backoff = max(
                         cooldown,
                         float(self.config.get("post_429_backoff", 25.0) or 25.0),
@@ -5892,6 +5976,30 @@ class NeonArchitect:
                 bits.append(
                     f"chars written this phase: {self._phase_chars_written}/{min_chars} required"
                     + ("" if self._phase_chars_written >= min_chars else " — write MORE actual content, not just successful calls")
+                )
+        elif kind == "implementation_complete":
+            total = sum(self._phase_tool_success_counts.get(x, 0) for x in reqs.get("any_tool", ["write", "edit"]))
+            src_n = self._phase_tool_counts.get("src_write", 0)
+            min_calls = int(reqs.get("min_calls", 8))
+            min_src = int(reqs.get("min_src_writes", self.config.get("min_implementation_src_writes", 4)))
+            bits.append(f"write/edit calls: {total}/{min_calls} required")
+            bits.append(f"source writes (src/app/backend/frontend/lib/tests prefix): {src_n}/{min_src} required")
+            if src_n >= 1 and not self._phase_bash_ok:
+                bits.append(
+                    "If the code is already correct, run the real test command now — "
+                    "a passing digest (0 failed, 0 errors) can satisfy this gate without "
+                    "hitting the raw call quota. Do NOT re-write files that are already correct."
+                )
+            elif src_n >= 1 and self._phase_bash_ok:
+                bits.append(
+                    "Tests already ran — if the last run showed 0 failed/0 errors, the gate "
+                    "should already be satisfied via the already-complete shortcut; re-run the "
+                    "test command once more to confirm rather than re-writing unchanged files."
+                )
+            else:
+                bits.append(
+                    "No source write recorded yet this phase — write a REAL source file under "
+                    "src/ OR app/ OR backend/ OR frontend/ OR lib/ OR tests/ before anything else."
                 )
         else:
             bits.append(f"counts={dict(self._phase_tool_counts)}")
@@ -6564,7 +6672,40 @@ class NeonArchitect:
             met = total >= int(reqs.get("min_calls", 8)) and src_n >= min_src
             if met:
                 UI.info(f"Gate met: write/edit={total}, src_writes={src_n} → {phase.upper()}")
-            return met
+                return True
+            # Escape hatch for "nothing meaningful left to change": if this
+            # phase has already produced at least one real source write/edit
+            # (src_n >= 1, so this isn't a no-op restart of an untouched
+            # phase) AND a real test command has already exited 0 with a
+            # parsed digest showing passed>0/failed==0/errors==0 during this
+            # phase, the raw call-count quota is waived. Without this, a
+            # goal that's already fully implemented (e.g. restored from a
+            # prior session) has no legitimate work left to satisfy
+            # min_calls/min_src_writes, so the model is forced into
+            # cosmetic re-writes of already-correct files, which the
+            # anti-spam blocker then blocks, producing the exact
+            # BLOCKED SPAM / BLOCKED REPEAT deadlock the round
+            # circuit-breaker has to bail out of. Requiring src_n >= 1
+            # keeps this from ever firing on a phase where the model has
+            # done zero implementation work at all — it isn't a way to
+            # skip the phase, only a way to stop demanding busy-work once
+            # genuine work already happened and tests already prove it.
+            if src_n >= 1 and self._phase_bash_ok:
+                digest_stats = parse_test_digest(self._last_test_digest)
+                min_passed = int(self.config.get("min_tests_passed", 1) or 1)
+                if (
+                    digest_stats["parsed"]
+                    and digest_stats["failed"] == 0
+                    and digest_stats["errors"] == 0
+                    and digest_stats["passed"] >= min_passed
+                ):
+                    UI.info(
+                        f"Gate met (already-complete shortcut): src_writes={src_n} "
+                        f"+ tests passing ({digest_stats['passed']} passed, 0 failed) "
+                        f"→ {phase.upper()}"
+                    )
+                    return True
+            return False
         if kind == "todo_count":
             added = self._phase_tool_counts.get("todo_add", 0)
             met = added >= reqs.get("min_todos", 3)
