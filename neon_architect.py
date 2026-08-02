@@ -3,7 +3,7 @@
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  NEON ARCHITECT v4.6  —  Monolithic Coding Agent for NVIDIA NIM              ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
-║  Backend:   NVIDIA NIM  →  GLM-5.2 (primary) | Nemotron 3 / Llama (fallback) ║
+║  Backend:   NVIDIA NIM  →  GLM-5.2 (primary) | MiniMax M3 / Laguna XS (fallback)║
 ║  Design:    Warm terminal UI · Zero Bottlenecks · Self-Healing Streams       ║
 ║  Features:  Auto-Nudge · XML Interceptor · Smart Compaction · Token Bucket   ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
@@ -27,6 +27,7 @@ Commands (inside agent):
 from __future__ import annotations
 
 import argparse
+import ast
 import copy
 import difflib
 import fnmatch
@@ -177,11 +178,13 @@ def load_project_api_key(project_dir: Path) -> str:
 
 
 def load_dead_models(project_dir: Path) -> List[str]:
-    """Model ids that 404'd (not enabled on this account's key) in a past
-    session. Persisted so every fresh launch/pool-rebuild doesn't have to
-    re-discover the same unavailable models via live 404s before falling
-    through to a working provider — this was previously pure wasted
-    wall-clock + retry budget on every single turn/session.
+    """Model ids that returned a permanent-miss status (404 Not Found or
+    410 Gone — not enabled on this account's key, or retired/renamed on
+    the provider's end) in a past session. Persisted so every fresh
+    launch/pool-rebuild doesn't have to re-discover the same unavailable
+    models via live errors before falling through to a working provider —
+    this was previously pure wasted wall-clock + retry budget on every
+    single turn/session.
     """
     data = _safe_json_load(_project_key_path(project_dir))
     if data and isinstance(data.get("dead_models"), list):
@@ -190,7 +193,7 @@ def load_dead_models(project_dir: Path) -> List[str]:
 
 
 def mark_model_dead(project_dir: Path, model_id: str) -> None:
-    """Record a 404'd model id so future sessions skip it at pool-build time."""
+    """Record a permanently-missing (404/410) model id so future sessions skip it at pool-build time."""
     try:
         path = _project_key_path(project_dir)
         data = _safe_json_load(path) or {}
@@ -276,41 +279,55 @@ MODELS: Dict[str, Dict[str, Any]] = {
         "temperature": None,
         "top_p": None,
     },
-    "nemotron-ultra": {
-        "id": "nvidia/nemotron-3-ultra-550b-a55b",
-        "name": "Nemotron 3 Ultra",
+    "minimax-m3": {
+        "id": "minimaxai/minimax-m3",
+        "name": "MiniMax M3",
         "provider": "NVIDIA NIM",
-        "rpm": 20,
-        "max_tokens": 16000,
-        "ctx_window": 131072,
-        "thinking": False,
-        "extra_body": {"chat_template_kwargs": {"enable_thinking": False, "force_nonempty_content": True}},
-        "temperature": 1.0,
-        "top_p": 0.95,
-    },
-    "llama-3.1-405b": {
-        "id": "nvidia/llama-3.1-405b-instruct",
-        "name": "Llama 3.1 405B",
-        "provider": "NVIDIA NIM",
-        "rpm": 20,
-        "max_tokens": 32768,
-        "ctx_window": 131072,
+        "rpm": 40,
+        # MoE, 1M context, native tool-calling/agent support per NVIDIA's
+        # own deployment docs — used here as a fast, large-context fallback
+        # behind GLM-5.2/GLM-5.2-FP8.
+        "max_tokens": 16384,
+        "ctx_window": 1000000,
         "thinking": False,
         "extra_body": None,
-        "temperature": None,
-        "top_p": None,
-    },
-    "nemotron-3-super-120b-a12b": {
-        "id": "nvidia/nemotron-3-super-120b-a12b",
-        "name": "Nemotron 3 Super 120B",
-        "provider": "NVIDIA NIM",
-        "rpm": 20,
-        "max_tokens": 32768,
-        "ctx_window": 131072,
-        "thinking": False,
-        "extra_body": {"chat_template_kwargs": {"enable_thinking": False, "force_nonempty_content": True}},
         "temperature": 1.0,
         "top_p": 0.95,
+    },
+    "laguna-xs-2.1": {
+        "id": "poolside/laguna-xs-2.1",
+        "name": "Laguna XS 2.1",
+        "provider": "NVIDIA NIM",
+        "rpm": 40,
+        # Poolside's 33B-total/3B-active MoE, purpose-built for agentic
+        # coding/tool-use/long-horizon work, 262K context, native
+        # interleaved reasoning + tool calls.
+        "max_tokens": 16384,
+        "ctx_window": 262144,
+        "thinking": True,
+        "extra_body": None,
+        "temperature": 0.3,
+        "top_p": 0.95,
+    },
+    "kimi-k2-thinking": {
+        "id": "moonshotai/kimi-k2-thinking",
+        "name": "Kimi K2 Thinking",
+        "provider": "NVIDIA NIM",
+        "rpm": 40,
+        # Moonshot's 1T-total/32B-active MoE, confirmed on NVIDIA NIM's
+        # catalog (LLM APIs section, docs.api.nvidia.com/nim/reference/
+        # moonshotai-kimi-k2-thinking). Native INT4, 256K context, and
+        # its own tool-call parsing pipeline explicitly documented to
+        # stay coherent across 200-300 consecutive tool calls without
+        # drift — the single most agentic-tool-use-focused model in this
+        # fallback chain. NVIDIA's model card recommends temperature=1.0.
+        # Always runs in thinking mode (no non-thinking variant).
+        "max_tokens": 16384,
+        "ctx_window": 262144,
+        "thinking": True,
+        "extra_body": None,
+        "temperature": 1.0,
+        "top_p": None,
     },
 }
 
@@ -356,6 +373,7 @@ DEFAULT_CONFIG = {
     "max_autopilot_rounds": 0,
     "max_phase_rounds": 40,
     "testing_max_phase_rounds": 25,
+    "verification_max_phase_rounds": 25,
     "min_tests_passed": 1,
     "min_coverage_pct": 0,
     "max_same_tool_successes": 3,
@@ -370,12 +388,13 @@ DEFAULT_CONFIG = {
     # SDLC by default (default_model); this lets specific phases opt into a
     # stronger/different model without paying for it everywhere. Empty/absent
     # phase -> falls back to default_model. Keys must be SDLC_PHASES entries,
-    # values must be MODELS keys. testing/verification default to the 120B
-    # Nemotron since that's where GLM-5.2 was observed getting stuck
-    # producing collapsed-source writes it couldn't self-correct.
+    # values must be MODELS keys. testing/verification default to MiniMax M3
+    # (previously the 120B Nemotron, now removed) since that's where GLM-5.2
+    # was observed getting stuck producing collapsed-source writes it
+    # couldn't self-correct.
     "phase_models": {
-        "testing": "nemotron-3-super-120b-a12b",
-        "verification": "nemotron-3-super-120b-a12b",
+        "testing": "minimax-m3",
+        "verification": "minimax-m3",
     },
     "require_research_for_external": True,
     "full_access": True,
@@ -1380,17 +1399,26 @@ def build_pool(config: Dict[str, Any], model_key_override: Optional[str] = None)
     # Base fallback order, used when no phase override is active: ordered by
     # expected tool-call reliability, not raw size. glm-5.2-fp8 shares
     # GLM-5.2's post-training/tool-calling recipe, so it drifts least from
-    # primary. The nemotron/llama entries run at temperature=1.0 (nemotron,
-    # per NVIDIA's own recommended settings) or are dated checkpoints with no
-    # tool-calling-specific tuning, and land last since they're more likely
-    # to produce the garbled multi-field JSON that trips
-    # [SUSPICIOUS ARGS]/[BLOCKED REPEAT].
+    # primary. minimax-m3 is MoE with native tool-calling and a 1M context
+    # window — strong long-context fallback. kimi-k2-thinking (Moonshot) is
+    # placed ahead of laguna-xs-2.1: its NVIDIA model card explicitly
+    # documents stable tool-use across 200-300 consecutive calls and ships
+    # its own tool-call parsing pipeline (see the malformed-tool-call
+    # streak detector above, which now rotates off a stuck provider after
+    # 3 consecutive malformed turns — kimi-k2-thinking is a better landing
+    # spot than laguna-xs-2.1 when that fires). Still NOT promoted above
+    # glm-5.2-fp8/minimax-m3 because it always runs in forced thinking
+    # mode, the same category of model that produced the original stall.
+    # laguna-xs-2.1 (Poolside) stays last: newest/least battle-tested
+    # entry here, and the one whose output triggered the malformed
+    # tool-call loop this fallback chain was patched to survive.
+    # Nemotron and Llama 3.1 405B removed from the catalog entirely.
     # qwen3-coder removed: NVIDIA pulled it from the NIM catalog.
     base_fallbacks = [
         "glm-5.2-fp8",
-        "nemotron-3-super-120b-a12b",
-        "nemotron-ultra",
-        "llama-3.1-405b",
+        "minimax-m3",
+        "kimi-k2-thinking",
+        "laguna-xs-2.1",
     ]
     if model_key_override is not None and model_key_override != config.get("default_model", "glm-5.2"):
         # A phase override (e.g. testing/verification -> a stronger model)
@@ -1769,6 +1797,62 @@ class WriteTool(Tool):
         return data
 
     @classmethod
+    def _try_repair_collapsed_imports(cls, data: str, path: str) -> Optional[str]:
+        """Narrow, provably-safe auto-repair for ONE specific collapsed-source
+        pattern: a run of import statements concatenated with spaces instead
+        of newlines (e.g. "import pytest from backend.auth_mock import
+        signup, login" — exactly the shape that triggered repeated refuse/
+        retry loops in practice, since a model that drops newlines tends to
+        do it on its import block specifically).
+
+        Deliberately does NOT attempt to repair collapsed def/class bodies,
+        control flow, or anything with executable statement logic — the
+        model's intended statement boundaries there are genuinely ambiguous
+        from a single-line string (e.g. is "assert" starting a new statement
+        or is it inside an expression?), and guessing wrong would silently
+        write broken-but-plausible-looking code. Only python files are
+        attempted since the statement grammar this matches against is
+        python-specific.
+
+        Returns repaired text (guaranteed to (a) reconstruct the original
+        content exactly when whitespace is collapsed to single spaces, and
+        (b) successfully ast.parse) or None if it can't confidently repair,
+        in which case the caller falls through to the normal refusal.
+        """
+        ext = Path(path or "").suffix.lower()
+        if ext not in (".py", ".pyi"):
+            return None
+        stripped = data.strip()
+        # Bail immediately if anything beyond imports is present — this is
+        # the safety boundary. Only pure import-statement text is eligible.
+        if re.search(
+            r"\b(def|class|return|assert|if|elif|else|for|while|try|except|"
+            r"finally|with|raise|lambda|yield|async|await)\b",
+            stripped,
+        ):
+            return None
+        stmt_re = re.compile(
+            r"from\s+[\w.]+\s+import\s+[\w, ()*]+?(?=\s+(?:from\s|import\s)|$)"
+            r"|import\s+[\w.]+(?:\s*,\s*[\w.]+)*(?=\s+(?:from\s|import\s)|$)"
+        )
+        matches = list(stmt_re.finditer(stripped))
+        stmts = [m.group(0).strip() for m in matches]
+        if len(stmts) < 2:
+            return None  # nothing to repair, or not actually collapsed imports
+        # Every matched statement, rejoined with single spaces, must
+        # reconstruct the original exactly. If anything in the middle
+        # wasn't captured by the pattern (stray token, malformed syntax),
+        # this fails and we refuse to guess.
+        if " ".join(stmts) != stripped:
+            return None
+        candidate = "\n".join(stmts)
+        try:
+            ast.parse(candidate)
+        except SyntaxError:
+            return None
+        return candidate
+
+    @classmethod
     def _looks_collapsed_source(cls, data: str, path: str) -> bool:
         """Detect multi-statement source code crammed onto (almost) one
         line — this is what turns into SyntaxErrors downstream. Only
@@ -1813,6 +1897,25 @@ class WriteTool(Tool):
             fp.parent.mkdir(parents=True, exist_ok=True)
             data = content if isinstance(content, str) else str(content)
             data = self._normalize_content(data)
+            # Try the narrow, provably-safe import-block repair FIRST and
+            # unconditionally (not gated behind _looks_collapsed_source):
+            # a pure run of collapsed import statements with single spaces
+            # (no colons/semicolons, no double-spaces) never trips that
+            # guard's pattern in the first place, so gating the repair
+            # behind it would make the repair dead code for its own most
+            # common case. _try_repair_collapsed_imports only ever returns
+            # non-None when it can prove the repaired text (a) preserves
+            # every character of the original statement content and
+            # (b) successfully ast.parse()s, so applying it here can only
+            # help and never silently corrupts anything.
+            if not force:
+                repaired = self._try_repair_collapsed_imports(data, path)
+                if repaired is not None and repaired != data:
+                    UI.info(
+                        f"Auto-repaired collapsed import statements in {path} "
+                        f"(inserted newlines, verified with ast.parse)."
+                    )
+                    data = repaired
             if self._looks_collapsed_source(data, path) and not force:
                 return ToolResult(
                     "",
@@ -2087,6 +2190,9 @@ class LsTool(Tool):
         "required": [],
     }
 
+    _cache: Dict[str, str] = {}
+    _cache_lock = threading.Lock()
+
     def execute(self, path: str = ".") -> ToolResult:
         try:
             base = self._safe_path(path)
@@ -2096,7 +2202,19 @@ class LsTool(Tool):
             for p in sorted(base.iterdir()):
                 icon = "📁" if p.is_dir() else "📄"
                 items.append(f"{icon} {p.name}")
-            return ToolResult("\n".join(items))
+            listing = "\n".join(items)
+
+            key = str(base)
+            with self._cache_lock:
+                was_same = self._cache.get(key) == listing
+                self._cache[key] = listing
+
+            if was_same:
+                listing = (
+                    f"[unchanged since your last listing of {path} this session]\n"
+                    + listing
+                )
+            return ToolResult(listing)
         except Exception as e:
             return ToolResult("", error=str(e), is_error=True)
 
@@ -2477,7 +2595,16 @@ class RunTool(Tool):
                     f"program: {program} {' '.join(args)}\nexit: {result.returncode}\n"
                     + "\n".join(digest_lines)
                 )
-            return ToolResult(output, is_error=result.returncode != 0, test_digest=digest)
+            failed = result.returncode != 0
+            err_summary = ""
+            if failed:
+                # Give the same failure-tail visibility to .error that the
+                # model already sees in .output, so the [BLOCKED REPEAT]/
+                # [BLOCKED SPAM] guidance messages (which quote .error, not
+                # .output) don't show an empty string for a real failure.
+                tail_lines = [ln for ln in output.splitlines() if ln.strip()]
+                err_summary = "\n".join(tail_lines[-15:])
+            return ToolResult(output, error=err_summary, is_error=failed, test_digest=digest)
         except subprocess.TimeoutExpired:
             return ToolResult("", error=f"'{program}' timed out after {timeout}s", is_error=True)
         except Exception as e:
@@ -3446,6 +3573,18 @@ _VERIFICATION_ROW_RE = re.compile(
     r"^\s*(?:[-*+]|\d+[.)])\s*(?:\[[ xX]\]\s*)?(.+?)\s*[—\-]+\s*test:\s*(\S.*?)\s*$"
 )
 
+# Markdown table row: | Criterion text | Status | test/path::name |
+# (or any number of columns >= 2 — last non-empty cell is treated as the
+# test reference, first non-empty cell as the criterion text). Header/
+# separator rows ("| --- | --- |", "| Criterion | Status | Test |") are
+# filtered out separately in parse_verification_rows since this regex
+# alone can't distinguish a header row from a real data row.
+_VERIFICATION_TABLE_ROW_RE = re.compile(r"^\s*\|(.+)\|\s*$")
+_VERIFICATION_TABLE_SEPARATOR_RE = re.compile(r"^[\s|:\-]+$")
+_VERIFICATION_TABLE_HEADER_WORDS = {
+    "criterion", "criteria", "status", "test", "tests", "notes", "ac",
+}
+
 
 def _normalize_criterion_text(text: str) -> str:
     """Loose-match key for comparing a stored criterion against a
@@ -3460,25 +3599,61 @@ def _normalize_criterion_text(text: str) -> str:
     return t
 
 
-def parse_verification_rows(text: str) -> List[Dict[str, str]]:
+def parse_verification_rows(
+    text: str, include_placeholders: bool = False
+) -> List[Dict[str, str]]:
     """Extract (criterion_text, test_ref) pairs from VERIFICATION.md.
     Returns a list of {"criterion": str, "test_ref": str} dicts, one per
-    recognized row. Rows that don't match the required format (missing
-    the "test:" reference), OR whose test_ref is still the unfilled
-    auto-repair placeholder, are not returned — they don't count toward
-    covering any criterion. Excluding the placeholder specifically
-    matters because it IS non-empty text and would otherwise satisfy a
-    naive "test_ref is non-empty" check — auto-repair scaffolding a row
-    must not be mistaken for the model actually linking a real test,
-    which is the same silent-pass shape this whole change exists to
-    close."""
+    recognized row. By default, rows that don't match a required format
+    (missing the "test:" reference, or an unfilled placeholder like
+    TODO_TEST_REF) are not returned — they don't count toward covering
+    any criterion for gate-checking purposes.
+
+    Set include_placeholders=True to also return rows whose test_ref is
+    an unfilled placeholder. This exists so callers that need to know
+    "does a row for this criterion already exist AT ALL on disk"
+    (e.g. the auto-repair scaffolder deciding whether to append a new
+    placeholder row) can tell a criterion with an existing-but-unfilled
+    row apart from one with no row at all — the normal covered/missing
+    check for the gate must keep ignoring placeholders, but the
+    scaffolder must not treat "still a placeholder" as "still absent",
+    or it will keep re-appending duplicate placeholder rows forever.
+
+    Two formats are recognized: the bullet-list form
+    ("- [x] <criterion> — test: <ref>") and a markdown table form
+    ("| <criterion> | <status> | <ref> |"), since both are reasonable
+    choices for this content and a model isn't told which one to use.
+    Table header/separator rows are skipped by checking whether the
+    first cell looks like one of the conventional header words (a real
+    criterion's first cell will essentially never be exactly "Criterion"
+    or "AC")."""
     rows = []
     for line in (text or "").splitlines():
         m = _VERIFICATION_ROW_RE.match(line)
         if m:
             criterion_text = m.group(1).strip()
             test_ref = m.group(2).strip()
-            if criterion_text and test_ref and not _looks_like_placeholder_ref(test_ref):
+            if criterion_text and test_ref and (
+                include_placeholders or not _looks_like_placeholder_ref(test_ref)
+            ):
+                rows.append({"criterion": criterion_text, "test_ref": test_ref})
+            continue
+        m_table = _VERIFICATION_TABLE_ROW_RE.match(line)
+        if m_table:
+            if _VERIFICATION_TABLE_SEPARATOR_RE.match(m_table.group(1)):
+                continue  # "| --- | --- | --- |" separator row
+            cells = [c.strip().strip("`") for c in m_table.group(1).split("|")]
+            cells = [c for c in cells if c]
+            if len(cells) < 2:
+                continue
+            first_key = cells[0].lower().strip("* []xX").strip()
+            if first_key in _VERIFICATION_TABLE_HEADER_WORDS:
+                continue  # header row, not data
+            criterion_text = cells[0]
+            test_ref = cells[-1]
+            if criterion_text and test_ref and (
+                include_placeholders or not _looks_like_placeholder_ref(test_ref)
+            ):
                 rows.append({"criterion": criterion_text, "test_ref": test_ref})
     return rows
 
@@ -3646,6 +3821,7 @@ class NeonArchitect:
         self.meter = TokenMeter()
         self.round = 0
         self.nudges = 0
+        self._malformed_tool_streak = 0
         self.running = True
 
         self.goal = None
@@ -3661,8 +3837,12 @@ class NeonArchitect:
         self._max_phase_rounds = int(config.get("max_phase_rounds", 0) or 0)
         self._phase_tool_counts: Dict[str, int] = {}
         self._phase_tool_success_counts: Dict[str, int] = {}
-        self._phase_chars_written: int = 0
+        # Per-path best (max) content length written this phase, keyed by
+        # canonicalized project-relative path. _phase_chars_written is
+        # derived from this via a property below — see there for why.
+        self._phase_chars_by_path: Dict[str, int] = {}
         self._phase_bash_ok = False
+        self._verification_scaffolded_criteria: set = set()
         self.current_turn_tool_calls = False
         self._last_persist = 0.0
         self._persist_every = 3
@@ -3845,9 +4025,27 @@ class NeonArchitect:
         """
         phase_models = self.config.get("phase_models") or {}
         override = phase_models.get(phase)
-        if override is not None and override not in MODELS:
-            UI.warn(f"phase_models['{phase}'] = '{override}' is not a known model; ignoring override.")
-            override = None
+        stale_keys = [k for k, v in phase_models.items() if v is not None and v not in MODELS]
+        if stale_keys:
+            for k in stale_keys:
+                UI.warn(
+                    f"phase_models['{k}'] = '{phase_models[k]}' is not a known model; "
+                    "removing this stale override from saved config so it stops "
+                    "reappearing on every run."
+                )
+            phase_models = {k: v for k, v in phase_models.items() if k not in stale_keys}
+            self.config["phase_models"] = phase_models
+            try:
+                project_dir = Path(self.config.get("project_dir") or ".").resolve()
+                root_cfg = self.config.get("_root")
+                if not isinstance(root_cfg, dict):
+                    root_cfg = load_config()
+                    self.config["_root"] = root_cfg
+                save_project_settings(root_cfg, project_dir, phase_models=phase_models)
+            except Exception:
+                pass
+            if phase in stale_keys:
+                override = None
         target_key = override or self.model_key
         current_id = self.pool.current().model_id if self.pool.providers else None
         target_id = MODELS.get(target_key, {}).get("id")
@@ -3949,6 +4147,7 @@ class NeonArchitect:
             self._phase_tool_success_counts = {}
             self._phase_chars_written = 0
             self._phase_bash_ok = False
+            self._verification_scaffolded_criteria = set()
             if hasattr(self, "_tool_fail_counts"):
                 self._tool_fail_counts = {}
             if hasattr(self, "_tool_success_counts"):
@@ -4640,6 +4839,18 @@ class NeonArchitect:
     def _is_transient_error(self, e: Exception) -> bool:
         if self._is_template_error(e):
             return False
+        status_code = getattr(e, "status_code", None)
+        if status_code is None:
+            resp = getattr(e, "response", None)
+            status_code = getattr(resp, "status_code", None) if resp is not None else None
+        if status_code in (404, 410):
+            # Permanent misses — model not found / route gone. Never
+            # transient regardless of which OpenAI-SDK exception class
+            # wrapped them (APIStatusError has no dedicated subclass for
+            # 410, so isinstance(e, OPENAI_ERRORS) below would otherwise
+            # blanket-classify it as transient and this would never be
+            # caught by the permanent-miss handling in _parse_stream).
+            return False
         err_str = str(e).lower().replace(" ", "")
         transient_markers = [
             "timeout", "timedout", "apitimeout", "apiconnection",
@@ -4757,7 +4968,7 @@ class NeonArchitect:
                 if not tools_stripped:
                     # Previously this branch only fired `if p_extra`, so any
                     # model without a static extra_body template in MODELS
-                    # (glm-5.2, glm-5.2-fp8, llama-3.1-405b) fell
+                    # (glm-5.2, glm-5.2-fp8, minimax-m3, laguna-xs-2.1) fell
                     # into the `else: payload.pop("extra_body", None)` branch
                     # below, silently discarding the enable_thinking value the
                     # top of this function had just set from thinking_effort.
@@ -4766,8 +4977,8 @@ class NeonArchitect:
                     # whatever the backend's default is (GLM-5.2 defaults to
                     # Think Max). Build chat_template_kwargs here for every
                     # provider, layering the provider's own static template
-                    # (e.g. Nemotron's force_nonempty_content) on top so it's
-                    # preserved, instead of choosing one or the other.
+                    # on top so it's preserved, instead of choosing one or
+                    # the other.
                     merged_extra = dict(p_extra) if p_extra else {}
                     ctk = dict(merged_extra.get("chat_template_kwargs") or {})
                     effort_now = str(self.config.get("thinking_effort") or "off").lower()
@@ -4793,9 +5004,21 @@ class NeonArchitect:
             except Exception as e:
                 err_l = str(e).lower()
                 err_c = err_l.replace(" ", "")
+                status_code = getattr(e, "status_code", None)
+                if status_code is None:
+                    resp = getattr(e, "response", None)
+                    status_code = getattr(resp, "status_code", None) if resp is not None else None
 
-                if "404" in err_l or "not found" in err_l or "model_not_found" in err_c:
-                    UI.warn(f"{provider.name} permanent miss (404) — removed from pool")
+                if (
+                    status_code in (404, 410)
+                    or "404" in err_l or "not found" in err_l or "model_not_found" in err_c
+                    or "410" in err_l or "'gone'" in err_l or '"gone"' in err_l
+                ):
+                    if status_code == 410 or (status_code is None and ("410" in err_l or "gone" in err_l) and "404" not in err_l):
+                        reason = "410 Gone"
+                    else:
+                        reason = "404"
+                    UI.warn(f"{provider.name} permanent miss ({reason}) — removed from pool")
                     provider.record_failure(cooldown=600.0, permanent=True)
                     _pd = self.config.get("project_dir")
                     if _pd:
@@ -4835,7 +5058,7 @@ class NeonArchitect:
                     UI.warn("NVIDIA rejected this project's API key (403/401).")
                     UI.info("Fix:  /apikey <new-nvapi-key-from-https://build.nvidia.com>")
                     UI.info("Check: key must have access to model z-ai/glm-5.2 on NVIDIA NIM.")
-                    UI.info("Or:    /model nemotron-3-super-120b-a12b   if that model is enabled on your key.")
+                    UI.info("Or:    /model minimax-m3   if that model is enabled on your key.")
                     raise
 
                 if (
@@ -4982,12 +5205,14 @@ class NeonArchitect:
                 UI.warn(msg)
                 self._strategy_hints.append(msg)
                 result = ToolResult("", error=msg, is_error=True)
-            elif prior_ok >= max_ok and name in ("run", "write", "edit"):
+            elif prior_ok >= max_ok and name in ("write", "edit"):
                 spam_blocks += 1
+                gate_hint = self._gate_missing_hint() if self.autopilot else ""
                 msg = (
                     f"[BLOCKED SPAM] {name} succeeded {prior_ok}x with the same fingerprint "
-                    f"but the phase gate is still open. Do something DIFFERENT "
-                    f"(new path, fix source, run a real test command, or stop rewriting CI)."
+                    f"but the phase gate is still open. Do something DIFFERENT — "
+                    + (gate_hint if gate_hint else
+                       "new path, fix source, run a real test command, or stop repeating the same write.")
                 )
                 UI.warn(msg)
                 self._strategy_hints.append(msg)
@@ -5065,8 +5290,16 @@ class NeonArchitect:
                         # Chars actually written on a successful call — used by
                         # gates that need to distinguish "wrote real content"
                         # from "made N calls" (see DESIGN/DEPLOYMENT gates).
+                        # Credited per-path as a MAX, not summed across
+                        # repeats: rewriting the same file with the same (or
+                        # smaller) content adds no new credit, so a model
+                        # can't satisfy a min_chars gate by writing the same
+                        # placeholder stub to one file multiple times.
                         content_len = len(str(args.get("content") or "")) if name == "write" else len(str(args.get("new_text") or ""))
-                        self._phase_chars_written += content_len
+                        path_key = Tool._sanitize_rel_path(rel) or rel
+                        prior_credit = self._phase_chars_by_path.get(path_key, 0)
+                        if content_len > prior_credit:
+                            self._phase_chars_by_path[path_key] = content_len
                         prefixes = self.config.get("implementation_path_prefixes") or [
                             "src/", "app/", "backend/", "frontend/", "lib/", "tests/"
                         ]
@@ -5127,6 +5360,29 @@ class NeonArchitect:
             )
             self.ctx.add_user(warning)
             UI.warn("Total spam turn detected — injected hard circuit-breaker prompt.")
+
+        # Immediate gate short-circuit: if this turn's tool results already
+        # satisfy the current phase's gate (most commonly _phase_bash_ok
+        # flipping True on a clean test run), advance right now instead of
+        # waiting for the model to notice on some later round. Without this,
+        # a model that keeps calling Read/Todo/etc. after tests already
+        # passed can spin for many rounds narrating "let me verify" before
+        # the existing end-of-turn check (further down in run_turn) happens
+        # to coincide with an advance — and if a later `run` call for the
+        # SAME test command gets rejected by the write/edit/run spam guard,
+        # that narration could continue indefinitely. This check is cheap
+        # (pure state inspection, no side effects) and safe to run every
+        # turn regardless of whether this turn's own tool calls succeeded.
+        if self.autopilot and self.sdlc_phase_idx < len(SDLC_PHASES):
+            if self._phase_requirements_met():
+                phase_name = SDLC_PHASES[self.sdlc_phase_idx]
+                UI.info(f"Gate satisfied mid-turn ({phase_name.upper()}) — advancing immediately.")
+                if not self._advance_sdlc():
+                    UI.separator("GOAL ACHIEVED")
+                    UI.ok("All SDLC phases complete!")
+                    self._stop_autopilot()
+                else:
+                    self.ctx.add_user(self._autopilot_prompt())
 
         self._sync_project_state()
         return True
@@ -5208,6 +5464,29 @@ class NeonArchitect:
                 )
         return bits
 
+    @property
+    def _phase_chars_written(self) -> int:
+        """Total content-written credit for the current phase, summed
+        per-path using each path's BEST (max) content length seen so far —
+        not a running total across every write call. Without this, writing
+        the same tiny placeholder to the same file 3x could sum to a large
+        enough total to satisfy a min_chars gate on repeated junk alone
+        (e.g. three 65-char stub writes to tests/test_ac1_auth.py summing
+        to 195, plus one 136-char real attempt, crossing a 300-char
+        threshold without ever producing a real file). Keying on path and
+        taking the max means only genuinely growing content counts, and
+        rewriting the same stub adds nothing."""
+        return sum(self._phase_chars_by_path.values())
+
+    @_phase_chars_written.setter
+    def _phase_chars_written(self, value: int) -> None:
+        # Only ever called with 0 (phase/session resets) — clears all
+        # per-path credit. Any nonzero external set is ignored on purpose;
+        # real writes must go through _phase_chars_by_path so per-path
+        # max-tracking can't be bypassed by direct assignment.
+        if not value:
+            self._phase_chars_by_path.clear()
+
     def _gate_missing_hint(self) -> str:
         if not self.autopilot or self.sdlc_phase_idx >= len(SDLC_PHASES):
             return ""
@@ -5217,8 +5496,12 @@ class NeonArchitect:
         bits = [f"Phase={phase}. Gate NOT met. Do NOT ask the user."]
         if kind == "plan_complete":
             art = reqs.get("artifact") or "PLAN.md"
-            ok, n = self._artifact_ok(art, int(reqs.get("min_chars", 400)))
-            bits.append(f"{art}: {'ok' if ok else 'MISSING/short'} ({n} chars)")
+            min_chars = int(reqs.get("min_chars", 400))
+            ok, n = self._artifact_ok(art, min_chars)
+            if ok:
+                bits.append(f"{art}: ok ({n} chars)")
+            else:
+                bits.append(f"{art}: TOO SHORT — {n}/{min_chars} chars required, write MORE content (not a rewrite of the same text)")
             bits.append(f"todos_added={self._phase_tool_counts.get('todo_add', 0)} need ≥{reqs.get('min_todos', 5)}")
             text = self._read_artifact_snippet(art, max_chars=20000)
             headers = tuple(h.lower() for h in (reqs.get("require_sections") or PLAN_REQUIRED_HEADERS))
@@ -5232,8 +5515,17 @@ class NeonArchitect:
             bits.append(f"research: {'ok' if research else 'need web_search/browse_page'}")
         elif kind == "architecture_complete":
             art = reqs.get("artifact") or "ARCHITECTURE.md"
-            ok, n = self._artifact_ok(art, int(reqs.get("min_chars", 300)))
-            bits.append(f"{art}: {'ok' if ok else 'MISSING'} ({n} chars)")
+            min_chars = int(reqs.get("min_chars", 300))
+            ok, n = self._artifact_ok(art, min_chars)
+            if ok:
+                bits.append(f"{art}: ok ({n} chars)")
+            else:
+                bits.append(f"{art}: TOO SHORT — {n}/{min_chars} chars required, write MORE content (not a rewrite of the same text)")
+            arch_text = self._read_artifact_snippet(art, max_chars=50000)
+            headers = tuple(h.lower() for h in (reqs.get("require_sections") or ARCH_REQUIRED_HEADERS))
+            sections_ok = plan_has_sections(arch_text, headers) if arch_text else False
+            if not sections_ok:
+                bits.append(f"missing required section header(s): {', '.join(headers)} — add as '## <header>' headings")
             bits.append(f"write/edit (successful)={sum(self._phase_tool_success_counts.get(x,0) for x in ('write','edit'))}")
         elif kind == "bash_success":
             # This phase's whole job is confirming correctness, so the hint
@@ -5265,6 +5557,20 @@ class NeonArchitect:
                         "`- [x] <criterion text> — test: <path/to/test.py::test_name>`, "
                         "naming a REAL test you have actually run and confirmed passes."
                     )
+        elif kind == "tool_calls":
+            tools = reqs.get("any_tool", [])
+            total = sum(self._phase_tool_success_counts.get(x, 0) for x in tools)
+            min_calls = int(reqs.get("min_calls", 1))
+            bits.append(
+                f"successful {'/'.join(tools)} calls: {total}/{min_calls} required"
+                + ("" if total >= min_calls else " — call one of these tools with real changes")
+            )
+            min_chars = int(reqs.get("min_chars_written", 0) or 0)
+            if min_chars:
+                bits.append(
+                    f"chars written this phase: {self._phase_chars_written}/{min_chars} required"
+                    + ("" if self._phase_chars_written >= min_chars else " — write MORE actual content, not just successful calls")
+                )
         else:
             bits.append(f"counts={dict(self._phase_tool_counts)}")
         if self._phase_tool_counts.get("todo_add", 0) < 5 and phase == "planning":
@@ -5378,21 +5684,103 @@ class NeonArchitect:
             self._consecutive_turn_failures = 0
             self.meter.record(tokens, len(content) // 4 + len(reasoning) // 4)
 
-            if not tool_calls and re.search(r"<(tool_call|function|parameter)", content):
-                UI.warn("Detected XML hallucination. Correcting...")
+            malformed_tool_syntax = bool(
+                re.search(r"</(tool_call|arg_value|function|parameter|invoke)>", content)
+                or re.search(r'\[\{"name":\s*"\w+",\s*"parameters":', content)
+                or re.search(r"\]<\]\w+\[>\[", content)
+            )
+            if not tool_calls and (
+                re.search(r"<(tool_call|function|parameter)", content) or malformed_tool_syntax
+            ):
+                self._malformed_tool_streak += 1
+                if self._malformed_tool_streak >= 3:
+                    UI.warn(
+                        f"Malformed tool-call syntax repeated {self._malformed_tool_streak}x "
+                        "(likely a serving-side parser mismatch for this model) — "
+                        "forcing a model switch instead of re-prompting the same way."
+                    )
+                    self._malformed_tool_streak = 0
+                    self.ctx.add_assistant(content)
+                    self.ctx.add_user(
+                        "SYSTEM: Your last several responses emitted broken pseudo-tool-call "
+                        "syntax (stray </tool_call>, </arg_value>, or a JSON array written as "
+                        "prose) instead of a real function call. Do not repeat that pattern. "
+                        "Call the tool using the native function-calling API only — no text "
+                        "before or after describing the call."
+                    )
+                    try:
+                        stuck_provider = self.pool.current()
+                        stuck_provider.record_failure(cooldown=120.0)
+                        self.pool.rotate()
+                        UI.warn(
+                            f"Rotated off {stuck_provider.name} "
+                            f"({stuck_provider.model_id}) — cooling down 120s after "
+                            "repeated malformed tool-call output."
+                        )
+                    except Exception:
+                        pass
+                    time.sleep(0.5)
+                    continue
+                UI.warn("Detected XML/malformed tool-call hallucination. Correcting...")
                 self.ctx.add_assistant(content)
                 self.ctx.add_user(
-                    "SYSTEM: You output raw XML for a tool call. This is forbidden. "
+                    "SYSTEM: You output raw XML or malformed pseudo-JSON for a tool call. This is forbidden. "
                     "Use the native JSON function calling API. Re-issue correctly."
                 )
                 time.sleep(0.5)
                 continue
+            self._malformed_tool_streak = 0
 
             if tool_calls:
                 self.nudges = 0
                 self._execute_tools(tool_calls)
                 self._consecutive_no_tool_turns = 0
                 tool_names = {tc.get("name", "") for tc in tool_calls}
+                is_degenerate_write = False
+                if tool_names == {"write"} and len(tool_calls) == 1:
+                    tc = tool_calls[0]
+                    args = tc.get("arguments") or {}
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except (json.JSONDecodeError, TypeError):
+                            args = {}
+                    write_len = len(str(args.get("content", "")))
+                    stated_intent = content.lower()
+                    # A tiny write (<50 chars) to a source/test file, in the
+                    # same turn where the model's own prose says it's about
+                    # to write "the complete"/"full" file, is a stub — the
+                    # same stalled pattern as malformed tool syntax, just
+                    # wrapped in a call that technically succeeds. Treat it
+                    # as a continuation of the streak, not a reset, so it
+                    # doesn't mask the loop from the rotation logic below.
+                    if write_len < 50 and (
+                        "complete" in stated_intent or "full test" in stated_intent
+                        or "full implementation" in stated_intent
+                    ):
+                        is_degenerate_write = True
+                if is_degenerate_write:
+                    self._malformed_tool_streak += 1
+                    UI.warn(
+                        f"Tiny stub write ({write_len} chars) after saying "
+                        f"'complete/full' file — treating as stalled "
+                        f"(streak={self._malformed_tool_streak})."
+                    )
+                    if self._malformed_tool_streak >= 3:
+                        try:
+                            stuck_provider = self.pool.current()
+                            stuck_provider.record_failure(cooldown=120.0)
+                            self.pool.rotate()
+                            UI.warn(
+                                f"Rotated off {stuck_provider.name} "
+                                f"({stuck_provider.model_id}) — cooling down 120s "
+                                "after repeated stub writes."
+                            )
+                        except Exception:
+                            pass
+                        self._malformed_tool_streak = 0
+                else:
+                    self._malformed_tool_streak = 0
                 if tool_names & {"todo", "write", "edit"}:
                     self.persist(force=True)
                 delay = self._effective_inter_turn_delay()
@@ -5687,8 +6075,54 @@ class NeonArchitect:
         the model's behalf — a placeholder TODO is left for the model to
         replace with a real one, and the row still won't count as
         covered by match_criteria_to_verification until it does.
+
+        Scaffolds each missing criterion AT MOST ONCE per session — a
+        set of already-scaffolded (normalized) criteria is tracked so
+        repeated gate checks (which happen every turn now, not just
+        periodically) don't keep re-appending the same placeholder rows
+        and inflating the file without bound. If every remaining missing
+        criterion has already been scaffolded once, this is a no-op and
+        returns False so the caller doesn't loop expecting a re-parse to
+        suddenly find new rows.
+
         Returns True if the file was modified (which does not by itself
         mean the gate now passes — the caller re-checks after this)."""
+        if not hasattr(self, "_verification_scaffolded_criteria"):
+            self._verification_scaffolded_criteria: set = set()
+        # Bug fix: the in-memory _verification_scaffolded_criteria set only
+        # remembers what THIS function has scaffolded before. It does not
+        # know about rows the model itself already wrote (e.g. its own
+        # initial TODO_TEST_REF pass), nor about scaffolded rows that
+        # survived from an earlier session. Re-checking only against that
+        # set caused the same placeholder rows to be appended again on
+        # every gate re-check, silently duplicating the whole criteria
+        # list on disk. Cross-check against a full parse of the file's
+        # CURRENT on-disk rows (placeholders included) so a criterion that
+        # already has *any* row — TODO or real — is never scaffolded again.
+        existing_placeholder_or_real = set()
+        try:
+            fp_check = (self.project_dir / artifact).resolve()
+            fp_check.relative_to(self.project_dir.resolve())
+            if fp_check.is_file():
+                raw = fp_check.read_text(encoding="utf-8", errors="ignore")
+                for row in parse_verification_rows(raw, include_placeholders=True):
+                    existing_placeholder_or_real.add(
+                        _normalize_criterion_text(row["criterion"])
+                    )
+        except Exception:
+            pass
+        to_scaffold = [
+            c for c in missing
+            if _normalize_criterion_text(c) not in self._verification_scaffolded_criteria
+            and _normalize_criterion_text(c) not in existing_placeholder_or_real
+        ]
+        # Whether or not we're about to write anything new, any criterion
+        # that already has a row on disk should be treated as scaffolded
+        # going forward, so a stale in-memory set (e.g. after a session
+        # restore) doesn't cause a fresh duplicate later.
+        self._verification_scaffolded_criteria |= existing_placeholder_or_real
+        if not to_scaffold:
+            return False
         try:
             fp = (self.project_dir / artifact).resolve()
             fp.relative_to(self.project_dir.resolve())
@@ -5702,15 +6136,18 @@ class NeonArchitect:
                 "One row per PLAN.md Acceptance Criteria item. Each row MUST name a "
                 "specific test that exercises it — replace TODO_TEST_REF with a real "
                 "test path/name (e.g. `tests/test_auth.py::test_rejects_bad_password`) "
-                "and re-run that test before considering this criterion done.\n\n"
+                "and re-run that test before considering this criterion done. Either "
+                "a bullet list (`- [x] <criterion> — test: <ref>`) or a markdown table "
+                "(`| <criterion> | <status> | <ref> |`) is accepted.\n\n"
             )
-        for c in missing:
+        for c in to_scaffold:
             blocks.append(f"- [ ] {c} — test: TODO_TEST_REF\n")
+            self._verification_scaffolded_criteria.add(_normalize_criterion_text(c))
         try:
             with open(fp, "a", encoding="utf-8", newline="\n") as f:
                 f.write("".join(blocks))
             UI.warn(
-                f"Auto-repaired {artifact}: scaffolded {len(missing)} criterion row(s) "
+                f"Auto-repaired {artifact}: scaffolded {len(to_scaffold)} criterion row(s) "
                 f"needing a real test reference (model hadn't linked them after repeated attempts)."
             )
             try:
@@ -5870,6 +6307,42 @@ class NeonArchitect:
                     rows = parse_verification_rows(text) if text else []
                     covered, missing = match_criteria_to_verification(criteria, rows)
                 if missing:
+                    # _check_tests_pass_gate above has its own circuit
+                    # breaker, but it only guards the "tests pass" half of
+                    # this gate — once tests are green, tests_ok returns
+                    # True immediately and that breaker never runs again.
+                    # Without a separate one here, a VERIFICATION.md that
+                    # never gets criteria linked (e.g. the model repeatedly
+                    # editing the wrong rows, or a stuck auto-repair) can
+                    # loop this phase indefinitely even with passing tests,
+                    # since nothing else bounds _phase_rounds for this half
+                    # of the check. Mirror the testing breaker's behavior:
+                    # halt autopilot and record a blocker rather than
+                    # looping forever or silently soft-passing.
+                    max_v = int(self.config.get("verification_max_phase_rounds", 25) or 25)
+                    if max_v > 0 and self._phase_rounds >= max_v:
+                        UI.warn(
+                            f"VERIFICATION circuit-breaker: {self._phase_rounds} rounds without "
+                            f"all acceptance criteria linked to tests in {artifact}. "
+                            f"Stopping autopilot — this phase is NOT being marked complete."
+                        )
+                        try:
+                            self.project_state.setdefault("blockers", []).append(
+                                f"{phase}: {len(missing)}/{len(criteria)} acceptance criteria "
+                                f"still unlinked in {artifact} after {self._phase_rounds} rounds "
+                                "— autopilot halted"
+                            )
+                            self.project_state["blockers"] = self.project_state["blockers"][-10:]
+                            self._update_working_memory(
+                                f"{phase} STALLED: {len(missing)}/{len(criteria)} acceptance "
+                                f"criteria unlinked in {artifact} after {self._phase_rounds} "
+                                "rounds. Autopilot halted; phase not marked complete.",
+                                section="Blockers",
+                            )
+                        except Exception:
+                            pass
+                        self._stop_autopilot()
+                        return False
                     UI.info(
                         f"Gate NOT met: {len(missing)}/{len(criteria)} acceptance criteria have no "
                         f"matching test reference in {artifact}."
@@ -6197,6 +6670,35 @@ def load_config() -> Dict[str, Any]:
             raw[k] = v
             migrated = True
 
+    # Sanitize default_model at both the root level and inside every saved
+    # project entry. Unlike phase_models (cleaned per-turn in
+    # _apply_phase_model), a stale default_model was never validated here,
+    # so an old model id left over from a prior model-stack swap would
+    # silently survive every load, get merged into runtime by
+    # apply_project_to_runtime, and break every request for that project
+    # until someone noticed and ran /model manually.
+    if raw.get("default_model") not in MODELS:
+        bad = raw.get("default_model")
+        if bad:
+            UI.warn(
+                f"default_model '{bad}' is not a known model; resetting to "
+                f"'{DEFAULT_CONFIG['default_model']}'."
+            )
+        raw["default_model"] = DEFAULT_CONFIG["default_model"]
+        migrated = True
+    for _pkey, _entry in list(raw.get("projects", {}).items()):
+        if not isinstance(_entry, dict):
+            continue
+        _dm = _entry.get("default_model")
+        if _dm is not None and _dm not in MODELS:
+            UI.warn(
+                f"Project '{_pkey}': default_model '{_dm}' is not a known "
+                f"model; removing stale override (falls back to the global "
+                f"default_model)."
+            )
+            del _entry["default_model"]
+            migrated = True
+
     raw["version"] = APP_VERSION
     if "projects" not in raw:
         raw["projects"] = {}
@@ -6219,6 +6721,7 @@ def load_config() -> Dict[str, Any]:
         "max_autopilot_rounds": 0,
         "max_phase_rounds": 40,
         "testing_max_phase_rounds": 25,
+        "verification_max_phase_rounds": 25,
         "max_same_tool_successes": 3,
         "post_429_backoff": 25.0,
         "rpm_safety": 0.80,
@@ -6735,7 +7238,7 @@ def main():
     parser = argparse.ArgumentParser(description=f"{APP_NAME} v{APP_VERSION}")
     parser.add_argument("--project", "-p", default=None,
                         help="Project directory (default: current working directory)")
-    parser.add_argument("--model", "-m", default=None, help="Model key (glm-5.2, nemotron-3-super-120b-a12b, ...)")
+    parser.add_argument("--model", "-m", default=None, help="Model key (glm-5.2, glm-5.2-fp8, minimax-m3, laguna-xs-2.1)")
     parser.add_argument("--fresh", action="store_true",
                         help="Start a clean session (do not restore prior goal/messages/todos)")
     parser.add_argument("--tui", action="store_true",
