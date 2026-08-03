@@ -9,7 +9,7 @@ Key features ported from the CLI:
   * NVIDIA NIM / OpenRouter provider pool with failover
   * Token-bucket RPM enforcement
   * 10 % context compaction
-  * Auto-Correction Interceptor (XML hallucination detection)
+  * Auto-Correction Interceptor for XML hallucinations
   * Mid-stream overload protection + auto-retry
   * Chatty-Stop Auto-Nudge
   * Silent stream-truncation detection
@@ -18,12 +18,13 @@ Key features ported from the CLI:
 import json
 import re
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any, Set
 
 from .providers import ProviderPool, build_provider_pool
 from .rate_limiter import TokenMeter
 from .signals import AgentSignals
 from .tools import TOOLS_SCHEMA, FileTools, execute_tool
+from .handoff import HANDOFF_TOOL_SCHEMA
 
 # Overload / rate-limit error signatures (lower-cased, space-stripped)
 _OVERLOAD_SIGNATURES = [
@@ -91,6 +92,15 @@ class NIMAgentCore:
         self.compaction_summary: Optional[str] = None
         self._stop_requested: bool = False
 
+        # Role-specific configuration (set by AgentFactory)
+        self._role: Optional[str] = None
+        self._role_profile = None
+        self._filtered_tools_schema: List[Dict] = TOOLS_SCHEMA
+        self._role_temperature: float = self.TEMPERATURE
+        self._role_max_tokens: int = self.MAX_TOKENS
+        self._role_model_key: str = "glm"
+        self._extra_system_prompt: str = ""
+
     # ------------------------------------------------------------------
     # Session persistence
     # ------------------------------------------------------------------
@@ -135,6 +145,16 @@ class NIMAgentCore:
         if self.goal:
             parts.append(f"CURRENT GOAL: {self.goal}")
         parts.append(f"Working Directory: {self.pdir}")
+
+        # Add role-specific system prompt suffix
+        if hasattr(self, "_role_profile") and self._role_profile:
+            suffix = getattr(self._role_profile, "system_prompt_suffix", "")
+            if suffix:
+                parts.append(suffix)
+
+        # Add extra system prompt (injected by factory)
+        if self._extra_system_prompt:
+            parts.append(self._extra_system_prompt)
 
         self.messages = [m for m in self.messages if m.get("role") != "system"]
         self.messages.insert(
@@ -239,10 +259,10 @@ class NIMAgentCore:
                     {k: v for k, v in m.items() if not k.startswith("_")}
                     for m in self.messages
                 ],
-                "max_tokens": self.MAX_TOKENS,
-                "temperature": self.TEMPERATURE,
+                "max_tokens": self._role_max_tokens,
+                "temperature": self._role_temperature,
                 "stream": True,
-                "tools": TOOLS_SCHEMA,
+                "tools": self._filtered_tools_schema + [HANDOFF_TOOL_SCHEMA],
                 "tool_choice": "auto",
             }
 
@@ -281,14 +301,25 @@ class NIMAgentCore:
                         f"Awaiting {provider.name} (TTFT)..."
                     )
 
-                    payload["model"] = provider.model_id
-                    if "glm" in provider.model_id:
+                    # Use role-specific model if available
+                    model_key = getattr(self, "_role_model_key", "glm")
+                    model_entry = self.profile["models"].get(model_key)
+                    if model_entry:
+                        payload["model"] = model_entry["id"]
+                    else:
+                        payload["model"] = provider.model_id
+
+                    # Enable thinking for GLM models
+                    current_model = payload["model"]
+                    if "glm" in current_model:
                         payload["extra_body"] = {
                             "chat_template_kwargs": {
                                 "enable_thinking": True,
                                 "thinking_effort": "medium",
                             }
                         }
+                    else:
+                        payload.pop("extra_body", None)
 
                     resp = provider.client.chat.completions.create(**payload)
                     in_think = False

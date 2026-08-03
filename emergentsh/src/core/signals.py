@@ -51,3 +51,25 @@ class AgentSignals(QObject):
     auto_corrected = Signal(str)
     #: Auto-nudge fired (message: str).
     auto_nudged = Signal(str)
+
+    # ── Orchestration (multi-agent) ─────────────────────────────────
+    #: A task status changed (task_id, old_status, new_status).
+    task_status_changed = Signal(str, str, str)
+    #: A new task was created (task_dict).
+    task_created = Signal(dict)
+    #: Graph progress update (completed, running, total).
+    graph_progress = Signal(int, int, int)
+    #: An agent was spawned (agent_id, role, task_id).
+    agent_spawned = Signal(str, str, str)
+    #: An agent completed (agent_id, role, task_id).
+    agent_completed = Signal(str, str, str)
+    #: A handoff was initiated (handoff_id, from_role, to_role, objective).
+    handoff_initiated = Signal(str, str, str, str)
+    #: A handoff was acknowledged (handoff_id, accepted).
+    handoff_acknowledged = Signal(str, bool)
+    #: Project started (project_id, project_name).
+    project_started = Signal(str, str)
+    #: Project completed (project_id, summary_dict).
+    project_completed = Signal(str, dict)
+    #: Project failed (project_id, error).
+    project_failed = Signal(str, str)

@@ -38,6 +38,18 @@ class ChatMessageWidget(QFrame):
         ROLE_REASONING: "ReasoningBubble",
     }
 
+    # Role → role-tag color mapping (mirrors DESIGN.md §4.1)
+    ROLE_TAG_COLORS = {
+        ROLE_USER: "#7aa2f7",        # accent
+        ROLE_ASSISTANT: "#9ece6a",   # ok
+        ROLE_TOOL: "#e0af68",         # warn
+        ROLE_REASONING: "#bb9af7",    # think
+    }
+
+    # Error bubble reuses AssistantBubble frame with an err role tag
+    ROLE_ERROR = "error"
+    ROLE_TAG_COLORS[ROLE_ERROR] = "#f7768e"  # err
+
     ROLE_LABEL_OBJECT_NAMES = {
         ROLE_USER: "RoleUser",
         ROLE_ASSISTANT: "RoleAssistant",
