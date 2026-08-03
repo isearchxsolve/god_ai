@@ -1,5 +1,4 @@
 from sqlalchemy import Column, String, Text, DateTime, Integer, ForeignKey, Enum as SQLEnum, Boolean, JSON
-from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship, declarative_base
 from datetime import datetime
 import uuid
@@ -31,12 +30,12 @@ class AgentRole(str, enum.Enum):
 class Project(Base):
     __tablename__ = "projects"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     name = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
     prompt = Column(Text, nullable=True)
     status = Column(SQLEnum(ProjectStatus), default=ProjectStatus.PLANNING, nullable=False)
-    owner_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    owner_id = Column(String(36), ForeignKey("users.id"), nullable=False)
     credits_used = Column(Integer, default=0)
     github_repo = Column(String(500), nullable=True)
     preview_url = Column(String(500), nullable=True)
@@ -55,7 +54,7 @@ class Project(Base):
 class User(Base):
     __tablename__ = "users"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     email = Column(String(255), unique=True, nullable=False, index=True)
     username = Column(String(100), unique=True, nullable=False, index=True)
     hashed_password = Column(String(255), nullable=False)
@@ -76,9 +75,9 @@ class User(Base):
 class Conversation(Base):
     __tablename__ = "conversations"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=False)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    project_id = Column(String(36), ForeignKey("projects.id"), nullable=False)
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False)
     title = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -91,12 +90,12 @@ class Conversation(Base):
 class Message(Base):
     __tablename__ = "messages"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    conversation_id = Column(UUID(as_uuid=True), ForeignKey("conversations.id"), nullable=False)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    conversation_id = Column(String(36), ForeignKey("conversations.id"), nullable=False)
     role = Column(String(50), nullable=False)  # user, assistant, system, tool
     content = Column(Text, nullable=False)
     agent_role = Column(SQLEnum(AgentRole), nullable=True)
-    metadata = Column(JSON, nullable=True)
+    meta = Column('metadata', JSON, nullable=True)
     tokens_used = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -106,8 +105,8 @@ class Message(Base):
 class Artifact(Base):
     __tablename__ = "artifacts"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=False)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    project_id = Column(String(36), ForeignKey("projects.id"), nullable=False)
     name = Column(String(255), nullable=False)
     path = Column(String(500), nullable=False)
     content = Column(Text, nullable=True)
@@ -123,8 +122,8 @@ class Artifact(Base):
 class Deployment(Base):
     __tablename__ = "deployments"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=False)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    project_id = Column(String(36), ForeignKey("projects.id"), nullable=False)
     status = Column(String(50), default="pending")  # pending, building, running, failed, success
     url = Column(String(500), nullable=True)
     logs = Column(Text, nullable=True)
@@ -139,8 +138,8 @@ class Deployment(Base):
 class AgentRun(Base):
     __tablename__ = "agent_runs"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=False)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    project_id = Column(String(36), ForeignKey("projects.id"), nullable=False)
     agent_role = Column(SQLEnum(AgentRole), nullable=False)
     status = Column(String(50), default="pending")  # pending, running, completed, failed
     input_data = Column(JSON, nullable=True)
@@ -157,9 +156,9 @@ class AgentRun(Base):
 class CreditTransaction(Base):
     __tablename__ = "credit_transactions"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
-    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=True)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False)
+    project_id = Column(String(36), ForeignKey("projects.id"), nullable=True)
     amount = Column(Integer, nullable=False)  # positive for credit, negative for debit
     transaction_type = Column(String(50), nullable=False)  # purchase, usage, refund, bonus
     description = Column(Text, nullable=True)

@@ -57,6 +57,6 @@ print(f"Created DevOpsAgent: {devops.agent_id}, role={devops.role}")
 
 # Test registry
 registry = get_registry()
-print(f"Registry agents: {list(registry._agents.keys())}")
+print(f"Registry agents: {list(registry._classes.keys())}")
 
 print("\n=== ALL AGENT TESTS PASSED ===")

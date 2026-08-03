@@ -1,1 +1,138 @@
-from openai import AsyncOpenAI<br/>from pydantic import BaseModel<br/>from typing import AsyncGenerator, Optional, List, Dict, Any<br/>import httpx<br/>import os<br/><br/>class NIMConfig(BaseModel):<br/>    base_url: str = os.getenv(&#34;NIM_BASE_URL&#34;, &#34;http://localhost:8000/v1&#34;)<br/>    api_key: str = os.getenv(&#34;NIM_API_KEY&#34;, &#34;dummy&#34;)  # Required for hosted<br/>    timeout: float = 60.0<br/>    max_retries: int = 3<br/><br/>class NIMModel(BaseModel):<br/>    id: str<br/>    object: str = &#34;model&#34;<br/>    created: int<br/>    owned_by: str<br/>    permission: List[Dict]<br/>    root: str<br/>    parent: Optional[str]<br/><br/>class NIMClient:<br/>    &#34;&#33;&#34;OpenAI-compatible client for NVIDIA NIM.&#34;&#33;&#34;<br/>    <br/>    def __init__(self, config: Optional[NIMConfig] = None):<br/>        self.config = config or NIMConfig()<br/>        self.client = AsyncOpenAI(<br/>            base_url=self.config.base_url,<br/>            api_key=self.config.api_key,<br/>            timeout=self.config.timeout,<br/>            max_retries=self.config.max_retries,<br/>            http_client=httpx.AsyncClient(<br/>                limits=httpx.Limits(max_connections=100, max_keepalive_connections=20)<br/>            )<br/>        )<br/>    <br/>    async def chat_completion(<br/>        self,<br/>        model: str,<br/>        messages: List[Dict[str, str]],<br/>        temperature: float = 0.7,<br/>        max_tokens: int = 4096,<br/>        stream: bool = False,<br/>        **kwargs<br/>    ) -> Dict[str, Any] | AsyncGenerator[Dict[str, Any], None]:<br/>        &#34;&#33;&#34;Call /v1/chat/completions - supports both streaming and non-streaming.&#34;&#33;&#34;<br/>        response = await self.client.chat.completions.create(<br/>            model=model,<br/>            messages=messages,<br/>            temperature=temperature,<br/>            max_tokens=max_tokens,<br/>            stream=stream,<br/>            **kwargs<br/>        )<br/>        <br/>        if stream:<br/>            return self._stream_response(response)<br/>        return response.model_dump()<br/>    <br/>    async def _stream_response(self, response) -> AsyncGenerator[Dict[str, Any], None]:<br/>        &#34;&#33;&#34;Convert OpenAI streaming response to dict chunks.&#34;&#33;&#34;<br/>        async for chunk in response:<br/>            yield chunk.model_dump()<br/>    <br/>    async def list_models(self) -> List[NIMModel]:<br/>        &#34;&#33;&#34;Call /v1/models.&#34;&#33;&#34;<br/>        response = await self.client.models.list()<br/>        return [NIMModel(**m.model_dump()) for m in response.data]<br/>    <br/>    async def health_check(self) -> Dict[str, Any]:<br/>        &#34;&#33;&#34;Call /v1/health/ready and /v1/health/live.&#34;&#33;&#34;<br/>        async with httpx.AsyncClient() as client:<br/>            ready = await client.get(f&#34;{self.config.base_url.replace(&#39;/v1&#39;, &#39;&#39;)}/v1/health/ready&#34;)<br/>            live = await client.get(f&#34;{self.config.base_url.replace(&#39;/v1&#39;, &#39;&#39;)}/v1/health/live&#34;)<br/>            return {<br/>                &#34;ready&#34;: ready.status_code == 200,<br/>                &#34;live&#34;: live.status_code == 200,<br/>                &#34;ready_details&#34;: ready.json() if ready.status_code == 200 else None,<br/>                &#34;live_details&#34;: live.json() if live.status_code == 200 else None<br/>            }<br/>    <br/>    async def get_metrics(self) -> str:<br/>        &#34;&#33;&#34;Call /v1/metrics for Prometheus metrics.&#34;&#33;&#34;<br/>        async with httpx.AsyncClient() as client:<br/>            resp = await client.get(f&#34;{self.config.base_url.replace(&#39;/v1&#39;, &#39;&#39;)}/v1/metrics&#34;)<br/>            return resp.text<br/>    <br/>    async def close(self):<br/>        await self.client.close()
+"""
+NVIDIA NIM client service used by the FastAPI backend.
+
+All generative / reasoning calls for the Emergent.sh clone must go through
+this module.  No other LLM providers are permitted.
+"""
+
+from __future__ import annotations
+
+import os
+from typing import Any, AsyncIterator, Dict, List, Optional
+
+import httpx
+
+# Prefer the shared root client when available
+try:
+    from backend.nim_client import NIMClient as SyncNIMClient, NIMConfig
+except ImportError:
+    try:
+        from nim_client import NIMClient as SyncNIMClient, NIMConfig  # type: ignore
+    except ImportError:
+        SyncNIMClient = None  # type: ignore
+        NIMConfig = None  # type: ignore
+
+
+DEFAULT_BASE_URL = os.getenv("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1")
+DEFAULT_MODEL = os.getenv("NIM_DEFAULT_MODEL", "meta/llama-3.1-8b-instruct")
+
+
+class AsyncNIMClient:
+    """Async OpenAI-compatible client pointed exclusively at NVIDIA NIM."""
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+        default_model: Optional[str] = None,
+        timeout: float = 120.0,
+    ) -> None:
+        self.api_key = (
+            api_key
+            or os.getenv("NIM_API_KEY")
+            or os.getenv("NVIDIA_API_KEY")
+            or os.getenv("NGC_API_KEY")
+            or ""
+        ).strip()
+        if not self.api_key:
+            raise ValueError(
+                "NVIDIA NIM API key required. Set NIM_API_KEY or NVIDIA_API_KEY."
+            )
+        self.base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
+        self.default_model = default_model or DEFAULT_MODEL
+        self.timeout = timeout
+        self._client = httpx.AsyncClient(
+            base_url=self.base_url,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            timeout=timeout,
+        )
+
+    async def close(self) -> None:
+        await self._client.aclose()
+
+    async def chat_completion(
+        self,
+        messages: List[Dict[str, str]],
+        model: Optional[str] = None,
+        temperature: float = 0.4,
+        max_tokens: int = 4096,
+        stream: bool = False,
+    ) -> Dict[str, Any]:
+        body = {
+            "model": model or self.default_model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": stream,
+        }
+        resp = await self._client.post("/chat/completions", json=body)
+        resp.raise_for_status()
+        return resp.json()
+
+    async def chat_stream(
+        self,
+        messages: List[Dict[str, str]],
+        model: Optional[str] = None,
+        temperature: float = 0.4,
+        max_tokens: int = 4096,
+    ) -> AsyncIterator[str]:
+        """Yield content deltas from a streaming NIM completion."""
+        body = {
+            "model": model or self.default_model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": True,
+        }
+        async with self._client.stream("POST", "/chat/completions", json=body) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line or not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    import json
+                    chunk = json.loads(data)
+                    delta = (
+                        chunk.get("choices", [{}])[0]
+                        .get("delta", {})
+                        .get("content")
+                    )
+                    if delta:
+                        yield delta
+                except Exception:
+                    continue
+
+    async def list_models(self) -> List[str]:
+        resp = await self._client.get("/models")
+        resp.raise_for_status()
+        data = resp.json()
+        return [m["id"] for m in data.get("data", [])]
+
+    async def health_check(self) -> Dict[str, Any]:
+        try:
+            models = await self.list_models()
+            return {"ready": True, "live": True, "models": models[:5]}
+        except Exception as e:
+            return {"ready": False, "live": False, "error": str(e)}
+
+
+def get_nim_client() -> AsyncNIMClient:
+    """Factory used by FastAPI dependency injection."""
+    return AsyncNIMClient()

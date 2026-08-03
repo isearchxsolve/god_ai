@@ -509,7 +509,7 @@ async def {spec.provider}_callback(request: Request, code: str = None, state: st
     async with httpx.AsyncClient() as client:
         user_response = await client.get(
             "{spec.user_info_url or spec.token_url}",
-            headers={{"Authorization": f"Bearer {{token_data['access_token']}}}"}},
+            headers={"Authorization": f"Bearer {token_data['access_token']}"},
         )
 
     return {{"access_token": token_data["access_token"], "user": user_response.json()}}

@@ -10673,8 +10673,8 @@ class SpecializedAgent:
         self.pool = pool
         self.config = config
 
-    def _call_nim(self, messages: List[Dict[str, str]], max_tokens: int = 8192) -> str:
-        """Synchronous NIM call through the existing provider pool."""
+    def _call_nim(self, messages: List[Dict[str, str]], max_tokens: int = 8192, target_file: Optional[Path] = None) -> str:
+        """NIM call with real-time direct-to-disk streaming file I/O."""
         if not HAS_OPENAI:
             return f"# {self.role} output\n# openai package not available\n"
 
@@ -10690,11 +10690,12 @@ class SpecializedAgent:
                 raise RuntimeError(f"[{self.role}] No NIM provider available after 60 s")
 
             model_cfg = provider.model_cfg
+            req_max_tokens = min(max_tokens, model_cfg.get("max_tokens", 4096))
             payload: Dict[str, Any] = {
                 "model": model_cfg["id"],
                 "messages": messages,
-                "max_tokens": max_tokens,
-                "stream": False,
+                "max_tokens": req_max_tokens,
+                "stream": True,
             }
             if model_cfg.get("temperature") is not None:
                 payload["temperature"] = model_cfg["temperature"]
@@ -10702,9 +10703,29 @@ class SpecializedAgent:
                 payload["top_p"] = model_cfg["top_p"]
 
             try:
-                resp = provider.client.chat.completions.create(**payload)
+                stream_resp = provider.client.chat.completions.create(**payload)
+                chunks: List[str] = []
+                f = None
+                if target_file:
+                    target_file.parent.mkdir(parents=True, exist_ok=True)
+                    f = open(target_file, "w", encoding="utf-8")
+                try:
+                    for chunk in stream_resp:
+                        if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                            c = chunk.choices[0].delta.content
+                            chunks.append(c)
+                            if f:
+                                f.write(c)
+                                f.flush()
+                            sys.stdout.write(".")
+                            sys.stdout.flush()
+                finally:
+                    if f:
+                        f.close()
+                sys.stdout.write("\n")
+                sys.stdout.flush()
                 provider.record_success()
-                return (resp.choices[0].message.content or "").strip()
+                return "".join(chunks).strip()
             except OPENAI_ERRORS as e:
                 err_str = str(e).lower()
                 if "429" in err_str or "rate" in err_str:
@@ -10724,7 +10745,7 @@ class SpecializedAgent:
             {"role": "user", "content": user_content},
         ]
 
-    def run(self, ctx: Dict[str, Any]) -> Dict[str, str]:
+    def run(self, ctx: Dict[str, Any], project_dir: Optional[Path] = None) -> Dict[str, str]:
         """Run the agent. Returns {rel_path: content} of files to write."""
         raise NotImplementedError
 
@@ -10738,14 +10759,15 @@ class PlannerAgent(SpecializedAgent):
         "Be specific, actionable, and technical. No preamble, no code blocks wrapping the markdown."
     )
 
-    def run(self, ctx: Dict[str, Any]) -> Dict[str, str]:
+    def run(self, ctx: Dict[str, Any], project_dir: Optional[Path] = None) -> Dict[str, str]:
         prompt = (
             f"Project: {ctx['project_name']}\n"
             f"Stack: {ctx['stack']}\n"
             f"Description: {ctx['description']}\n\n"
             "Write PLAN.md with sections: Requirements, Risks, Acceptance Criteria."
         )
-        content = self._call_nim(self._messages(prompt), max_tokens=4096)
+        target = (project_dir / "PLAN.md") if project_dir else None
+        content = self._call_nim(self._messages(prompt), max_tokens=4096, target_file=target)
         return {"PLAN.md": content}
 
 
@@ -10758,7 +10780,7 @@ class ArchitectAgent(SpecializedAgent):
         "Be specific about module names, file paths, and data schemas."
     )
 
-    def run(self, ctx: Dict[str, Any]) -> Dict[str, str]:
+    def run(self, ctx: Dict[str, Any], project_dir: Optional[Path] = None) -> Dict[str, str]:
         plan = ctx.get("PLAN.md", "No plan yet.")
         prompt = (
             f"Project: {ctx['project_name']} ({ctx['stack']})\n"
@@ -10766,7 +10788,8 @@ class ArchitectAgent(SpecializedAgent):
             f"PLAN.md:\n{plan[:3000]}\n\n"
             "Write ARCHITECTURE.md with sections: Components, Data Flow, Tech Stack, API Surface."
         )
-        content = self._call_nim(self._messages(prompt), max_tokens=4096)
+        target = (project_dir / "ARCHITECTURE.md") if project_dir else None
+        content = self._call_nim(self._messages(prompt), max_tokens=4096, target_file=target)
         return {"ARCHITECTURE.md": content}
 
 
@@ -10778,7 +10801,7 @@ class DesignerAgent(SpecializedAgent):
         "Design a clean, modern dark-mode color theme and component system for the given project."
     )
 
-    def run(self, ctx: Dict[str, Any]) -> Dict[str, str]:
+    def run(self, ctx: Dict[str, Any], project_dir: Optional[Path] = None) -> Dict[str, str]:
         stack = ctx["stack"]
         if stack in ("fastapi-react", "nextjs-postgres"):
             prompt = (
@@ -10788,7 +10811,8 @@ class DesignerAgent(SpecializedAgent):
                 "text=#e2e8f0, muted=#94a3b8, danger=#fb7185, success=#4ade80. "
                 "No imports needed. Export as: export const COLORS = {{...}}; export const TYPOGRAPHY = {{...}};"
             )
-            out = self._call_nim(self._messages(prompt), max_tokens=2048)
+            target = (project_dir / "frontend/src/theme.ts") if project_dir else None
+            out = self._call_nim(self._messages(prompt), max_tokens=2048, target_file=target)
             return {"frontend/src/theme.ts": out}
         elif stack == "flutter-fastapi":
             prompt = (
@@ -10796,7 +10820,8 @@ class DesignerAgent(SpecializedAgent):
                 "Write lib/theme.dart — a Flutter file that defines AppTheme with a dark ThemeData. "
                 "Primary color #38bdf8, background #0f172a. Export: class AppTheme {{ static ThemeData dark() {{...}} }}"
             )
-            out = self._call_nim(self._messages(prompt), max_tokens=2048)
+            target = (project_dir / "lib/theme.dart") if project_dir else None
+            out = self._call_nim(self._messages(prompt), max_tokens=2048, target_file=target)
             return {"lib/theme.dart": out}
         else:
             return {}  # expo-node: minimal theme
@@ -10810,13 +10835,12 @@ class FrontendAgent(SpecializedAgent):
         "Use the dark color system: primary=#38bdf8, bg=#0f172a, surface=#1e293b."
     )
 
-    def run(self, ctx: Dict[str, Any]) -> Dict[str, str]:
+    def run(self, ctx: Dict[str, Any], project_dir: Optional[Path] = None) -> Dict[str, str]:
         stack = ctx["stack"]
         arch = ctx.get("ARCHITECTURE.md", "")[:2000]
         results: Dict[str, str] = {}
 
         if stack in ("fastapi-react", "nextjs-postgres"):
-            # Generate a real feature component
             prompt = (
                 f"Project: {ctx['project_name']}\nDescription: {ctx['description']}\n"
                 f"Architecture:\n{arch}\n\n"
@@ -10825,9 +10849,9 @@ class FrontendAgent(SpecializedAgent):
                 "and renders a polished dark-mode card. Include hover effects via inline style state. "
                 "Export as: export default function ProjectCard({{ project }}: {{ project: any }}) {{...}}"
             )
-            results["frontend/src/components/ProjectCard.tsx"] = self._call_nim(self._messages(prompt), max_tokens=3000)
+            t1 = (project_dir / "frontend/src/components/ProjectCard.tsx") if project_dir else None
+            results["frontend/src/components/ProjectCard.tsx"] = self._call_nim(self._messages(prompt), max_tokens=3000, target_file=t1)
 
-            # Generate a chat/builder UI component
             prompt2 = (
                 f"Project: {ctx['project_name']}\n\n"
                 "Write frontend/src/components/ChatPanel.tsx — a React component for an AI chat interface. "
@@ -10836,7 +10860,8 @@ class FrontendAgent(SpecializedAgent):
                 "Assistant messages render in #1e293b bubbles, user messages in #38bdf8 bubbles. "
                 "Export as: export default function ChatPanel() {{...}}"
             )
-            results["frontend/src/components/ChatPanel.tsx"] = self._call_nim(self._messages(prompt2), max_tokens=3000)
+            t2 = (project_dir / "frontend/src/components/ChatPanel.tsx") if project_dir else None
+            results["frontend/src/components/ChatPanel.tsx"] = self._call_nim(self._messages(prompt2), max_tokens=3000, target_file=t2)
 
         elif stack == "flutter-fastapi":
             prompt = (
@@ -10845,7 +10870,8 @@ class FrontendAgent(SpecializedAgent):
                 "a dark-mode project card given name, description, and status strings. "
                 "Use Card, ListTile, and Chip widgets. Export: class ProjectCard extends StatelessWidget {{...}}"
             )
-            results["lib/widgets/project_card.dart"] = self._call_nim(self._messages(prompt), max_tokens=2000)
+            t = (project_dir / "lib/widgets/project_card.dart") if project_dir else None
+            results["lib/widgets/project_card.dart"] = self._call_nim(self._messages(prompt), max_tokens=2000, target_file=t)
 
         elif stack == "expo-node":
             prompt = (
@@ -10855,7 +10881,8 @@ class FrontendAgent(SpecializedAgent):
                 "Dark background #1e293b, primary #38bdf8. "
                 "Export as: export default function ProjectCard({{ project }}: {{ project: any }}) {{...}}"
             )
-            results["app/components/ProjectCard.tsx"] = self._call_nim(self._messages(prompt), max_tokens=2000)
+            t = (project_dir / "app/components/ProjectCard.tsx") if project_dir else None
+            results["app/components/ProjectCard.tsx"] = self._call_nim(self._messages(prompt), max_tokens=2000, target_file=t)
 
         return results
 
@@ -10868,7 +10895,7 @@ class BackendAgent(SpecializedAgent):
         "Follow REST conventions. Include proper error handling and input validation."
     )
 
-    def run(self, ctx: Dict[str, Any]) -> Dict[str, str]:
+    def run(self, ctx: Dict[str, Any], project_dir: Optional[Path] = None) -> Dict[str, str]:
         stack = ctx["stack"]
         arch = ctx.get("ARCHITECTURE.md", "")[:2000]
         results: Dict[str, str] = {}
@@ -10883,7 +10910,8 @@ class BackendAgent(SpecializedAgent):
                 "with OpenAI(base_url='https://integrate.api.nvidia.com/v1', api_key=api_key). "
                 "Return the assistant message content as a string. Include proper error handling."
             )
-            results["backend/nim_service.py"] = self._call_nim(self._messages(prompt), max_tokens=3000)
+            t1 = (project_dir / "backend/nim_service.py") if project_dir else None
+            results["backend/nim_service.py"] = self._call_nim(self._messages(prompt), max_tokens=3000, target_file=t1)
 
             prompt2 = (
                 f"Project: {ctx['project_name']}\n\n"
@@ -10893,7 +10921,8 @@ class BackendAgent(SpecializedAgent):
                 "Include streaming via StreamingResponse for large outputs. "
                 "Import: from backend.routers.auth import current_user, from backend.nim_service import generate_code"
             )
-            results["backend/routers/generate.py"] = self._call_nim(self._messages(prompt2), max_tokens=3000)
+            t2 = (project_dir / "backend/routers/generate.py") if project_dir else None
+            results["backend/routers/generate.py"] = self._call_nim(self._messages(prompt2), max_tokens=3000, target_file=t2)
 
         elif stack == "nextjs-postgres":
             prompt = (
@@ -10903,7 +10932,8 @@ class BackendAgent(SpecializedAgent):
                 "(https://integrate.api.nvidia.com/v1/chat/completions) using fetch with streaming. "
                 "Return a ReadableStream of text chunks. Use process.env.NIM_API_KEY."
             )
-            results["app/api/generate/route.ts"] = self._call_nim(self._messages(prompt), max_tokens=3000)
+            t = (project_dir / "app/api/generate/route.ts") if project_dir else None
+            results["app/api/generate/route.ts"] = self._call_nim(self._messages(prompt), max_tokens=3000, target_file=t)
 
         elif stack == "expo-node":
             prompt = (
@@ -10912,7 +10942,8 @@ class BackendAgent(SpecializedAgent):
                 "POST /api/generate/code accepts {{prompt, stack}} and calls NVIDIA NIM using node-fetch. "
                 "Auth middleware: require Bearer JWT. Return {{code: string}}."
             )
-            results["server/routes/generate.js"] = self._call_nim(self._messages(prompt), max_tokens=3000)
+            t = (project_dir / "server/routes/generate.js") if project_dir else None
+            results["server/routes/generate.js"] = self._call_nim(self._messages(prompt), max_tokens=3000, target_file=t)
 
         return results
 
@@ -10924,7 +10955,7 @@ class DatabaseAgent(SpecializedAgent):
         "Write complete SQLAlchemy models or Prisma schemas. No placeholder fields."
     )
 
-    def run(self, ctx: Dict[str, Any]) -> Dict[str, str]:
+    def run(self, ctx: Dict[str, Any], project_dir: Optional[Path] = None) -> Dict[str, str]:
         stack = ctx["stack"]
         arch = ctx.get("ARCHITECTURE.md", "")[:2000]
         results: Dict[str, str] = {}
@@ -10938,7 +10969,8 @@ class DatabaseAgent(SpecializedAgent):
                 "Project model (id UUID pk, owner_id FK→users, name, description, status, stack, created_at, updated_at). "
                 "Use proper types: String, DateTime, ForeignKey. Add __repr__ methods."
             )
-            results["backend/models.py"] = self._call_nim(self._messages(prompt), max_tokens=3000)
+            t1 = (project_dir / "backend/models.py") if project_dir else None
+            results["backend/models.py"] = self._call_nim(self._messages(prompt), max_tokens=3000, target_file=t1)
 
             prompt2 = (
                 "Write backend/database.py — SQLAlchemy 2.x database setup. "
@@ -10946,7 +10978,8 @@ class DatabaseAgent(SpecializedAgent):
                 "Include: engine, SessionLocal = sessionmaker(...), get_db() FastAPI dependency, init_db() that calls Base.metadata.create_all. "
                 "Import Base from backend.models."
             )
-            results["backend/database.py"] = self._call_nim(self._messages(prompt2), max_tokens=2000)
+            t2 = (project_dir / "backend/database.py") if project_dir else None
+            results["backend/database.py"] = self._call_nim(self._messages(prompt2), max_tokens=2000, target_file=t2)
 
         return results
 
@@ -10959,7 +10992,7 @@ class TesterAgent(SpecializedAgent):
         "Use httpx.TestClient or fastapi.testclient.TestClient for API tests."
     )
 
-    def run(self, ctx: Dict[str, Any]) -> Dict[str, str]:
+    def run(self, ctx: Dict[str, Any], project_dir: Optional[Path] = None) -> Dict[str, str]:
         stack = ctx["stack"]
         results: Dict[str, str] = {}
 
@@ -10977,7 +11010,8 @@ class TesterAgent(SpecializedAgent):
                 "Use: from fastapi.testclient import TestClient; from backend.main import app\n"
                 "client = TestClient(app)"
             )
-            results["tests/test_api.py"] = self._call_nim(self._messages(prompt), max_tokens=4000)
+            t1 = (project_dir / "tests/test_api.py") if project_dir else None
+            results["tests/test_api.py"] = self._call_nim(self._messages(prompt), max_tokens=4000, target_file=t1)
 
             results["tests/__init__.py"] = ""
             results["tests/conftest.py"] = (
@@ -10997,7 +11031,8 @@ class TesterAgent(SpecializedAgent):
                 "Test: health endpoint, register, login, create project endpoints.\n"
                 "Use: const BASE = 'http://localhost:3000'"
             )
-            results["tests/api.test.ts"] = self._call_nim(self._messages(prompt), max_tokens=3000)
+            t = (project_dir / "tests/api.test.ts") if project_dir else None
+            results["tests/api.test.ts"] = self._call_nim(self._messages(prompt), max_tokens=3000, target_file=t)
 
         return results
 
@@ -11009,7 +11044,7 @@ class DevOpsAgent(SpecializedAgent):
         "Never output markdown fences or explanations in your files."
     )
 
-    def run(self, ctx: Dict[str, Any]) -> Dict[str, str]:
+    def run(self, ctx: Dict[str, Any], project_dir: Optional[Path] = None) -> Dict[str, str]:
         results: Dict[str, str] = {}
 
         # GitHub Actions CI
@@ -11022,7 +11057,8 @@ class DevOpsAgent(SpecializedAgent):
             "4. Runs tests (pytest for Python, npm test for Node)\n"
             "Use ubuntu-latest runner."
         )
-        results[".github/workflows/ci.yml"] = self._call_nim(self._messages(prompt), max_tokens=2000)
+        t1 = (project_dir / ".github/workflows/ci.yml") if project_dir else None
+        results[".github/workflows/ci.yml"] = self._call_nim(self._messages(prompt), max_tokens=2000, target_file=t1)
 
         # VERIFICATION.md
         prompt2 = (
@@ -11033,7 +11069,8 @@ class DevOpsAgent(SpecializedAgent):
             "Include checks for: auth works, projects CRUD works, Docker builds, CI passes, preview loads.\n"
             "Mark all as: ✅ Implemented"
         )
-        results["VERIFICATION.md"] = self._call_nim(self._messages(prompt2), max_tokens=2000)
+        t2 = (project_dir / "VERIFICATION.md") if project_dir else None
+        results["VERIFICATION.md"] = self._call_nim(self._messages(prompt2), max_tokens=2000, target_file=t2)
 
         return results
 
@@ -11118,13 +11155,14 @@ class GenerationOrchestrator:
         for agent in agents:
             _prog(agent.role, f"Running {agent.role} agent…")
             try:
-                files = agent.run(ctx)
+                files = agent.run(ctx, project_dir=project_dir)
                 for rel_path, content in files.items():
                     if not content.strip():
                         continue
                     dest = project_dir / rel_path
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    dest.write_text(content, encoding="utf-8")
+                    if not dest.exists():
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        dest.write_text(content, encoding="utf-8")
                     result.files_generated.append(rel_path)
                     # Feed artifact content back into ctx for downstream agents
                     ctx[rel_path] = content
