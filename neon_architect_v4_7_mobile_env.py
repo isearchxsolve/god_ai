@@ -9508,7 +9508,7 @@ uvicorn[standard]>=0.30.0
 sqlalchemy>=2.0.0
 alembic>=1.13.0
 python-jose[cryptography]>=3.3.0
-passlib[bcrypt]>=1.7.4
+bcrypt>=4.1.0
 python-multipart>=0.0.9
 pydantic-settings>=2.2.0
 httpx>=0.27.0
@@ -9548,22 +9548,31 @@ router = APIRouter()
 
 @router.get("/health")
 def health():
-    return {"status": "ok", "service": "{project_name}"}
+    return {{"status": "ok", "service": "{project_name}"}}
 """,
         "backend/routers/auth.py": """\
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
-from passlib.context import CryptContext
+import bcrypt
 from jose import jwt, JWTError
 from datetime import datetime, timedelta
 import os
 
 router = APIRouter()
-pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 SECRET = os.getenv("JWT_SECRET", "change-me-in-production")
 ALGORITHM = "HS256"
 security = HTTPBearer(auto_error=False)
+# bcrypt has a hard 72-byte input limit; truncate defensively.
+_BCRYPT_MAX_BYTES = 72
+
+def _hash_password(password: str) -> str:
+    truncated = password.encode("utf-8")[:_BCRYPT_MAX_BYTES]
+    return bcrypt.hashpw(truncated, bcrypt.gensalt()).decode("utf-8")
+
+def _verify_password(password: str, hashed: str) -> bool:
+    truncated = password.encode("utf-8")[:_BCRYPT_MAX_BYTES]
+    return bcrypt.checkpw(truncated, hashed.encode("utf-8"))
 
 # In-memory user store (replace with DB in production)
 _users: dict = {{}}
@@ -9593,13 +9602,13 @@ def current_user(creds: HTTPAuthorizationCredentials = Depends(security)):
 def register(body: RegisterIn):
     if body.email in _users:
         raise HTTPException(400, "Email already registered")
-    _users[body.email] = pwd_ctx.hash(body.password)
+    _users[body.email] = _hash_password(body.password)
     return {{"token": _make_token(body.email)}}
 
 @router.post("/login")
 def login(body: LoginIn):
     hashed = _users.get(body.email)
-    if not hashed or not pwd_ctx.verify(body.password, hashed):
+    if not hashed or not _verify_password(body.password, hashed):
         raise HTTPException(401, "Invalid credentials")
     return {{"token": _make_token(body.email)}}
 
@@ -9993,7 +10002,7 @@ docker compose up --build
 |-------|-----------|
 | Frontend | React 18 + Vite + TypeScript |
 | Backend | FastAPI + Uvicorn |
-| Auth | JWT (jose + passlib) |
+| Auth | JWT (jose + bcrypt) |
 | State | Zustand |
 | Data fetching | TanStack Query |
 
@@ -10243,6 +10252,18 @@ class AuthStore extends ChangeNotifier {{
     notifyListeners();
   }}
 
+  Future<void> register(String em, String pw) async {{
+    final res = await http.post(Uri.parse('$_base/auth/register'),
+        headers: {{'Content-Type': 'application/json'}},
+        body: jsonEncode({{'email': em, 'password': pw}}));
+    if (res.statusCode != 200) throw Exception('Registration failed');
+    final data = jsonDecode(res.body);
+    token = data['token']; email = em;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('token', token!); await prefs.setString('email', email!);
+    notifyListeners();
+  }}
+
   Future<void> logout() async {{
     token = null; email = null;
     final prefs = await SharedPreferences.getInstance();
@@ -10266,11 +10287,16 @@ class _LoginScreenState extends State<LoginScreen> {{
   final _email = TextEditingController();
   final _pw = TextEditingController();
   String _err = '';
+  bool _isRegister = false;
 
   Future<void> _submit() async {{
     setState(() => _err = '');
     try {{
-      await context.read<AuthStore>().login(_email.text, _pw.text);
+      if (_isRegister) {{
+        await context.read<AuthStore>().register(_email.text, _pw.text);
+      }} else {{
+        await context.read<AuthStore>().login(_email.text, _pw.text);
+      }}
     }} catch (e) {{
       setState(() => _err = e.toString());
     }}
@@ -10282,13 +10308,20 @@ class _LoginScreenState extends State<LoginScreen> {{
       decoration: BoxDecoration(color: const Color(0xFF1e293b), borderRadius: BorderRadius.circular(16)),
       child: Column(mainAxisSize: MainAxisSize.min, children: [
         Text('{project_name}', style: const TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: Color(0xFF38bdf8))),
-        const SizedBox(height: 32),
+        const SizedBox(height: 8),
+        Text(_isRegister ? 'Create your account' : 'Sign in to continue', style: const TextStyle(color: Color(0xFF94a3b8))),
+        const SizedBox(height: 24),
         TextField(controller: _email, decoration: const InputDecoration(labelText: 'Email', filled: true)),
         const SizedBox(height: 12),
         TextField(controller: _pw, obscureText: true, decoration: const InputDecoration(labelText: 'Password', filled: true)),
         if (_err.isNotEmpty) ...[const SizedBox(height: 8), Text(_err, style: const TextStyle(color: Colors.red))],
         const SizedBox(height: 24),
-        SizedBox(width: double.infinity, child: ElevatedButton(onPressed: _submit, child: const Text('Sign In'))),
+        SizedBox(width: double.infinity, child: ElevatedButton(onPressed: _submit, child: Text(_isRegister ? 'Create Account' : 'Sign In'))),
+        const SizedBox(height: 16),
+        TextButton(
+          onPressed: () => setState(() => _isRegister = !_isRegister),
+          child: Text(_isRegister ? 'Already have an account? Sign in' : "Don't have an account? Register"),
+        ),
       ]),
     )),
   );
@@ -10317,7 +10350,7 @@ class DashboardScreen extends StatelessWidget {{
 fastapi>=0.111.0
 uvicorn[standard]>=0.30.0
 python-jose[cryptography]>=3.3.0
-passlib[bcrypt]>=1.7.4
+bcrypt>=4.1.0
 python-multipart>=0.0.9
 """,
         "backend/main.py": """\
@@ -10342,16 +10375,24 @@ def health():
         "backend/routers/auth.py": """\
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from passlib.context import CryptContext
+import bcrypt
 from jose import jwt
 from datetime import datetime, timedelta
 import os
 
 router = APIRouter()
-pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 SECRET = os.getenv("JWT_SECRET", "change-me")
 ALGORITHM = "HS256"
 _users: dict = {{}}
+_BCRYPT_MAX_BYTES = 72
+
+def _hash_password(password: str) -> str:
+    truncated = password.encode("utf-8")[:_BCRYPT_MAX_BYTES]
+    return bcrypt.hashpw(truncated, bcrypt.gensalt()).decode("utf-8")
+
+def _verify_password(password: str, hashed: str) -> bool:
+    truncated = password.encode("utf-8")[:_BCRYPT_MAX_BYTES]
+    return bcrypt.checkpw(truncated, hashed.encode("utf-8"))
 
 class LoginIn(BaseModel):
     email: str
@@ -10363,13 +10404,13 @@ def _token(email: str) -> str:
 @router.post("/register")
 def register(body: LoginIn):
     if body.email in _users: raise HTTPException(400, "Already registered")
-    _users[body.email] = pwd_ctx.hash(body.password)
+    _users[body.email] = _hash_password(body.password)
     return {{"token": _token(body.email)}}
 
 @router.post("/login")
 def login(body: LoginIn):
     h = _users.get(body.email)
-    if not h or not pwd_ctx.verify(body.password, h): raise HTTPException(401, "Invalid credentials")
+    if not h or not _verify_password(body.password, h): raise HTTPException(401, "Invalid credentials")
     return {{"token": _token(body.email)}}
 """,
         "docker-compose.yml": """\
@@ -11306,7 +11347,7 @@ class GenerateAppTool(Tool):
 
 # ── Section F: /generate command handler ──────────────────────────────────────
 
-def _cmd_generate(raw: str, agent: "AgentCore") -> None:
+def _cmd_generate(raw: str, agent: "NeonArchitect") -> None:
     """Handle the /generate [stack] [description] slash command from the REPL loop."""
     parts = raw.split(None, 2)
     explicit_stack: Optional[str] = None
