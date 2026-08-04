@@ -1402,6 +1402,23 @@ class ProviderPool:
         for _ in range(len(self.providers)):
             p = self.current()
             if p.available() and p.bucket.try_acquire():
+                # Advance the index now, on hand-out, not only when a
+                # provider is found unavailable. Previously self.index
+                # only ever moved inside the `else: self.rotate()`
+                # branch below — meaning that with every provider
+                # healthy, next_available() always returned
+                # self.providers[self.index] unchanged, since nothing
+                # ever advanced it on a success path. Confirmed via
+                # simulation: 3 healthy providers, 6 consecutive calls,
+                # same provider returned every time. That's not a
+                # resilience bug (failure cooldown/permanent-disable
+                # still route around a broken provider correctly via
+                # this same loop) — it's a load-spreading bug: capacity
+                # on 2 of 3 configured providers went completely unused
+                # under normal healthy operation, concentrating rate
+                # limits and cost on a single account instead of
+                # spreading across the pool as configured.
+                self.rotate()
                 return p
             self.rotate()
         return None
@@ -2816,6 +2833,92 @@ class RunTool(Tool):
                 missing.append(path_part)
         return missing
 
+    # ── Optional Docker isolation ────────────────────────────────────────
+    # Everything above this point already closes the injection/traversal
+    # surface (no shell, argv-only, program allowlist, cwd containment).
+    # What it does NOT do is give the executed program its own filesystem/
+    # network/process boundary — a legitimate `pytest` run (or a test file
+    # the generation agents wrote) still executes with the real OS user's
+    # full privileges: real network access, ability to touch anything that
+    # user can touch outside project_dir via absolute paths embedded in
+    # code, resource exhaustion, etc. This wraps execution in `docker run`
+    # when available and opted into; when it isn't, behavior is unchanged
+    # from before — this is additive, not a replacement for the argv-only
+    # design above.
+    _SANDBOX_IMAGE = os.environ.get("NEON_SANDBOX_IMAGE", "neon-sandbox:latest")
+
+    @classmethod
+    def _docker_available(cls) -> bool:
+        if os.environ.get("NEON_SANDBOX_DOCKER", "").strip().lower() not in ("1", "true", "yes"):
+            return False
+        return shutil.which("docker") is not None
+
+    @classmethod
+    def _wrap_argv_for_docker(cls, argv: List[str], cwd: Path, project_root: Path) -> Optional[List[str]]:
+        """Wrap a resolved argv in `docker run` against the project root,
+        network-disabled, filesystem-scoped to the project via a bind
+        mount, non-root, with hard resource limits. Returns None if the
+        program isn't one we know how to translate inside the container
+        (host-path-resolved binaries like a venv interpreter or a
+        gradlew wrapper don't make sense to run inside an image that
+        wasn't built with that exact venv/SDK) — callers fall back to
+        direct execution in that case.
+        """
+        if not argv:
+            return None
+        host_bin = Path(argv[0])
+        # Only programs resolvable by bare name inside the container image
+        # (not a host-specific absolute path like a project .venv's
+        # python, or a project-local gradlew script) get containerized.
+        # Those two cases still run directly — they depend on host-only
+        # state a generic image wouldn't have anyway.
+        if host_bin.is_absolute():
+            return None
+        try:
+            rel_cwd = cwd.resolve().relative_to(project_root.resolve())
+        except ValueError:
+            return None
+        container_cwd = "/work" if str(rel_cwd) == "." else f"/work/{rel_cwd.as_posix()}"
+        return [
+            "docker", "run", "--rm",
+            "--network", "none",
+            "--memory", "1g",
+            "--cpus", "2",
+            "--pids-limit", "256",
+            "--user", "1000:1000",
+            "--security-opt", "no-new-privileges",
+            "--cap-drop", "ALL",
+            "-v", f"{project_root.resolve()}:/work",
+            "-w", container_cwd,
+            cls._SANDBOX_IMAGE,
+            *argv,
+        ]
+
+    def _run_argv(self, argv: List[str], cwd: Path, timeout: int) -> "subprocess.CompletedProcess":
+        """Single execution path used by both the primary run and the
+        Windows-shim fallback below — tries Docker first when opted in
+        and applicable, falls back to direct subprocess.run otherwise.
+        """
+        if self._docker_available():
+            wrapped = self._wrap_argv_for_docker(argv, cwd, self.cwd)
+            if wrapped is not None:
+                try:
+                    return subprocess.run(
+                        wrapped, shell=False, cwd=str(self.cwd),
+                        capture_output=True, text=True, encoding="utf-8", errors="replace",
+                        timeout=timeout,
+                    )
+                except FileNotFoundError:
+                    # docker itself vanished mid-session or image is
+                    # missing — fall through to direct execution rather
+                    # than hard-failing the whole tool call.
+                    pass
+        return subprocess.run(
+            argv, shell=False, cwd=str(cwd),
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=timeout,
+        )
+
     def execute(self, program: str = "", args: Optional[List[str]] = None,
                 cwd_subpath: Optional[str] = None, timeout: int = 120,
                 _confirmed_destructive: bool = False) -> ToolResult:
@@ -2933,21 +3036,13 @@ class RunTool(Tool):
             argv = [resolved, *args]
 
             try:
-                result = subprocess.run(
-                    argv, shell=False, cwd=str(cwd),
-                    capture_output=True, text=True, encoding="utf-8", errors="replace",
-                    timeout=timeout,
-                )
+                result = self._run_argv(argv, cwd, timeout)
             except FileNotFoundError:
                 result = None
                 last_err = None
                 for candidate in self._windows_shim_variants(resolved):
                     try:
-                        result = subprocess.run(
-                            [candidate, *args], shell=False, cwd=str(cwd),
-                            capture_output=True, text=True, encoding="utf-8", errors="replace",
-                            timeout=timeout,
-                        )
+                        result = self._run_argv([candidate, *args], cwd, timeout)
                         break
                     except FileNotFoundError as e:
                         last_err = e
@@ -5215,6 +5310,8 @@ class NeonArchitect:
             if _GENERATION_LAYER_READY:
                 _gen_tool = GenerateAppTool(self.project_dir, self.pool, self.config)
                 self.tools[_gen_tool.name] = _gen_tool
+                _deploy_tool = DeployTool(self.project_dir, self.config)
+                self.tools[_deploy_tool.name] = _deploy_tool
         except Exception:
             pass  # generation layer not yet loaded (e.g. early import)
 
@@ -11155,14 +11252,31 @@ class DevOpsAgent(SpecializedAgent):
         )
         results[".github/workflows/ci.yml"] = self._call_nim(self._messages(prompt), max_tokens=2000)
 
-        # VERIFICATION.md
+        # VERIFICATION.md — grounded in actual test output, not asserted.
+        # DevOpsAgent runs before tests exist on the very first pass (no
+        # test_output in ctx yet), so this has to degrade honestly instead
+        # of assuming success either way.
+        test_output = ctx.get("test_output")  # TestRunResult | None, set by orchestrator after repair pass
+        if test_output is None:
+            test_section = "Tests have not been executed yet for this generation."
+        elif not test_output.ran:
+            test_section = f"Test runner did not run (no test files or unsupported stack).\n{test_output.output[:1500]}"
+        else:
+            test_section = (
+                f"Test run {'PASSED' if test_output.passed else 'FAILED'}.\n"
+                f"Raw output:\n{test_output.output[:3000]}"
+            )
         prompt2 = (
             f"Project: {ctx['project_name']}\nStack: {ctx['stack']}\n"
             f"Description: {ctx['description']}\n\n"
-            "Write VERIFICATION.md — a checklist document that verifies all acceptance criteria are met.\n"
+            f"Actual test results:\n{test_section}\n\n"
+            "Write VERIFICATION.md — a checklist verifying acceptance criteria.\n"
             "Format each item as: | Criterion | Test | Status |\n"
             "Include checks for: auth works, projects CRUD works, Docker builds, CI passes, preview loads.\n"
-            "Mark all as: ✅ Implemented"
+            "Mark a criterion ✅ Pass ONLY if the actual test results above confirm it. "
+            "If tests did not run, or failed, or don't cover a criterion, mark it "
+            "⚠️ Unverified or ❌ Fail as appropriate — do not mark anything Pass on the "
+            "assumption that it probably works."
         )
         results["VERIFICATION.md"] = self._call_nim(self._messages(prompt2), max_tokens=2000)
 
@@ -11170,6 +11284,21 @@ class DevOpsAgent(SpecializedAgent):
 
 
 # ── Section D: GenerationOrchestrator ────────────────────────────────────────
+
+@dataclass
+class TestRunResult:
+    """Outcome of actually invoking the test runner as a subprocess.
+
+    `ran` distinguishes "we invoked pytest/npm test and it told us
+    something" from "there was nothing to run" (no test files, no
+    runner for this stack, timeout) — the two must not collapse into
+    the same falsy state or a missing test suite silently reads as a
+    passing one.
+    """
+    ran: bool
+    passed: bool
+    output: str = ""
+
 
 @dataclass
 class GenerationResult:
@@ -11180,6 +11309,8 @@ class GenerationResult:
     files_generated: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
     stack: str = "fastapi-react"
+    test_output: Optional[TestRunResult] = None
+    repair_rounds: int = 0
 
 
 class GenerationOrchestrator:
@@ -11199,6 +11330,258 @@ class GenerationOrchestrator:
     def __init__(self, pool: "ProviderPool", config: Dict[str, Any]) -> None:
         self.pool = pool
         self.config = config
+
+    def _run_tests(self, project_dir: Path, stack: str) -> TestRunResult:
+        """Actually invoke the test runner. This is the piece that was
+        missing entirely — TesterAgent previously only wrote a file to
+        disk; nothing executed it. `ran=False` means we have no verdict
+        (no runner for this stack, no test files, or the process itself
+        failed to start/timed out) — callers must not treat that as pass.
+        """
+        if stack in ("fastapi-react", "flutter-fastapi"):
+            if not (project_dir / "tests").exists():
+                return TestRunResult(ran=False, passed=False, output="No tests/ directory found.")
+            runner = shutil.which("pytest") or (shutil.which("python") and "python")
+            cmd = (
+                [runner, "-m", "pytest", "tests/", "-x", "--tb=short", "-q"]
+                if runner == "python"
+                else [runner, "tests/", "-x", "--tb=short", "-q"]
+            )
+        elif stack in ("nextjs-postgres", "expo-node"):
+            if not (project_dir / "package.json").exists():
+                return TestRunResult(ran=False, passed=False, output="No package.json found.")
+            npm = shutil.which("npm")
+            if not npm:
+                return TestRunResult(ran=False, passed=False, output="npm not found on PATH.")
+            cmd = [npm, "test", "--", "--ci"]
+        else:
+            return TestRunResult(ran=False, passed=False, output=f"No test runner defined for stack={stack!r}.")
+
+        try:
+            wrapped = None
+            if RunTool._docker_available():
+                wrapped = RunTool._wrap_argv_for_docker(cmd, project_dir, project_dir)
+            proc = subprocess.run(
+                wrapped if wrapped is not None else cmd,
+                cwd=str(project_dir) if wrapped is None else str(project_dir),
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            output = (proc.stdout or "") + (proc.stderr or "")
+            return TestRunResult(ran=True, passed=proc.returncode == 0, output=output[-6000:])
+        except FileNotFoundError as e:
+            return TestRunResult(ran=False, passed=False, output=f"Test runner not found: {e}")
+        except subprocess.TimeoutExpired:
+            return TestRunResult(ran=False, passed=False, output="Test run timed out after 120s.")
+        except Exception as e:
+            return TestRunResult(ran=False, passed=False, output=f"Test run failed to execute: {e}")
+
+    def _repair_pass(
+        self,
+        ctx: Dict[str, Any],
+        project_dir: Path,
+        result: GenerationResult,
+        on_progress: Optional[Any],
+        max_rounds: int = 3,
+        seed_failure_output: Optional[str] = None,
+    ) -> TestRunResult:
+        """Run tests; on failure, ask the model for targeted file fixes and
+        retry, up to max_rounds. Returns the final TestRunResult (which may
+        still be failing or unrun after exhausting rounds — that's a real
+        outcome, not swallowed into success).
+
+        seed_failure_output, when given, is treated as an opening-round
+        failure even before any test executes — used to fold static
+        cross-file consistency problems into the same repair mechanism
+        instead of needing a separate one.
+        """
+        def _prog(phase: str, msg: str) -> None:
+            if on_progress:
+                on_progress(phase, msg)
+            else:
+                UI.info(f"[{phase}] {msg}")
+
+        repair_agent = SpecializedAgent(self.pool, self.config)
+        repair_agent.role = "repair"
+        repair_agent._system_prompt = (
+            "You are a senior engineer fixing failing tests. Given failing test "
+            "output and the current content of relevant files, return ONLY a JSON "
+            "object mapping relative file paths to their full corrected content. "
+            "No markdown fences, no explanation, no partial diffs — full file "
+            "content for every file you change. Example: "
+            '{"backend/main.py": "<full corrected file>"}'
+        )
+
+        if seed_failure_output:
+            test_result = TestRunResult(ran=True, passed=False, output=seed_failure_output)
+        else:
+            test_result = self._run_tests(project_dir, ctx["stack"])
+            if not test_result.ran:
+                _prog("test", f"⚠ tests did not run: {test_result.output[:200]}")
+                return test_result
+            if test_result.passed:
+                _prog("test", "✓ tests passed on first run")
+                return test_result
+
+        for round_n in range(1, max_rounds + 1):
+            _prog("repair", f"round {round_n}/{max_rounds}: tests failing, requesting fix…")
+
+            # Only the files this orchestrator actually generated are fair
+            # game to patch, and we send real current content — not the
+            # truncated docs the generation agents got — since a repair
+            # needs the actual broken code, not a summary of it.
+            candidate_paths = [
+                p for p in result.files_generated
+                if p.endswith((".py", ".ts", ".tsx", ".js", ".dart"))
+            ]
+            file_blob = ""
+            for rel_path in candidate_paths[:12]:
+                fp = project_dir / rel_path
+                if fp.exists():
+                    file_blob += f"\n--- {rel_path} ---\n{fp.read_text(encoding='utf-8', errors='replace')[:3000]}\n"
+
+            prompt = (
+                f"Stack: {ctx['stack']}\n\n"
+                f"Failing test output:\n{test_result.output[:4000]}\n\n"
+                f"Current file contents:\n{file_blob[:12000]}\n\n"
+                "Return corrected file contents as a JSON object: "
+                '{"path/to/file": "full corrected content", ...}. '
+                "Only include files that actually need to change."
+            )
+
+            try:
+                raw = repair_agent._call_nim(repair_agent._messages(prompt), max_tokens=8000)
+                fixes = json.loads(raw)
+            except (json.JSONDecodeError, RuntimeError) as e:
+                result.errors.append(f"repair round {round_n}: could not parse/obtain fix — {e}")
+                _prog("repair", f"✗ round {round_n}: {e}")
+                continue
+
+            if not isinstance(fixes, dict) or not fixes:
+                result.errors.append(f"repair round {round_n}: model returned no usable fixes")
+                continue
+
+            for rel_path, content in fixes.items():
+                if not isinstance(content, str) or not content.strip():
+                    continue
+                # Same containment discipline as the rest of the pipeline —
+                # a repair fix is still model-controlled path input.
+                safe_rel = rel_path.strip().lstrip("/\\")
+                dest = (project_dir / safe_rel).resolve()
+                try:
+                    dest.relative_to(project_dir.resolve())
+                except ValueError:
+                    result.errors.append(f"repair round {round_n}: rejected out-of-tree path {rel_path!r}")
+                    continue
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(content, encoding="utf-8")
+                ctx[safe_rel] = content
+                if safe_rel not in result.files_generated:
+                    result.files_generated.append(safe_rel)
+
+            test_result = self._run_tests(project_dir, ctx["stack"])
+            if not test_result.ran:
+                # No test runner/files for this stack after the repair
+                # write — nothing more the repair loop can validate
+                # against. Stop here rather than burning remaining rounds
+                # re-requesting fixes with no way to confirm they helped.
+                _prog("repair", f"⚠ round {round_n}: tests still don't run — {test_result.output[:150]}")
+                return test_result
+            if test_result.passed:
+                _prog("repair", f"✓ tests passed after round {round_n}")
+                result.repair_rounds = round_n
+                return test_result
+
+        result.repair_rounds = max_rounds
+        _prog("repair", f"✗ tests still failing after {max_rounds} repair round(s)")
+        return test_result
+
+    def _check_python_import_consistency(
+        self, project_dir: Path, generated_paths: List[str]
+    ) -> List[str]:
+        """Static cross-file check for the specific failure mode described
+        in the review: BackendAgent and DatabaseAgent (and others) each
+        write Python files in separate, independent LLM calls, seeing only
+        truncated ARCHITECTURE.md text — not each other's actual code — so
+        an import like `from backend.database import Base` can reference a
+        module DatabaseAgent never actually created, or named differently.
+
+        This does NOT execute anything — it's ast.parse plus a name-exists
+        check against the project's own generated Python files, so it also
+        catches problems a test suite might never exercise (an import at
+        module load time that isn't covered by any generated test). Returns
+        a list of human-readable problem descriptions; empty means clean.
+        """
+        py_files = [p for p in generated_paths if p.endswith(".py")]
+        if not py_files:
+            return []
+
+        # Map "backend.database" -> "backend/database.py" (and package
+        # __init__ forms) so we can check `from backend.database import X`
+        # style imports against what was actually written to disk.
+        module_map: Dict[str, str] = {}
+        for rel_path in py_files:
+            mod = rel_path[:-3].replace("/", ".").replace("\\", ".")
+            module_map[mod] = rel_path
+            if mod.endswith(".__init__"):
+                module_map[mod[: -len(".__init__")]] = rel_path
+
+        problems: List[str] = []
+        for rel_path in py_files:
+            fp = project_dir / rel_path
+            if not fp.exists():
+                continue
+            try:
+                source = fp.read_text(encoding="utf-8", errors="replace")
+                tree = ast.parse(source, filename=rel_path)
+            except SyntaxError as e:
+                problems.append(f"{rel_path}: syntax error — {e.msg} (line {e.lineno})")
+                continue
+
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom):
+                    if node.level and node.level > 0:
+                        continue  # relative import — out of scope for this pass
+                    if not node.module or not node.module.startswith(
+                        tuple(m.split(".")[0] for m in module_map) or ("__nomatch__",)
+                    ):
+                        continue  # third-party import (fastapi, sqlalchemy, ...) — not ours to check
+                    if node.module in module_map:
+                        continue
+                    # No escape clause here on purpose. An earlier version
+                    # tried to excuse an import when its *ancestor* package
+                    # was generated (e.g. "backend.database" excused by the
+                    # presence of "backend" itself from backend/__init__.py)
+                    # — but a package's own __init__.py existing says
+                    # nothing about whether a specific submodule under it
+                    # was ever written. Verified via harness: that escape
+                    # let `from backend.database import Base` pass clean
+                    # even though backend/database.py was never generated —
+                    # exactly the failure this check exists to catch. The
+                    # only real escape is an exact match in module_map
+                    # (handled by the `if node.module in module_map` check
+                    # above); anything else sharing our top-level package
+                    # name but without its own generated file is reported.
+                    problems.append(
+                        f"{rel_path}: imports '{node.module}' but no generated file "
+                        f"provides that module (generated: {sorted(module_map)})"
+                    )
+                elif isinstance(node, ast.Import):
+                    for alias in node.names:
+                        top = alias.name.split(".")[0]
+                        if any(m.split(".")[0] == top for m in module_map) and alias.name not in module_map:
+                            # Same fix as the ImportFrom branch above: no
+                            # ancestor-package escape — module_map already
+                            # contains an exact-match check (`alias.name
+                            # not in module_map`); a shared top-level
+                            # package name without its own generated file
+                            # is reported, not excused.
+                            problems.append(
+                                f"{rel_path}: imports '{alias.name}' but no generated file "
+                                f"provides that module"
+                            )
+        return problems
 
     def generate(
         self,
@@ -11244,8 +11627,12 @@ class GenerationOrchestrator:
             result.errors.append(f"Scaffold failed: {e}")
             _prog("scaffold", f"✗ Scaffold error: {e}")
 
-        # Phase 2: Run agents
-        agents = [cls(self.pool, self.config) for cls in self.AGENTS]
+        # Phase 2: Run agents (Planner..Tester), then repair, then DevOps —
+        # DevOpsAgent is pulled out of the fixed sequence so its
+        # VERIFICATION.md prompt can see the real test_output in ctx
+        # instead of running blind before any test has been executed.
+        pre_devops = [cls for cls in self.AGENTS if cls is not DevOpsAgent]
+        agents = [cls(self.pool, self.config) for cls in pre_devops]
         for agent in agents:
             _prog(agent.role, f"Running {agent.role} agent…")
             try:
@@ -11265,7 +11652,71 @@ class GenerationOrchestrator:
                 result.errors.append(err)
                 _prog(agent.role, f"✗ {err}")
 
-        result.success = len(result.errors) == 0 or len(result.files_generated) > 0
+        # Phase 2.5: static cross-file consistency check (ast-based) —
+        # catches import mismatches between independently-generated
+        # Python files (e.g. BackendAgent importing a module DatabaseAgent
+        # never wrote) before spending a test-run round-trip to discover
+        # the same thing, and catches ones a generated test might not
+        # exercise at all.
+        import_problems = self._check_python_import_consistency(project_dir, result.files_generated)
+        if import_problems:
+            _prog("consistency", f"✗ {len(import_problems)} cross-file import issue(s) found — folding into repair")
+            for p in import_problems:
+                result.errors.append(f"consistency: {p}")
+        else:
+            _prog("consistency", "✓ no cross-file import mismatches detected")
+
+        # Phase 3: run tests for real, repair on failure, cap at 3 rounds.
+        # This is the loop that was previously absent entirely — TesterAgent
+        # wrote tests/test_api.py and nothing ever executed it. If the
+        # static check above found import problems, seed them as the
+        # opening failure so round 1 fixes those even if the generated
+        # test suite wouldn't itself have caught them.
+        test_result = self._repair_pass(
+            ctx, project_dir, result, on_progress,
+            seed_failure_output=(
+                "Static import-consistency check found the following issues "
+                "(fix these first — a module referenced by import does not "
+                "exist among the generated files):\n" + "\n".join(import_problems)
+            ) if import_problems else None,
+        )
+        result.test_output = test_result
+        ctx["test_output"] = test_result
+
+        # Phase 4: DevOps now runs with real test_output available, so
+        # VERIFICATION.md reflects what actually happened.
+        devops = DevOpsAgent(self.pool, self.config)
+        _prog(devops.role, f"Running {devops.role} agent…")
+        try:
+            files = devops.run(ctx)
+            for rel_path, content in files.items():
+                if not content.strip():
+                    continue
+                dest = project_dir / rel_path
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(content, encoding="utf-8")
+                result.files_generated.append(rel_path)
+                ctx[rel_path] = content
+            _prog(devops.role, f"✓ {devops.role}: {len(files)} file(s) generated")
+        except Exception as e:
+            err = f"{devops.role} failed: {e}"
+            result.errors.append(err)
+            _prog(devops.role, f"✗ {err}")
+
+        # success now requires: no hard agent failures AND tests either
+        # passed or genuinely couldn't be run (missing runner is a
+        # separate, visible failure mode, not silently "successful").
+        # A test run that executed and failed is never success, regardless
+        # of how many files got written — this replaces the previous
+        # `len(errors) == 0 or len(files_generated) > 0`, which reported
+        # success on a single stray file with seven agents having thrown.
+        if not test_result.ran:
+            result.success = len(result.errors) == 0
+            if test_result.ran is False:
+                _prog("verdict", f"⚠ success={result.success} but tests never ran — verify manually")
+        else:
+            result.success = len(result.errors) == 0 and test_result.passed
+
         return result
 
 
@@ -11412,6 +11863,212 @@ class LivePreviewManager:
                     pass
 
 atexit.register(LivePreviewManager.stop_all)
+
+
+# ── Section G-pre: DeployTool ─────────────────────────────────────────────────
+
+class DeployTool(Tool):
+    """Closes the "LivePreviewManager isn't deployment" gap: LivePreviewManager
+    only ever gives you localhost. This tool does the two cheapest REAL
+    deploy actions rather than another local process:
+
+    1. git_push_github — creates a GitHub repo via the REST API (api.github.com
+       is already an allowed egress domain in this environment) and pushes the
+       project's current commit to it. This is the "own your code" story
+       Emergent/Lovable market, and it's genuinely a few dozen lines, not a
+       platform integration.
+    2. cli_deploy — shells out to whichever of vercel/netlify/flyctl/railway
+       CLI is actually installed and authenticated on this machine, against
+       the real project directory. This does NOT vendor API clients for each
+       platform — it uses argv-only subprocess the same way RunTool does
+       (no shell) and requires the person to have already run that CLI's own
+       login flow; this tool never touches or stores a deploy credential.
+
+    Neither of these is optional-feeling scaffolding — both produce a real,
+    externally reachable artifact (a GitHub repo URL, or a live deployment
+    URL) rather than another localhost process.
+    """
+
+    name = "deploy"
+    description = (
+        "Deploy the project to a real, externally reachable target — a GitHub "
+        "repository (git_push_github) or a hosting provider via its official "
+        "CLI (cli_deploy: vercel/netlify/flyctl/railway, whichever is installed "
+        "and already authenticated on this machine). This is NOT the local "
+        "preview server — use generate_app's preview for local dev, use this "
+        "when the person wants something they can actually share a URL to."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["git_push_github", "cli_deploy"],
+            },
+            "repo_name": {
+                "type": "string",
+                "description": "For git_push_github: repository name to create under the authenticated account.",
+            },
+            "private": {
+                "type": "boolean",
+                "description": "For git_push_github: create as a private repo.",
+                "default": True,
+            },
+            "provider": {
+                "type": "string",
+                "enum": ["vercel", "netlify", "flyctl", "railway"],
+                "description": "For cli_deploy: which CLI to invoke. Must already be installed and logged in.",
+            },
+        },
+        "required": ["action"],
+    }
+
+    def __init__(self, cwd: Path, config: Dict[str, Any]) -> None:
+        super().__init__(cwd)
+        self._config = config
+
+    def _github_token(self) -> Optional[str]:
+        # Never accept a token as a tool-call argument — that would put a
+        # credential in model-visible conversation history/logs. Only read
+        # it from the environment, same trust boundary as any other secret
+        # this process already has access to.
+        return os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+
+    def _git_push_github(self, repo_name: Optional[str], private: bool) -> "ToolResult":
+        if not HAS_HTTPX:
+            return ToolResult("", error="httpx not available — cannot call GitHub API.", is_error=True)
+        token = self._github_token()
+        if not token:
+            return ToolResult(
+                "",
+                error=(
+                    "No GITHUB_TOKEN (or GH_TOKEN) found in the environment. Set one "
+                    "with 'repo' scope and re-run — this tool will not accept a token "
+                    "as a tool-call argument, only from the environment."
+                ),
+                is_error=True,
+            )
+        if not (self.cwd / ".git").exists():
+            init = subprocess.run(["git", "init"], cwd=str(self.cwd), capture_output=True, text=True)
+            if init.returncode != 0:
+                return ToolResult("", error=f"git init failed: {init.stderr}", is_error=True)
+
+        name = repo_name or self.cwd.name
+        name = re.sub(r"[^a-zA-Z0-9._-]", "-", name).strip("-") or "generated-app"
+
+        try:
+            resp = httpx.post(
+                "https://api.github.com/user/repos",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/vnd.github+json",
+                },
+                json={"name": name, "private": bool(private)},
+                timeout=20,
+            )
+        except Exception as e:
+            return ToolResult("", error=f"GitHub API request failed: {e}", is_error=True)
+
+        if resp.status_code == 422:
+            # Repo likely already exists under this account — fetch it
+            # rather than treating "already exists" as a hard failure.
+            try:
+                who = httpx.get(
+                    "https://api.github.com/user",
+                    headers={"Authorization": f"Bearer {token}"}, timeout=20,
+                ).json()
+                login = who.get("login")
+                get_resp = httpx.get(
+                    f"https://api.github.com/repos/{login}/{name}",
+                    headers={"Authorization": f"Bearer {token}"}, timeout=20,
+                )
+                if get_resp.status_code != 200:
+                    return ToolResult("", error=f"Repo create returned 422 and lookup failed: {get_resp.text[:300]}", is_error=True)
+                repo_data = get_resp.json()
+            except Exception as e:
+                return ToolResult("", error=f"Repo may already exist but lookup failed: {e}", is_error=True)
+        elif resp.status_code not in (200, 201):
+            return ToolResult("", error=f"GitHub repo creation failed ({resp.status_code}): {resp.text[:300]}", is_error=True)
+        else:
+            repo_data = resp.json()
+
+        clone_url = repo_data.get("clone_url", "")
+        html_url = repo_data.get("html_url", "")
+        # Embed the token in the push URL for this one push only — never
+        # written to .git/config, so it doesn't persist on disk after
+        # this call returns.
+        auth_url = clone_url.replace("https://", f"https://x-access-token:{token}@") if clone_url else None
+        if not auth_url:
+            return ToolResult("", error="GitHub API response missing clone_url.", is_error=True)
+
+        steps = [
+            ["git", "add", "-A"],
+            ["git", "commit", "-m", "Generated by NEON ARCHITECT", "--allow-empty"],
+            ["git", "branch", "-M", "main"],
+            ["git", "push", auth_url, "main", "--force"],
+        ]
+        for step in steps:
+            r = subprocess.run(step, cwd=str(self.cwd), capture_output=True, text=True, timeout=60)
+            if r.returncode != 0 and step[1] != "commit":
+                # commit can legitimately fail with "nothing to commit" —
+                # not fatal. Any other step failing is.
+                return ToolResult(
+                    "", error=f"'{' '.join(step[:2])}' failed: {r.stderr[:500]}", is_error=True
+                )
+
+        return ToolResult(f"Pushed to GitHub: {html_url}\nClone URL: {clone_url}")
+
+    def _cli_deploy(self, provider: Optional[str]) -> "ToolResult":
+        if not provider:
+            return ToolResult("", error="provider is required for cli_deploy.", is_error=True)
+        binaries = {
+            "vercel": (["vercel"], ["--prod", "--yes"]),
+            "netlify": (["netlify"], ["deploy", "--prod"]),
+            "flyctl": (["flyctl"], ["deploy"]),
+            "railway": (["railway"], ["up"]),
+        }
+        if provider not in binaries:
+            return ToolResult("", error=f"Unknown provider {provider!r}.", is_error=True)
+        names, argv_tail = binaries[provider]
+        resolved = None
+        for name in names:
+            resolved = shutil.which(name)
+            if resolved:
+                break
+        if not resolved:
+            return ToolResult(
+                "",
+                error=(
+                    f"'{provider}' CLI not found on PATH. Install and log in with "
+                    f"the provider's own CLI first — this tool deliberately does "
+                    f"not vendor an API client or store a deploy credential itself."
+                ),
+                is_error=True,
+            )
+        try:
+            r = subprocess.run(
+                [resolved, *argv_tail], cwd=str(self.cwd), shell=False,
+                capture_output=True, text=True, timeout=300,
+            )
+        except subprocess.TimeoutExpired:
+            return ToolResult("", error=f"{provider} deploy timed out after 300s.", is_error=True)
+        output = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0:
+            return ToolResult(output[-4000:], error=f"{provider} deploy exited {r.returncode}.", is_error=True)
+        return ToolResult(output[-4000:])
+
+    def execute(
+        self,
+        action: str = "",
+        repo_name: Optional[str] = None,
+        private: bool = True,
+        provider: Optional[str] = None,
+    ) -> "ToolResult":
+        if action == "git_push_github":
+            return self._git_push_github(repo_name, private)
+        elif action == "cli_deploy":
+            return self._cli_deploy(provider)
+        return ToolResult("", error=f"Unknown action {action!r}.", is_error=True)
 
 
 # ── Section G: generate_app Tool ─────────────────────────────────────────────
