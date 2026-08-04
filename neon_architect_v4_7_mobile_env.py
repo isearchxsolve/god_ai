@@ -5617,31 +5617,6 @@ class NeonArchitect:
                 "Use /autopilot restart for a full restart."
             )
         self._phase_rounds = 0
-        if getattr(self, "scaffold_pending", False):
-            UI.info("Autopilot: Pending /generate command detected. Generating project scaffold now…")
-            try:
-                stack = getattr(self, "pending_generate_stack", "fastapi-react")
-                desc = getattr(self, "pending_generate_desc", self.goal)
-                orch = GenerationOrchestrator(self.pool, self.config)
-                def on_progress(phase: str, msg: str) -> None:
-                    if "✓" in msg or "✗" in msg:
-                        (UI.ok if "✓" in msg else UI.err)(f"  scaffold/{phase}: {msg}")
-                    else:
-                        UI.info(f"  scaffold/{phase}: {msg}")
-                result = orch.generate(
-                    description=desc,
-                    project_dir=self.project_dir,
-                    stack=stack,
-                    on_progress=on_progress,
-                )
-                if result.success:
-                    UI.ok(f"Scaffold complete! Created {len(result.files_created)} template + {len(result.files_generated)} AI files.")
-                else:
-                    UI.warn(f"Scaffold completed with {len(result.errors)} error(s).")
-            except Exception as e:
-                UI.warn(f"Scaffold generation warning: {e}")
-            finally:
-                self.scaffold_pending = False
         phase = SDLC_PHASES[min(self.sdlc_phase_idx, len(SDLC_PHASES) - 1)]
         initial_persona = SDLC_PERSONA_MAP.get(phase, "adaptive")
         self._switch_persona(initial_persona, reason="auto")
@@ -7422,21 +7397,15 @@ class NeonArchitect:
                                 pass
                             self._stop_autopilot()
                             break
-                        elif self._phase_rounds >= 2:
+                        elif self._phase_rounds % 5 == 0:
                             hint = self._gate_missing_hint()
                             UI.info(
                                 f"Still in {phase_name.upper()} (turn {self._phase_rounds}). "
                                 f"{hint}"
                             )
-                            if self._phase_rounds >= 5:
-                                override_prompt = (
-                                    f"AUTOPILOT HARD GATE OVERRIDE ({phase_name.upper()} turn {self._phase_rounds}): "
-                                    f"{hint}. You have completed sufficient auditing. DO NOT call read, glob, or list_dir tools. "
-                                    f"You MUST call a write or edit tool NOW with actual code/content to fulfill the phase gate. Do not ask the user."
-                                )
-                            else:
-                                override_prompt = "AUTOPILOT: Gate still open. " + hint + " Call ONE tool now. Do not ask the user."
-                            self.ctx.add_user(override_prompt)
+                            self.ctx.add_user(
+                                "AUTOPILOT: Gate still open. " + hint + " Call ONE tool now. Do not ask the user."
+                            )
                     continue
                 continue
 
@@ -8329,10 +8298,27 @@ class NeonArchitect:
             else:
                 UI.info("No goal set. Use /goal <description> to set one, then /autopilot to start.")
             return
-        self.goal = goal_text.strip()
+        new_goal = goal_text.strip()
+        if self.goal == new_goal and self.sdlc_phase_idx > 0:
+            UI.info(
+                f"[SDLC SAFEGUARD] Goal re-asserted without changes. "
+                f"Retaining active SDLC phase: {SDLC_PHASES[self.sdlc_phase_idx].upper()} "
+                f"(completed: {', '.join(sorted(self.sdlc_completed)) or 'none'})."
+            )
+            self._rebuild_system()
+            self.persist(force=True)
+            return
+        self.goal = new_goal
         self.autopilot = False
-        self.sdlc_phase_idx = 0
-        self.sdlc_completed.clear()
+        if not self.sdlc_completed and self.sdlc_phase_idx == 0:
+            self.sdlc_phase_idx = 0
+            self.sdlc_completed.clear()
+        else:
+            UI.info(
+                f"[SDLC SAFEGUARD] Preserving active SDLC phase: {SDLC_PHASES[self.sdlc_phase_idx].upper()} "
+                f"(completed: {', '.join(sorted(self.sdlc_completed)) or 'none'}) for updated goal. "
+                "Use /reset to restart SDLC from planning."
+            )
         self._rebuild_system()
         self.persist(force=True)
         UI.ok(f"Goal set: {self.goal}")
@@ -8859,9 +8845,12 @@ def apply_session(agent: "NeonArchitect", data: Dict[str, Any]) -> None:
         UI.warn(f"Session restore (persona): {e}")
 
     try:
-        agent.goal = _safe_get(data, "goal")
-        agent.sdlc_phase_idx = int(_safe_get(data, "sdlc_phase_idx") or 0)
-        agent.sdlc_completed = set(_safe_get(data, "sdlc_completed") or [])
+        agent.goal = _safe_get(data, "goal") or agent.goal
+        loaded_idx = int(_safe_get(data, "sdlc_phase_idx") or 0)
+        # MONOTONIC PHASE LOCK SAFEGUARD: Ensure loading session data never demotes a higher reached phase
+        agent.sdlc_phase_idx = max(getattr(agent, "sdlc_phase_idx", 0), loaded_idx)
+        loaded_completed = set(_safe_get(data, "sdlc_completed") or [])
+        agent.sdlc_completed.update(loaded_completed)
         agent.autopilot_rounds = int(_safe_get(data, "autopilot_rounds") or 0)
         agent.autopilot = False 
         agent._session_wants_resume = bool(
@@ -10704,8 +10693,8 @@ class SpecializedAgent:
         self.pool = pool
         self.config = config
 
-    def _call_nim(self, messages: List[Dict[str, str]], max_tokens: int = 8192, target_file: Optional[Path] = None) -> str:
-        """NIM call with real-time direct-to-disk streaming file I/O."""
+    def _call_nim(self, messages: List[Dict[str, str]], max_tokens: int = 8192) -> str:
+        """Synchronous NIM call through the existing provider pool."""
         if not HAS_OPENAI:
             return f"# {self.role} output\n# openai package not available\n"
 
@@ -10721,12 +10710,11 @@ class SpecializedAgent:
                 raise RuntimeError(f"[{self.role}] No NIM provider available after 60 s")
 
             model_cfg = provider.model_cfg
-            req_max_tokens = min(max_tokens, model_cfg.get("max_tokens", 4096))
             payload: Dict[str, Any] = {
                 "model": model_cfg["id"],
                 "messages": messages,
-                "max_tokens": req_max_tokens,
-                "stream": True,
+                "max_tokens": max_tokens,
+                "stream": False,
             }
             if model_cfg.get("temperature") is not None:
                 payload["temperature"] = model_cfg["temperature"]
@@ -10734,29 +10722,9 @@ class SpecializedAgent:
                 payload["top_p"] = model_cfg["top_p"]
 
             try:
-                stream_resp = provider.client.chat.completions.create(**payload)
-                chunks: List[str] = []
-                f = None
-                if target_file:
-                    target_file.parent.mkdir(parents=True, exist_ok=True)
-                    f = open(target_file, "w", encoding="utf-8")
-                try:
-                    for chunk in stream_resp:
-                        if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
-                            c = chunk.choices[0].delta.content
-                            chunks.append(c)
-                            if f:
-                                f.write(c)
-                                f.flush()
-                            sys.stdout.write(".")
-                            sys.stdout.flush()
-                finally:
-                    if f:
-                        f.close()
-                sys.stdout.write("\n")
-                sys.stdout.flush()
+                resp = provider.client.chat.completions.create(**payload)
                 provider.record_success()
-                return "".join(chunks).strip()
+                return (resp.choices[0].message.content or "").strip()
             except OPENAI_ERRORS as e:
                 err_str = str(e).lower()
                 if "429" in err_str or "rate" in err_str:
@@ -10776,7 +10744,7 @@ class SpecializedAgent:
             {"role": "user", "content": user_content},
         ]
 
-    def run(self, ctx: Dict[str, Any], project_dir: Optional[Path] = None) -> Dict[str, str]:
+    def run(self, ctx: Dict[str, Any]) -> Dict[str, str]:
         """Run the agent. Returns {rel_path: content} of files to write."""
         raise NotImplementedError
 
@@ -10790,15 +10758,14 @@ class PlannerAgent(SpecializedAgent):
         "Be specific, actionable, and technical. No preamble, no code blocks wrapping the markdown."
     )
 
-    def run(self, ctx: Dict[str, Any], project_dir: Optional[Path] = None) -> Dict[str, str]:
+    def run(self, ctx: Dict[str, Any]) -> Dict[str, str]:
         prompt = (
             f"Project: {ctx['project_name']}\n"
             f"Stack: {ctx['stack']}\n"
             f"Description: {ctx['description']}\n\n"
             "Write PLAN.md with sections: Requirements, Risks, Acceptance Criteria."
         )
-        target = (project_dir / "PLAN.md") if project_dir else None
-        content = self._call_nim(self._messages(prompt), max_tokens=4096, target_file=target)
+        content = self._call_nim(self._messages(prompt), max_tokens=4096)
         return {"PLAN.md": content}
 
 
@@ -10811,7 +10778,7 @@ class ArchitectAgent(SpecializedAgent):
         "Be specific about module names, file paths, and data schemas."
     )
 
-    def run(self, ctx: Dict[str, Any], project_dir: Optional[Path] = None) -> Dict[str, str]:
+    def run(self, ctx: Dict[str, Any]) -> Dict[str, str]:
         plan = ctx.get("PLAN.md", "No plan yet.")
         prompt = (
             f"Project: {ctx['project_name']} ({ctx['stack']})\n"
@@ -10819,8 +10786,7 @@ class ArchitectAgent(SpecializedAgent):
             f"PLAN.md:\n{plan[:3000]}\n\n"
             "Write ARCHITECTURE.md with sections: Components, Data Flow, Tech Stack, API Surface."
         )
-        target = (project_dir / "ARCHITECTURE.md") if project_dir else None
-        content = self._call_nim(self._messages(prompt), max_tokens=4096, target_file=target)
+        content = self._call_nim(self._messages(prompt), max_tokens=4096)
         return {"ARCHITECTURE.md": content}
 
 
@@ -10832,7 +10798,7 @@ class DesignerAgent(SpecializedAgent):
         "Design a clean, modern dark-mode color theme and component system for the given project."
     )
 
-    def run(self, ctx: Dict[str, Any], project_dir: Optional[Path] = None) -> Dict[str, str]:
+    def run(self, ctx: Dict[str, Any]) -> Dict[str, str]:
         stack = ctx["stack"]
         if stack in ("fastapi-react", "nextjs-postgres"):
             prompt = (
@@ -10842,8 +10808,7 @@ class DesignerAgent(SpecializedAgent):
                 "text=#e2e8f0, muted=#94a3b8, danger=#fb7185, success=#4ade80. "
                 "No imports needed. Export as: export const COLORS = {{...}}; export const TYPOGRAPHY = {{...}};"
             )
-            target = (project_dir / "frontend/src/theme.ts") if project_dir else None
-            out = self._call_nim(self._messages(prompt), max_tokens=2048, target_file=target)
+            out = self._call_nim(self._messages(prompt), max_tokens=2048)
             return {"frontend/src/theme.ts": out}
         elif stack == "flutter-fastapi":
             prompt = (
@@ -10851,8 +10816,7 @@ class DesignerAgent(SpecializedAgent):
                 "Write lib/theme.dart — a Flutter file that defines AppTheme with a dark ThemeData. "
                 "Primary color #38bdf8, background #0f172a. Export: class AppTheme {{ static ThemeData dark() {{...}} }}"
             )
-            target = (project_dir / "lib/theme.dart") if project_dir else None
-            out = self._call_nim(self._messages(prompt), max_tokens=2048, target_file=target)
+            out = self._call_nim(self._messages(prompt), max_tokens=2048)
             return {"lib/theme.dart": out}
         else:
             return {}  # expo-node: minimal theme
@@ -10866,12 +10830,13 @@ class FrontendAgent(SpecializedAgent):
         "Use the dark color system: primary=#38bdf8, bg=#0f172a, surface=#1e293b."
     )
 
-    def run(self, ctx: Dict[str, Any], project_dir: Optional[Path] = None) -> Dict[str, str]:
+    def run(self, ctx: Dict[str, Any]) -> Dict[str, str]:
         stack = ctx["stack"]
         arch = ctx.get("ARCHITECTURE.md", "")[:2000]
         results: Dict[str, str] = {}
 
         if stack in ("fastapi-react", "nextjs-postgres"):
+            # Generate a real feature component
             prompt = (
                 f"Project: {ctx['project_name']}\nDescription: {ctx['description']}\n"
                 f"Architecture:\n{arch}\n\n"
@@ -10880,9 +10845,9 @@ class FrontendAgent(SpecializedAgent):
                 "and renders a polished dark-mode card. Include hover effects via inline style state. "
                 "Export as: export default function ProjectCard({{ project }}: {{ project: any }}) {{...}}"
             )
-            t1 = (project_dir / "frontend/src/components/ProjectCard.tsx") if project_dir else None
-            results["frontend/src/components/ProjectCard.tsx"] = self._call_nim(self._messages(prompt), max_tokens=3000, target_file=t1)
+            results["frontend/src/components/ProjectCard.tsx"] = self._call_nim(self._messages(prompt), max_tokens=3000)
 
+            # Generate a chat/builder UI component
             prompt2 = (
                 f"Project: {ctx['project_name']}\n\n"
                 "Write frontend/src/components/ChatPanel.tsx — a React component for an AI chat interface. "
@@ -10891,8 +10856,7 @@ class FrontendAgent(SpecializedAgent):
                 "Assistant messages render in #1e293b bubbles, user messages in #38bdf8 bubbles. "
                 "Export as: export default function ChatPanel() {{...}}"
             )
-            t2 = (project_dir / "frontend/src/components/ChatPanel.tsx") if project_dir else None
-            results["frontend/src/components/ChatPanel.tsx"] = self._call_nim(self._messages(prompt2), max_tokens=3000, target_file=t2)
+            results["frontend/src/components/ChatPanel.tsx"] = self._call_nim(self._messages(prompt2), max_tokens=3000)
 
         elif stack == "flutter-fastapi":
             prompt = (
@@ -10901,8 +10865,7 @@ class FrontendAgent(SpecializedAgent):
                 "a dark-mode project card given name, description, and status strings. "
                 "Use Card, ListTile, and Chip widgets. Export: class ProjectCard extends StatelessWidget {{...}}"
             )
-            t = (project_dir / "lib/widgets/project_card.dart") if project_dir else None
-            results["lib/widgets/project_card.dart"] = self._call_nim(self._messages(prompt), max_tokens=2000, target_file=t)
+            results["lib/widgets/project_card.dart"] = self._call_nim(self._messages(prompt), max_tokens=2000)
 
         elif stack == "expo-node":
             prompt = (
@@ -10912,8 +10875,7 @@ class FrontendAgent(SpecializedAgent):
                 "Dark background #1e293b, primary #38bdf8. "
                 "Export as: export default function ProjectCard({{ project }}: {{ project: any }}) {{...}}"
             )
-            t = (project_dir / "app/components/ProjectCard.tsx") if project_dir else None
-            results["app/components/ProjectCard.tsx"] = self._call_nim(self._messages(prompt), max_tokens=2000, target_file=t)
+            results["app/components/ProjectCard.tsx"] = self._call_nim(self._messages(prompt), max_tokens=2000)
 
         return results
 
@@ -10926,7 +10888,7 @@ class BackendAgent(SpecializedAgent):
         "Follow REST conventions. Include proper error handling and input validation."
     )
 
-    def run(self, ctx: Dict[str, Any], project_dir: Optional[Path] = None) -> Dict[str, str]:
+    def run(self, ctx: Dict[str, Any]) -> Dict[str, str]:
         stack = ctx["stack"]
         arch = ctx.get("ARCHITECTURE.md", "")[:2000]
         results: Dict[str, str] = {}
@@ -10941,8 +10903,7 @@ class BackendAgent(SpecializedAgent):
                 "with OpenAI(base_url='https://integrate.api.nvidia.com/v1', api_key=api_key). "
                 "Return the assistant message content as a string. Include proper error handling."
             )
-            t1 = (project_dir / "backend/nim_service.py") if project_dir else None
-            results["backend/nim_service.py"] = self._call_nim(self._messages(prompt), max_tokens=3000, target_file=t1)
+            results["backend/nim_service.py"] = self._call_nim(self._messages(prompt), max_tokens=3000)
 
             prompt2 = (
                 f"Project: {ctx['project_name']}\n\n"
@@ -10952,8 +10913,7 @@ class BackendAgent(SpecializedAgent):
                 "Include streaming via StreamingResponse for large outputs. "
                 "Import: from backend.routers.auth import current_user, from backend.nim_service import generate_code"
             )
-            t2 = (project_dir / "backend/routers/generate.py") if project_dir else None
-            results["backend/routers/generate.py"] = self._call_nim(self._messages(prompt2), max_tokens=3000, target_file=t2)
+            results["backend/routers/generate.py"] = self._call_nim(self._messages(prompt2), max_tokens=3000)
 
         elif stack == "nextjs-postgres":
             prompt = (
@@ -10963,8 +10923,7 @@ class BackendAgent(SpecializedAgent):
                 "(https://integrate.api.nvidia.com/v1/chat/completions) using fetch with streaming. "
                 "Return a ReadableStream of text chunks. Use process.env.NIM_API_KEY."
             )
-            t = (project_dir / "app/api/generate/route.ts") if project_dir else None
-            results["app/api/generate/route.ts"] = self._call_nim(self._messages(prompt), max_tokens=3000, target_file=t)
+            results["app/api/generate/route.ts"] = self._call_nim(self._messages(prompt), max_tokens=3000)
 
         elif stack == "expo-node":
             prompt = (
@@ -10973,8 +10932,7 @@ class BackendAgent(SpecializedAgent):
                 "POST /api/generate/code accepts {{prompt, stack}} and calls NVIDIA NIM using node-fetch. "
                 "Auth middleware: require Bearer JWT. Return {{code: string}}."
             )
-            t = (project_dir / "server/routes/generate.js") if project_dir else None
-            results["server/routes/generate.js"] = self._call_nim(self._messages(prompt), max_tokens=3000, target_file=t)
+            results["server/routes/generate.js"] = self._call_nim(self._messages(prompt), max_tokens=3000)
 
         return results
 
@@ -10986,7 +10944,7 @@ class DatabaseAgent(SpecializedAgent):
         "Write complete SQLAlchemy models or Prisma schemas. No placeholder fields."
     )
 
-    def run(self, ctx: Dict[str, Any], project_dir: Optional[Path] = None) -> Dict[str, str]:
+    def run(self, ctx: Dict[str, Any]) -> Dict[str, str]:
         stack = ctx["stack"]
         arch = ctx.get("ARCHITECTURE.md", "")[:2000]
         results: Dict[str, str] = {}
@@ -11000,8 +10958,7 @@ class DatabaseAgent(SpecializedAgent):
                 "Project model (id UUID pk, owner_id FK→users, name, description, status, stack, created_at, updated_at). "
                 "Use proper types: String, DateTime, ForeignKey. Add __repr__ methods."
             )
-            t1 = (project_dir / "backend/models.py") if project_dir else None
-            results["backend/models.py"] = self._call_nim(self._messages(prompt), max_tokens=3000, target_file=t1)
+            results["backend/models.py"] = self._call_nim(self._messages(prompt), max_tokens=3000)
 
             prompt2 = (
                 "Write backend/database.py — SQLAlchemy 2.x database setup. "
@@ -11009,8 +10966,7 @@ class DatabaseAgent(SpecializedAgent):
                 "Include: engine, SessionLocal = sessionmaker(...), get_db() FastAPI dependency, init_db() that calls Base.metadata.create_all. "
                 "Import Base from backend.models."
             )
-            t2 = (project_dir / "backend/database.py") if project_dir else None
-            results["backend/database.py"] = self._call_nim(self._messages(prompt2), max_tokens=2000, target_file=t2)
+            results["backend/database.py"] = self._call_nim(self._messages(prompt2), max_tokens=2000)
 
         return results
 
@@ -11023,7 +10979,7 @@ class TesterAgent(SpecializedAgent):
         "Use httpx.TestClient or fastapi.testclient.TestClient for API tests."
     )
 
-    def run(self, ctx: Dict[str, Any], project_dir: Optional[Path] = None) -> Dict[str, str]:
+    def run(self, ctx: Dict[str, Any]) -> Dict[str, str]:
         stack = ctx["stack"]
         results: Dict[str, str] = {}
 
@@ -11041,8 +10997,7 @@ class TesterAgent(SpecializedAgent):
                 "Use: from fastapi.testclient import TestClient; from backend.main import app\n"
                 "client = TestClient(app)"
             )
-            t1 = (project_dir / "tests/test_api.py") if project_dir else None
-            results["tests/test_api.py"] = self._call_nim(self._messages(prompt), max_tokens=4000, target_file=t1)
+            results["tests/test_api.py"] = self._call_nim(self._messages(prompt), max_tokens=4000)
 
             results["tests/__init__.py"] = ""
             results["tests/conftest.py"] = (
@@ -11062,8 +11017,7 @@ class TesterAgent(SpecializedAgent):
                 "Test: health endpoint, register, login, create project endpoints.\n"
                 "Use: const BASE = 'http://localhost:3000'"
             )
-            t = (project_dir / "tests/api.test.ts") if project_dir else None
-            results["tests/api.test.ts"] = self._call_nim(self._messages(prompt), max_tokens=3000, target_file=t)
+            results["tests/api.test.ts"] = self._call_nim(self._messages(prompt), max_tokens=3000)
 
         return results
 
@@ -11075,7 +11029,7 @@ class DevOpsAgent(SpecializedAgent):
         "Never output markdown fences or explanations in your files."
     )
 
-    def run(self, ctx: Dict[str, Any], project_dir: Optional[Path] = None) -> Dict[str, str]:
+    def run(self, ctx: Dict[str, Any]) -> Dict[str, str]:
         results: Dict[str, str] = {}
 
         # GitHub Actions CI
@@ -11088,8 +11042,7 @@ class DevOpsAgent(SpecializedAgent):
             "4. Runs tests (pytest for Python, npm test for Node)\n"
             "Use ubuntu-latest runner."
         )
-        t1 = (project_dir / ".github/workflows/ci.yml") if project_dir else None
-        results[".github/workflows/ci.yml"] = self._call_nim(self._messages(prompt), max_tokens=2000, target_file=t1)
+        results[".github/workflows/ci.yml"] = self._call_nim(self._messages(prompt), max_tokens=2000)
 
         # VERIFICATION.md
         prompt2 = (
@@ -11100,8 +11053,7 @@ class DevOpsAgent(SpecializedAgent):
             "Include checks for: auth works, projects CRUD works, Docker builds, CI passes, preview loads.\n"
             "Mark all as: ✅ Implemented"
         )
-        t2 = (project_dir / "VERIFICATION.md") if project_dir else None
-        results["VERIFICATION.md"] = self._call_nim(self._messages(prompt2), max_tokens=2000, target_file=t2)
+        results["VERIFICATION.md"] = self._call_nim(self._messages(prompt2), max_tokens=2000)
 
         return results
 
@@ -11186,14 +11138,13 @@ class GenerationOrchestrator:
         for agent in agents:
             _prog(agent.role, f"Running {agent.role} agent…")
             try:
-                files = agent.run(ctx, project_dir=project_dir)
+                files = agent.run(ctx)
                 for rel_path, content in files.items():
                     if not content.strip():
                         continue
                     dest = project_dir / rel_path
-                    if not dest.exists():
-                        dest.parent.mkdir(parents=True, exist_ok=True)
-                        dest.write_text(content, encoding="utf-8")
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    dest.write_text(content, encoding="utf-8")
                     result.files_generated.append(rel_path)
                     # Feed artifact content back into ctx for downstream agents
                     ctx[rel_path] = content
@@ -11288,11 +11239,8 @@ class LivePreviewManager:
             cls._ports.pop(key, None)
         if proc and proc.poll() is None:
             try:
-                if os.name == "nt":
-                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                else:
-                    proc.terminate()
-                    proc.wait(timeout=5)
+                proc.terminate()
+                proc.wait(timeout=5)
             except Exception:
                 try:
                     proc.kill()
@@ -11315,10 +11263,7 @@ class LivePreviewManager:
             proc = cls._servers.pop(key, None)
             if proc and proc.poll() is None:
                 try:
-                    if os.name == "nt":
-                        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    else:
-                        proc.terminate()
+                    proc.terminate()
                 except Exception:
                     pass
 
@@ -11454,21 +11399,47 @@ def _cmd_generate(raw: str, agent: "NeonArchitect") -> None:
         return
 
     stack = explicit_stack or _detect_stack(desc)
-    agent.scaffold_pending = True
-    agent.pending_generate_stack = stack
-    agent.pending_generate_desc = desc
+    UI.info(f"Stack: {stack}  |  Project dir: {agent.project_dir}")
+    UI.info(f"Scaffolding {stack} template then running NIM agents…\n")
 
-    goal_prompt = (
-        f"Build '{agent.project_dir.name}': {desc[:200]}. "
-        f"The {stack} scaffold will be generated on autopilot start — augment it, fix errors, "
-        "add real NIM-powered features, and verify the full stack works."
+    def on_progress(phase: str, msg: str) -> None:
+        if "✓" in msg or "✗" in msg:
+            (UI.ok if "✓" in msg else UI.err)(f"  {phase}: {msg}")
+        else:
+            UI.info(f"  {phase}: {msg}")
+
+    orch = GenerationOrchestrator(agent.pool, agent.config)
+    result = orch.generate(
+        description=desc,
+        project_dir=agent.project_dir,
+        stack=stack,
+        on_progress=on_progress,
     )
-    agent.cmd_goal(goal_prompt)
 
     UI.separator()
-    UI.ok("Generation command registered!")
-    UI.info(f"Stack: {stack}  |  Project dir: {agent.project_dir}")
-    UI.info("Run /autopilot to generate project scaffold and begin SDLC execution.")
+    if result.success:
+        UI.ok(f"Generation complete!  {len(result.files_created)} template + {len(result.files_generated)} AI-generated files.")
+    else:
+        UI.warn(f"Generation completed with {len(result.errors)} error(s).")
+
+    # Start preview
+    UI.info("Starting live preview server…")
+    preview_url = LivePreviewManager.start(agent.project_dir, stack)
+    if preview_url:
+        UI.ok(f"Preview: {preview_url}")
+        UI.info("  (The server is starting in the background. Allow 5–15 s for first load.)")
+    else:
+        UI.warn("Preview server could not be started — run manually: see README.md")
+
+    # Auto-set goal if not already set
+    if not agent.goal:
+        agent.cmd_goal(
+            f"Build '{agent.project_dir.name}': {desc[:200]}. "
+            f"The {stack} scaffold is already in place — augment it, fix errors, "
+            "add real NIM-powered features, and verify the full stack works."
+        )
+        UI.info("Goal set automatically from your description. Run /autopilot to continue building.")
+
     UI.separator()
 
 
