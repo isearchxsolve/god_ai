@@ -1865,11 +1865,44 @@ class WriteTool(Tool):
         re.S,
     )
     # A single "from X import Y[, Z...]" / "import X[, Y...]" line is
-    # always one legitimate statement, no matter how long, and must never
-    # be treated as collapsed source on its own.
+    # normally one legitimate statement, no matter how long — EXCEPT when
+    # the imported names repeat many times, which is the actual signature
+    # RC-2 identified: a model-corrupted write like "from datetime import
+    # datetime, timezone, ..." repeated 80x still matches this regex's
+    # grammar (comma-separated names, arbitrarily long), so it was exiting
+    # _looks_collapsed_source as "exempt" before length/newline checks
+    # ever ran. No real import statement names the same symbol dozens of
+    # times — that repetition is diagnostic of corrupted output, not a
+    # long-but-legitimate import. See _has_repeated_import_names below,
+    # checked alongside this regex rather than folded into it, since a
+    # regex can't count distinct-name repetition on its own.
     _SINGLE_IMPORT_LINE_RE = re.compile(
         r"^\s*(from\s+[\w.]+\s+import\s+[\w., *()\n]+|import\s+[\w., ]+)\s*$"
     )
+
+    @staticmethod
+    def _has_repeated_import_names(stripped_import_line: str) -> bool:
+        """True if the same imported name appears many times in a single
+        import statement — the concrete pattern behind RC-2's garbage
+        write (`from datetime import datetime, timezone, ...` repeated
+        80x). A real import statement lists each name once; >=4 repeats
+        of any single name is well past anything a person or a correct
+        model output would ever write, and comfortably below what a
+        genuinely large-but-legitimate import list would produce for any
+        one name.
+        """
+        # Strip a leading "from X import " prefix if present; either way
+        # what's left is the comma-separated name list to inspect.
+        m = re.match(r"^\s*from\s+[\w.]+\s+import\s+(.*)$", stripped_import_line, re.S)
+        names_part = m.group(1) if m else re.sub(r"^\s*import\s+", "", stripped_import_line)
+        names = [n.strip().split(" as ")[0].strip() for n in names_part.split(",")]
+        names = [n for n in names if n and n != "*"]
+        if not names:
+            return False
+        from collections import Counter
+        counts = Counter(names)
+        return counts.most_common(1)[0][1] >= 4
+
     # Markdown collapse detector: real Markdown headings each start their
     # own line. Three or more '#'-heading markers appearing mid-string
     # (i.e. not just at position 0) with almost no real newlines means the
@@ -1878,6 +1911,59 @@ class WriteTool(Tool):
     # (extract_acceptance_criteria, plan_missing_sections, etc.) is gone,
     # even though the text itself looks superficially complete.
     _COLLAPSED_MD_HEADING_RE = re.compile(r"(?:^|\s)#{1,6}\s+\S")
+
+    @staticmethod
+    @staticmethod
+    def _strip_balanced_code_fence(data: str, path: str) -> str:
+        """Strip a matched ```lang ... ``` wrapper the model sometimes wraps
+        its ENTIRE file output in, despite tool instructions saying not to.
+
+        This is the gap RC-1 identified correctly: the collapsed-source
+        guard below looks for "almost no real newlines" — a well-formed
+        fenced block with normal internal formatting has plenty of
+        newlines, so it sails past that check untouched and gets written
+        to disk as literally invalid syntax (the fence markers themselves
+        aren't valid Python/JS/etc). The existing _ADDITION_MARKERS /
+        odd-fence-count logic only catches an UNBALANCED fence (a bare
+        opening marker with no close) — it warns, it doesn't strip a
+        cleanly matched pair.
+
+        Deliberately narrow, same safety posture as
+        _try_repair_collapsed_imports: only fires when the fence is
+        unambiguous — first non-empty line is exactly ```<optional lang
+        tag>, last non-empty line is exactly ```, and nothing meaningful
+        sits outside those markers. Anything less clear-cut (fence
+        appearing mid-file, multiple fenced blocks, prose before/after) is
+        left alone and falls through to the existing refuse/warn paths
+        rather than risk silently mangling real content — e.g. a file that
+        legitimately needs to contain the string "```" in a docstring or
+        markdown-generation code.
+        """
+        if not data:
+            return data
+        stripped = data.strip()
+        lines = stripped.splitlines()
+        if len(lines) < 3:
+            return data
+        first, last = lines[0].rstrip(), lines[-1].strip()
+        if not first.startswith("```") or last != "```":
+            return data
+        # First line must be JUST the fence marker plus an optional bare
+        # language tag (letters/digits/+/- only) — not "```python code
+        # here" with real content glued onto the same line, which would
+        # mean stripping the marker loses that content.
+        lang_tag = first[3:].strip()
+        if lang_tag and not re.match(r"^[A-Za-z0-9+_-]+$", lang_tag):
+            return data
+        body = "\n".join(lines[1:-1])
+        # A second, unmatched ``` anywhere inside means this isn't a
+        # single clean fence (could be a second fenced block, or fences
+        # discussed as literal text) — bail rather than guess.
+        if "```" in body:
+            return data
+        if not body.strip():
+            return data
+        return body + "\n"
 
     @staticmethod
     def _normalize_content(data: str) -> str:
@@ -1972,7 +2058,16 @@ class WriteTool(Tool):
             return False
         stripped = data.strip()
         if cls._SINGLE_IMPORT_LINE_RE.match(stripped):
-            return False
+            if not cls._has_repeated_import_names(stripped):
+                return False  # a real, non-repeating import line — exempt
+            # Matches import-line grammar but repeats a name >=4 times —
+            # this IS the collapsed-garbage case (RC-2), report it
+            # directly rather than falling through to the generic
+            # multi-statement/double-space checks below, which are
+            # looking for a different shape of corruption (two distinct
+            # statements glued together) and don't reliably catch a
+            # single repeated statement like this one.
+            return True
         if len(stripped) < 40:
             return False
         ext = Path(path or "").suffix.lower()
@@ -2010,6 +2105,9 @@ class WriteTool(Tool):
             fp.parent.mkdir(parents=True, exist_ok=True)
             data = content if isinstance(content, str) else str(content)
             data = self._normalize_content(data)
+            fence_stripped = self._strip_balanced_code_fence(data, path)
+            if fence_stripped != data:
+                data = fence_stripped
             # Try the narrow, provably-safe import-block repair FIRST and
             # unconditionally (not gated behind _looks_collapsed_source):
             # a pure run of collapsed import statements with single spaces
@@ -2154,6 +2252,45 @@ class WriteTool(Tool):
                             ),
                             is_error=True,
                         )
+            # Pre-write AST gate for Python sources. Applies to BOTH overwrite
+            # and append unless force=true. Append previously skipped the gate
+            # so a model could stream pure garbage via append=true and leave
+            # invalid Python on disk with zero refusal (stress T4). The cost
+            # is that mid-stream partial chunks must use force=true; complete
+            # functions/sections appended to a valid file still parse and pass.
+            if not force and Path(path or "").suffix.lower() in {".py", ".pyi"}:
+                if append and fp.is_file() and fp.stat().st_size > 0:
+                    try:
+                        existing = fp.read_text(encoding="utf-8")  # strict — refuse dirty files
+                    except UnicodeDecodeError as e:
+                        return ToolResult(
+                            "",
+                            error=(
+                                f"REFUSED append to {path}: existing file is not valid UTF-8 "
+                                f"({e}). Fix encoding first (or rewrite with force=true)."
+                            ),
+                            is_error=True,
+                        )
+                    if not data.startswith("\n"):
+                        candidate = existing + "\n" + data
+                    else:
+                        candidate = existing + data
+                else:
+                    candidate = data
+                try:
+                    ast.parse(candidate)
+                except SyntaxError as e:
+                    return ToolResult(
+                        "",
+                        error=(
+                            f"REFUSED write to {path}: resulting content is not valid Python "
+                            f"({e.msg} at line {e.lineno}). Re-send a complete, syntactically "
+                            f"valid source payload. For a deliberate partial/incomplete chunk, "
+                            f"pass force=true (the only AST bypass). Do NOT use append to smuggle "
+                            f"invalid fragments — append is validated against the full file."
+                        ),
+                        is_error=True,
+                    )
             mode = "a" if append else "w"
             if append and mode == "a" and fp.is_file() and fp.stat().st_size > 0 and not data.startswith("\n"):
                 data = "\n" + data
@@ -2247,13 +2384,29 @@ class EditTool(Tool):
             fp = self._safe_path(path)
             if not fp.exists():
                 return ToolResult("", error=f"File not found: {path}", is_error=True)
-            with open(fp, "r", encoding="utf-8", errors="replace") as f:
-                original = f.read()
+            try:
+                with open(fp, "r", encoding="utf-8") as f:  # strict — no silent U+FFFD mangling
+                    original = f.read()
+            except UnicodeDecodeError as e:
+                return ToolResult(
+                    "",
+                    error=(
+                        f"REFUSED edit of {path}: file is not valid UTF-8 ({e}). "
+                        f"Fix encoding before editing."
+                    ),
+                    is_error=True,
+                )
             if old_text not in original:
                 hint = self._diagnose_no_match(old_text, original)
                 return ToolResult("", error=f"old_text not found in {path}{hint}", is_error=True)
             total_occurrences = original.count(old_text)
             ambiguous_warning = ""
+            # Always strip a balanced ```lang ... ``` wrapper from new_text.
+            # Previously this only ran on the replace_all=True path, so a
+            # single-occurrence edit could inject fenced content (RC-1 gap)
+            # and leave invalid syntax on disk. Same narrow helper WriteTool
+            # uses — only fires on an unambiguous whole-payload fence pair.
+            new_text = WriteTool._strip_balanced_code_fence(new_text, path)
             if replace_all:
                 count = total_occurrences
                 new_content = original.replace(old_text, new_text)
@@ -2267,6 +2420,23 @@ class EditTool(Tool):
                         f"If you intended to edit a different occurrence, include more surrounding "
                         f"context in old_text to make it unique, or pass replace_all=true if you "
                         f"meant to replace all of them."
+                    )
+            # Post-splice AST gate for Python: fence-stripping new_text alone is
+            # not enough — splicing a locally-valid fragment can still break the
+            # file (bare `def broken(:`, dedent attacks, etc.). Refuse before
+            # write so EditTool matches WriteTool's "no invalid .py on disk" rule.
+            if Path(path or "").suffix.lower() in {".py", ".pyi"}:
+                try:
+                    ast.parse(new_content)
+                except SyntaxError as e:
+                    return ToolResult(
+                        "",
+                        error=(
+                            f"REFUSED edit of {path}: result would not be valid Python "
+                            f"({e.msg} at line {e.lineno}). Adjust old_text/new_text so the "
+                            f"full file remains syntactically valid."
+                        ),
+                        is_error=True,
                     )
             with open(fp, "w", encoding="utf-8", newline="\n") as f:
                 f.write(new_content)
@@ -2318,7 +2488,29 @@ class SearchTool(Tool):
                     is_error=True,
                 )
             base = self._safe_path(path)
-            rx = re.compile(pattern, re.IGNORECASE)
+            # ReDoS guard: nested quantifiers on the same group (e.g. (a+)+$)
+            # can hang Python's `re` engine indefinitely on crafted input.
+            # Reject high-risk patterns up front; also cap pattern length.
+            pat = str(pattern)
+            if len(pat) > 500:
+                return ToolResult(
+                    "",
+                    error="pattern too long (max 500 chars) — refuse possible ReDoS / abuse.",
+                    is_error=True,
+                )
+            if re.search(r"\([^)]*[+*][^)]*\)[+*]", pat) or re.search(r"\(\w\+\)\+", pat):
+                return ToolResult(
+                    "",
+                    error=(
+                        "pattern looks like nested quantifiers (ReDoS risk). "
+                        "Simplify the regex (avoid (a+)+ / (a*)* forms)."
+                    ),
+                    is_error=True,
+                )
+            try:
+                rx = re.compile(pattern, re.IGNORECASE)
+            except re.error as e:
+                return ToolResult("", error=f"invalid regex: {e}", is_error=True)
             matches: List[str] = []
             if base.is_file():
                 try:
@@ -2736,8 +2928,17 @@ class RunTool(Tool):
             return "git push --force (or -f/--force-with-lease) can overwrite remote history."
         if subcmd == "reset" and "--hard" in rest:
             return "git reset --hard discards uncommitted local changes irreversibly."
-        if subcmd == "clean" and ({"-f", "-fd", "-fdx", "--force"} & rest):
-            return "git clean -f deletes untracked files irreversibly."
+        if subcmd == "clean":
+            # Exact forms plus any bundled short-flag token that includes
+            # force (-f), e.g. -xfd / -dfx / -fxd — exact-string sets miss
+            # alternate orderings of the same letters.
+            if ({"-f", "-fd", "-fdx", "--force"} & rest):
+                return "git clean -f deletes untracked files irreversibly."
+            for tok in rest:
+                if tok.startswith("--"):
+                    continue
+                if tok.startswith("-") and "f" in tok[1:] and tok[1:].isalpha():
+                    return "git clean -f deletes untracked files irreversibly."
         if subcmd == "branch" and ({"-d", "-D", "--delete"} & rest):
             return "git branch -D force-deletes a branch, discarding unmerged commits."
         if subcmd == "checkout" and "-f" in rest:
@@ -6939,9 +7140,21 @@ class NeonArchitect:
                         ]
                         low = rel.lower()
                         if any(low.startswith(p.lower()) or f"/{p.lower()}" in f"/{low}" for p in prefixes):
-                            if rel not in self._src_write_paths:
-                                self._src_write_paths.append(rel)
-                            self._phase_tool_counts["src_write"] = self._phase_tool_counts.get("src_write", 0) + 1
+                            is_valid_py = True
+                            if rel.endswith(".py"):
+                                try:
+                                    ast.parse((self.project_dir / rel).read_text(encoding="utf-8", errors="replace"))
+                                except Exception:
+                                    is_valid_py = False
+                            if is_valid_py:
+                                # Count toward src_write once per unique path, not
+                                # once per call — otherwise editing the same file
+                                # N times satisfies a min_src_writes gate exactly
+                                # like N genuinely different files would, letting
+                                # the gate pass without real implementation breadth.
+                                if rel not in self._src_write_paths:
+                                    self._src_write_paths.append(rel)
+                                    self._phase_tool_counts["src_write"] = self._phase_tool_counts.get("src_write", 0) + 1
                     elif name == "todo" and args.get("action") == "add":
                         self._update_working_memory(f"todo: {str(args.get('content',''))[:120]}", section="Next action")
                     elif name == "run":
@@ -10963,7 +11176,8 @@ class PlannerAgent(SpecializedAgent):
         "You are a senior software architect writing a project plan.\n"
         "Output ONLY the content of PLAN.md — a markdown document with exactly these sections:\n"
         "## Requirements\n## Risks\n## Acceptance Criteria\n\n"
-        "Be specific, actionable, and technical. No preamble, no code blocks wrapping the markdown."
+        "Be specific, actionable, and technical. No preamble, no code blocks wrapping the markdown. "
+        "Never wrap your output in ``` fences of any kind — output raw markdown text only, starting directly with the first heading."
     )
 
     def run(self, ctx: Dict[str, Any]) -> Dict[str, str]:
@@ -10979,19 +11193,41 @@ class PlannerAgent(SpecializedAgent):
 
 class ArchitectAgent(SpecializedAgent):
     role = "architect"
+    # Backend package root is stack-dependent and MUST match what BackendAgent,
+    # DatabaseAgent, and TesterAgent hardcode downstream — otherwise generated
+    # tests fail with ModuleNotFoundError (e.g. Tester writes
+    # "from backend.main import app" but the architecture says app/main.py).
+    _BACKEND_ROOT_BY_STACK = {
+        "fastapi-react": "backend/ (module path: backend.main, backend.routers, backend.models)",
+        "flutter-fastapi": "backend/ (module path: backend.main, backend.routers, backend.models)",
+        "nextjs-postgres": "app/ (Next.js 14 App Router — app/api/.../route.ts)",
+        "expo-node": "server/ (Express — server/routes/*.js)",
+    }
+
     _system_prompt = (
         "You are a senior software architect writing ARCHITECTURE.md.\n"
         "Output ONLY the markdown document with these sections:\n"
         "## Components\n## Data Flow\n## Tech Stack\n## API Surface\n\n"
-        "Be specific about module names, file paths, and data schemas."
+        "Be specific about module names, file paths, and data schemas. "
+        "CRITICAL: the backend package root and its exact path/module convention will be given to you "
+        "in the prompt — you MUST use that exact root for every backend file path and import example "
+        "you write. Do not invent or default to any other root (never use app/main.py unless told to). "
+        "Every other agent in this pipeline (backend, database, tests, deployment) hardcodes this same "
+        "root, so any deviation here breaks the entire generated project. "
+        "Never wrap your output in ``` fences of any kind — output raw markdown text only, starting directly with the first heading."
     )
 
     def run(self, ctx: Dict[str, Any]) -> Dict[str, str]:
         plan = ctx.get("PLAN.md", "No plan yet.")
+        stack = ctx["stack"]
+        backend_root = self._BACKEND_ROOT_BY_STACK.get(stack, "backend/ (module path: backend.main)")
         prompt = (
-            f"Project: {ctx['project_name']} ({ctx['stack']})\n"
+            f"Project: {ctx['project_name']} ({stack})\n"
             f"Description: {ctx['description']}\n\n"
             f"PLAN.md:\n{plan[:3000]}\n\n"
+            f"MANDATORY backend package root for this stack: {backend_root}\n"
+            "Use this exact root for every backend file path, import statement, and module reference "
+            "in the document. Do not use any other backend root.\n\n"
             "Write ARCHITECTURE.md with sections: Components, Data Flow, Tech Stack, API Surface."
         )
         content = self._call_nim(self._messages(prompt), max_tokens=4096)
@@ -11008,7 +11244,7 @@ class DesignerAgent(SpecializedAgent):
 
     def run(self, ctx: Dict[str, Any]) -> Dict[str, str]:
         stack = ctx["stack"]
-        if stack in ("fastapi-react", "nextjs-postgres"):
+        if stack == "fastapi-react":
             prompt = (
                 f"Project: {ctx['project_name']}\nDescription: {ctx['description']}\n\n"
                 "Write frontend/src/theme.ts — a TypeScript module exporting a COLORS object and a TYPOGRAPHY object. "
@@ -11018,6 +11254,18 @@ class DesignerAgent(SpecializedAgent):
             )
             out = self._call_nim(self._messages(prompt), max_tokens=2048)
             return {"frontend/src/theme.ts": out}
+        elif stack == "nextjs-postgres":
+            # Same root as FrontendAgent/BackendAgent/ArchitectAgent for this
+            # stack — no frontend/ tree in a Next.js App Router project.
+            prompt = (
+                f"Project: {ctx['project_name']}\nDescription: {ctx['description']}\n\n"
+                "Write lib/theme.ts — a TypeScript module exporting a COLORS object and a TYPOGRAPHY object. "
+                "Use a professional dark-mode palette with primary=#38bdf8, background=#0f172a, surface=#1e293b, "
+                "text=#e2e8f0, muted=#94a3b8, danger=#fb7185, success=#4ade80. "
+                "No imports needed. Export as: export const COLORS = {{...}}; export const TYPOGRAPHY = {{...}};"
+            )
+            out = self._call_nim(self._messages(prompt), max_tokens=2048)
+            return {"lib/theme.ts": out}
         elif stack == "flutter-fastapi":
             prompt = (
                 f"Project: {ctx['project_name']}\n\n"
@@ -11026,8 +11274,22 @@ class DesignerAgent(SpecializedAgent):
             )
             out = self._call_nim(self._messages(prompt), max_tokens=2048)
             return {"lib/theme.dart": out}
+        elif stack == "expo-node":
+            # Explicit branch — do not fall through to silent {}. Expo apps
+            # still benefit from a shared color/typography module under app/.
+            prompt = (
+                f"Project: {ctx['project_name']}\nDescription: {ctx['description']}\n\n"
+                "Write app/theme.ts — a TypeScript module exporting COLORS and TYPOGRAPHY "
+                "for a React Native / Expo dark-mode UI. Primary #38bdf8, background #0f172a, "
+                "surface #1e293b, text #e2e8f0. Export: export const COLORS = {{...}}; export const TYPOGRAPHY = {{...}};"
+            )
+            out = self._call_nim(self._messages(prompt), max_tokens=2048)
+            return {"app/theme.ts": out}
         else:
-            return {}  # expo-node: minimal theme
+            raise ValueError(
+                f"DesignerAgent: unsupported stack {stack!r}. "
+                f"Expected one of: fastapi-react, nextjs-postgres, flutter-fastapi, expo-node."
+            )
 
 
 class FrontendAgent(SpecializedAgent):
@@ -11043,7 +11305,7 @@ class FrontendAgent(SpecializedAgent):
         arch = ctx.get("ARCHITECTURE.md", "")[:2000]
         results: Dict[str, str] = {}
 
-        if stack in ("fastapi-react", "nextjs-postgres"):
+        if stack == "fastapi-react":
             # Generate a real feature component
             prompt = (
                 f"Project: {ctx['project_name']}\nDescription: {ctx['description']}\n"
@@ -11066,6 +11328,32 @@ class FrontendAgent(SpecializedAgent):
             )
             results["frontend/src/components/ChatPanel.tsx"] = self._call_nim(self._messages(prompt2), max_tokens=3000)
 
+        elif stack == "nextjs-postgres":
+            # Next.js 14 App Router has no separate frontend/ tree — components
+            # live under app/ or components/ at the project root, matching the
+            # same root ArchitectAgent and BackendAgent already use for this stack.
+            prompt = (
+                f"Project: {ctx['project_name']}\nDescription: {ctx['description']}\n"
+                f"Architecture:\n{arch}\n\n"
+                "Write components/ProjectCard.tsx — a React Server/Client component that accepts "
+                "a project object {{id, name, description, status, created_at}} as props "
+                "and renders a polished dark-mode card. Include hover effects via inline style state. "
+                "Add 'use client' at the top if it uses hooks/state. "
+                "Export as: export default function ProjectCard({{ project }}: {{ project: any }}) {{...}}"
+            )
+            results["components/ProjectCard.tsx"] = self._call_nim(self._messages(prompt), max_tokens=3000)
+
+            prompt2 = (
+                f"Project: {ctx['project_name']}\n\n"
+                "Write components/ChatPanel.tsx — a React Client Component for an AI chat interface. "
+                "Start with 'use client'. It should have a messages list area (scrollable), a text input "
+                "at the bottom, and a Send button. State: messages array, input string. "
+                "Each message has {{role: 'user'|'assistant', content: string}}. "
+                "Assistant messages render in #1e293b bubbles, user messages in #38bdf8 bubbles. "
+                "Export as: export default function ChatPanel() {{...}}"
+            )
+            results["components/ChatPanel.tsx"] = self._call_nim(self._messages(prompt2), max_tokens=3000)
+
         elif stack == "flutter-fastapi":
             prompt = (
                 f"Project: {ctx['project_name']}\n\n"
@@ -11085,13 +11373,19 @@ class FrontendAgent(SpecializedAgent):
             )
             results["app/components/ProjectCard.tsx"] = self._call_nim(self._messages(prompt), max_tokens=2000)
 
+        else:
+            raise ValueError(
+                f"FrontendAgent: unsupported stack {stack!r}. "
+                f"Expected one of: fastapi-react, nextjs-postgres, flutter-fastapi, expo-node."
+            )
+
         return results
 
 
 class BackendAgent(SpecializedAgent):
     role = "backend"
     _system_prompt = (
-        "You are a senior backend engineer. Output ONLY valid Python or JavaScript source code.\n"
+        "You are a senior backend engineer. Output ONLY valid Python or JavaScript source code — no markdown fences.\n"
         "Write complete, working implementations — never placeholder functions or TODO stubs.\n"
         "Follow REST conventions. Include proper error handling and input validation."
     )
@@ -11117,9 +11411,14 @@ class BackendAgent(SpecializedAgent):
                 f"Project: {ctx['project_name']}\n\n"
                 "Write backend/routers/generate.py — a FastAPI router at prefix /api/generate. "
                 "POST /api/generate/code accepts {{prompt: str, stack: str}} JSON body and auth header. "
-                "It calls nim_service.generate_code() and returns {{code: str, files: list}}. "
-                "Include streaming via StreamingResponse for large outputs. "
-                "Import: from backend.routers.auth import current_user, from backend.nim_service import generate_code"
+                "CRITICAL call signature: generate_code is defined as "
+                "async def generate_code(prompt: str, api_key: str, model: str = 'z-ai/glm-5.2') -> str "
+                "in backend/nim_service.py. Call it ONLY with those keyword args — never pass stack= or user=. "
+                "Read the API key from os.environ.get('NVIDIA_API_KEY') or os.environ.get('NIM_API_KEY'); "
+                "if missing, raise HTTPException(503, 'NIM API key not configured'). "
+                "Return {{code: str, files: list}} where code is the returned string and files is []. "
+                "Include a non-streaming path only (skip StreamingResponse unless you implement a real async generator). "
+                "Import: from backend.routers.auth import current_user, from backend.nim_service import generate_code, import os"
             )
             results["backend/routers/generate.py"] = self._call_nim(self._messages(prompt2), max_tokens=3000)
 
@@ -11142,13 +11441,19 @@ class BackendAgent(SpecializedAgent):
             )
             results["server/routes/generate.js"] = self._call_nim(self._messages(prompt), max_tokens=3000)
 
+        else:
+            raise ValueError(
+                f"BackendAgent: unsupported stack {stack!r}. "
+                f"Expected one of: fastapi-react, nextjs-postgres, flutter-fastapi, expo-node."
+            )
+
         return results
 
 
 class DatabaseAgent(SpecializedAgent):
     role = "database"
     _system_prompt = (
-        "You are a senior database engineer. Output ONLY valid Python or SQL source code.\n"
+        "You are a senior database engineer. Output ONLY valid Python or SQL source code — no markdown fences.\n"
         "Write complete SQLAlchemy models or Prisma schemas. No placeholder fields."
     )
 
@@ -11176,13 +11481,48 @@ class DatabaseAgent(SpecializedAgent):
             )
             results["backend/database.py"] = self._call_nim(self._messages(prompt2), max_tokens=2000)
 
+        elif stack == "nextjs-postgres":
+            prompt = (
+                f"Project: {ctx['project_name']}\nDescription: {ctx['description']}\n"
+                f"Architecture:\n{arch}\n\n"
+                "Write prisma/schema.prisma — a Prisma schema for PostgreSQL. "
+                "Include: generator client { provider = \"prisma-client-js\" }, "
+                "datasource db { provider = \"postgresql\", url = env(\"DATABASE_URL\") }, "
+                "model User (id String @id @default(uuid()), email String @unique, passwordHash String, "
+                "createdAt DateTime @default(now())), "
+                "model Project (id String @id @default(uuid()), ownerId String, owner User @relation(fields: [ownerId], references: [id]), "
+                "name String, description String, status String, stack String, "
+                "createdAt DateTime @default(now()), updatedAt DateTime @updatedAt). "
+                "No placeholder fields."
+            )
+            results["prisma/schema.prisma"] = self._call_nim(self._messages(prompt), max_tokens=2000)
+
+        elif stack == "expo-node":
+            prompt = (
+                f"Project: {ctx['project_name']}\nDescription: {ctx['description']}\n\n"
+                "Write server/db.js — a Node.js module setting up a local SQLite database via better-sqlite3. "
+                "Export: const db = new Database(process.env.DB_PATH || './app.db'); "
+                "and a function initDb() that runs CREATE TABLE IF NOT EXISTS for a users table "
+                "(id TEXT PRIMARY KEY, email TEXT UNIQUE, password_hash TEXT, created_at TEXT) "
+                "and a projects table (id TEXT PRIMARY KEY, owner_id TEXT, name TEXT, description TEXT, "
+                "status TEXT, stack TEXT, created_at TEXT, updated_at TEXT). "
+                "Export: module.exports = { db, initDb };"
+            )
+            results["server/db.js"] = self._call_nim(self._messages(prompt), max_tokens=2000)
+
+        else:
+            raise ValueError(
+                f"DatabaseAgent: unsupported stack {stack!r}. "
+                f"Expected one of: fastapi-react, nextjs-postgres, flutter-fastapi, expo-node."
+            )
+
         return results
 
 
 class TesterAgent(SpecializedAgent):
     role = "tester"
     _system_prompt = (
-        "You are a QA engineer. Output ONLY valid Python pytest test code.\n"
+        "You are a QA engineer. Output ONLY valid Python pytest test code — no markdown fences.\n"
         "Write real tests with meaningful assertions — never trivial assert True.\n"
         "Use httpx.TestClient or fastapi.testclient.TestClient for API tests."
     )
@@ -11226,6 +11566,35 @@ class TesterAgent(SpecializedAgent):
                 "Use: const BASE = 'http://localhost:3000'"
             )
             results["tests/api.test.ts"] = self._call_nim(self._messages(prompt), max_tokens=3000)
+
+        elif stack == "expo-node":
+            # No agent in this pipeline writes a standalone server/app.js
+            # entrypoint for expo-node (only server/routes/*.js routers) — so
+            # unlike the other stacks, the test file must build its own
+            # minimal Express app inline and mount the generated router,
+            # rather than importing an entrypoint module that doesn't exist.
+            prompt = (
+                f"Project: {ctx['project_name']}\n\n"
+                "Write server/tests/api.test.js — Jest + supertest integration tests for the Express backend.\n"
+                "IMPORTANT: there is no server/app.js entrypoint in this project. Build the test app inline:\n"
+                "  const express = require('express');\n"
+                "  const app = express();\n"
+                "  app.use(express.json());\n"
+                "  app.get('/api/health', (req, res) => res.json({ status: 'ok' }));\n"
+                "  // mount any other generated routers under server/routes/ here if present\n"
+                "Include:\n"
+                "1. test for GET /api/health returns 200 with status='ok'\n"
+                "2. a second test exercising one route from server/routes/generate.js if it can be "
+                "required without a live NIM API key, otherwise skip it with test.skip and a comment why\n\n"
+                "Use: const request = require('supertest');"
+            )
+            results["server/tests/api.test.js"] = self._call_nim(self._messages(prompt), max_tokens=3000)
+
+        else:
+            raise ValueError(
+                f"TesterAgent: unsupported stack {stack!r}. "
+                f"Expected one of: fastapi-react, nextjs-postgres, flutter-fastapi, expo-node."
+            )
 
         return results
 
@@ -11474,6 +11843,21 @@ class GenerationOrchestrator:
                 except ValueError:
                     result.errors.append(f"repair round {round_n}: rejected out-of-tree path {rel_path!r}")
                     continue
+                # Repair writes bypass WriteTool, so apply the same fence-strip
+                # and (for .py) AST gate the normal write path enforces —
+                # otherwise a fenced or syntactically invalid "fix" lands on
+                # disk and the next pytest round fails for a reason the
+                # repair loop itself just introduced.
+                content = WriteTool._strip_balanced_code_fence(content, safe_rel)
+                if safe_rel.endswith((".py", ".pyi")):
+                    try:
+                        ast.parse(content)
+                    except SyntaxError as e:
+                        result.errors.append(
+                            f"repair round {round_n}: refused invalid Python for "
+                            f"{safe_rel!r} — {e.msg} (line {e.lineno})"
+                        )
+                        continue
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_text(content, encoding="utf-8")
                 ctx[safe_rel] = content
@@ -11637,16 +12021,34 @@ class GenerationOrchestrator:
             _prog(agent.role, f"Running {agent.role} agent…")
             try:
                 files = agent.run(ctx)
+                written = 0
                 for rel_path, content in files.items():
                     if not content.strip():
                         continue
+                    # Agent outputs bypass WriteTool, so apply the same
+                    # fence-strip + Python AST gate the interactive write
+                    # path enforces. Without this, a fenced or invalid
+                    # model payload lands on disk and only surfaces later
+                    # as a ModuleNotFoundError / SyntaxError in tests.
+                    content = WriteTool._strip_balanced_code_fence(content, rel_path)
+                    if rel_path.endswith((".py", ".pyi")):
+                        try:
+                            ast.parse(content)
+                        except SyntaxError as e:
+                            result.errors.append(
+                                f"{agent.role}: refused invalid Python for "
+                                f"{rel_path!r} — {e.msg} (line {e.lineno})"
+                            )
+                            _prog(agent.role, f"✗ refused {rel_path}: SyntaxError line {e.lineno}")
+                            continue
                     dest = project_dir / rel_path
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     dest.write_text(content, encoding="utf-8")
                     result.files_generated.append(rel_path)
                     # Feed artifact content back into ctx for downstream agents
                     ctx[rel_path] = content
-                _prog(agent.role, f"✓ {agent.role}: {len(files)} file(s) generated")
+                    written += 1
+                _prog(agent.role, f"✓ {agent.role}: {written} file(s) generated")
             except Exception as e:
                 err = f"{agent.role} failed: {e}"
                 result.errors.append(err)
@@ -11689,15 +12091,28 @@ class GenerationOrchestrator:
         _prog(devops.role, f"Running {devops.role} agent…")
         try:
             files = devops.run(ctx)
+            written = 0
             for rel_path, content in files.items():
                 if not content.strip():
                     continue
+                content = WriteTool._strip_balanced_code_fence(content, rel_path)
+                if rel_path.endswith((".py", ".pyi")):
+                    try:
+                        ast.parse(content)
+                    except SyntaxError as e:
+                        result.errors.append(
+                            f"{devops.role}: refused invalid Python for "
+                            f"{rel_path!r} — {e.msg} (line {e.lineno})"
+                        )
+                        _prog(devops.role, f"✗ refused {rel_path}: SyntaxError line {e.lineno}")
+                        continue
                 dest = project_dir / rel_path
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_text(content, encoding="utf-8")
                 result.files_generated.append(rel_path)
                 ctx[rel_path] = content
-            _prog(devops.role, f"✓ {devops.role}: {len(files)} file(s) generated")
+                written += 1
+            _prog(devops.role, f"✓ {devops.role}: {written} file(s) generated")
         except Exception as e:
             err = f"{devops.role} failed: {e}"
             result.errors.append(err)
@@ -12124,7 +12539,20 @@ class GenerateAppTool(Tool):
         project_name: Optional[str] = None,
         start_preview: bool = True,
     ) -> "ToolResult":
-        chosen_stack = _detect_stack(spec) if stack == "auto" else stack
+        _KNOWN_STACKS = ("fastapi-react", "nextjs-postgres", "flutter-fastapi", "expo-node")
+        if stack == "auto":
+            chosen_stack = _detect_stack(spec)
+        elif stack in _KNOWN_STACKS:
+            chosen_stack = stack
+        else:
+            return ToolResult(
+                "",
+                error=(
+                    f"Unsupported stack {stack!r}. "
+                    f"Use one of: {', '.join(_KNOWN_STACKS)} or 'auto'."
+                ),
+                is_error=True,
+            )
         project_dir = self.cwd
         if project_name:
             # project_name is model-controlled tool-call input, same as any
