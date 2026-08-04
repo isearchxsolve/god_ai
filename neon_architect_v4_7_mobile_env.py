@@ -1623,7 +1623,7 @@ class Tool:
         low = raw.lower()
         if ", content" in low or ", requirements" in low or ", risks" in low:
             raw = raw.split(",", 1)[0]
-        if ":" in raw and not (raw[1] == ":" and sys.platform == "win32"):
+        if ":" in raw and not (len(raw) > 1 and raw[1] == ":" and sys.platform == "win32"):
             # strip hallucinated keys like 'path: PLAN.md'
             raw = raw.split(":", 1)[0] if len(raw.split(":", 1)[0]) > 2 else raw
         if "," in raw:
@@ -2235,12 +2235,22 @@ class EditTool(Tool):
             if old_text not in original:
                 hint = self._diagnose_no_match(old_text, original)
                 return ToolResult("", error=f"old_text not found in {path}{hint}", is_error=True)
+            total_occurrences = original.count(old_text)
+            ambiguous_warning = ""
             if replace_all:
-                count = original.count(old_text)
+                count = total_occurrences
                 new_content = original.replace(old_text, new_text)
             else:
                 new_content = original.replace(old_text, new_text, 1)
                 count = 1
+                if total_occurrences > 1:
+                    ambiguous_warning = (
+                        f"\n\n⚠ WARNING: old_text matched {total_occurrences} times in {path}, "
+                        f"but only the FIRST occurrence was replaced (replace_all was not set). "
+                        f"If you intended to edit a different occurrence, include more surrounding "
+                        f"context in old_text to make it unique, or pass replace_all=true if you "
+                        f"meant to replace all of them."
+                    )
             with open(fp, "w", encoding="utf-8", newline="\n") as f:
                 f.write(new_content)
             with ReadTool._cache_lock:
@@ -2255,6 +2265,7 @@ class EditTool(Tool):
             msg = (
                 f"Replaced {count} occurrence(s) in {path} ({len(new_content)} chars now)\n"
                 f"--- diff ---\n{diff_txt}"
+                f"{ambiguous_warning}"
             )
             return ToolResult(msg)
         except Exception as e:
@@ -2326,6 +2337,8 @@ class SearchTool(Tool):
                         pass
                     if len(matches) >= 100:
                         break
+                if len(matches) >= 100:
+                    break
             if not matches:
                 return ToolResult(f"No matches for pattern: {pattern}")
             return ToolResult("\n".join(matches))
@@ -4432,7 +4445,15 @@ class ContextManager:
         total = 0
         for m in self.messages:
             content = str(m.get("content") or "")
-            for tc in m.get("tool_calls", []):
+            # m.get("tool_calls", []) only falls back to [] when the key is
+            # MISSING — a message with the key present but explicitly set to
+            # None (valid JSON `"tool_calls": null`, e.g. from a hand-edited
+            # or differently-serialized session file) makes .get() return
+            # None itself, and `for tc in None` throws TypeError. Internally
+            # constructed messages never do this (add_assistant only sets
+            # the key when tool_calls is truthy), but restored session data
+            # is external input and isn't guaranteed to keep that shape.
+            for tc in (m.get("tool_calls") or []):
                 fn = tc.get("function", {})
                 content += str(fn.get("name", "")) + str(fn.get("arguments", ""))
             total += max(1, len(content) // 4)
@@ -4445,6 +4466,16 @@ class ContextManager:
         return self.estimate_tokens() > self.compact_threshold
 
     def compact(self, keep_recent: int = 8) -> bool:
+        # keep_recent must stay >= 1: Python's rest[-0:] means "from index
+        # 0", i.e. the WHOLE list, not "the last 0 items" — so
+        # keep_recent=0 would silently make `recent` the entire message
+        # list and `old` empty, meaning nothing gets folded even though
+        # this still returns True and overwrites compaction_summary. Every
+        # current call site passes a hardcoded positive value (4/6/8), so
+        # this hasn't fired in practice, but the guard belongs on the
+        # function itself since a future caller passing a computed value
+        # could hit 0 silently.
+        keep_recent = max(1, keep_recent)
         sys_msgs = [m for m in self.messages if m.get("role") == "system"]
         rest = [m for m in self.messages if m.get("role") != "system"]
         if len(rest) <= keep_recent + 2:
@@ -6264,12 +6295,30 @@ class NeonArchitect:
                 orphans.append(t)
 
         print()
+        raw_tool_call_count = len(tool_calls)
         for tc in tool_calls:
             if isinstance(tc, dict):
                 tc["arguments"] = sanitize_tool_arguments(tc.get("arguments"))
                 if not tc.get("name"):
                     tc["name"] = "unknown"
         tool_calls = [tc for tc in tool_calls if isinstance(tc, dict) and tc.get("name") and tc.get("name") != "unknown"]
+        if raw_tool_call_count and not tool_calls:
+            # The backend streamed one or more tool_calls deltas (so the
+            # model clearly intended to call something — we saw an index
+            # slot get created for it), but not one of them ever received a
+            # function.name fragment, so every entry got filtered out above
+            # as nameless. If we returned this as-is, the caller would see
+            # a non-None finish_reason and treat the turn as a normal
+            # successful no-tool-call response — the model's actual intent
+            # silently vanishes with no retry, no warning, and no signal to
+            # the model that its call didn't go through. This happens in
+            # practice with non-conformant OpenAI-compatible backends
+            # (local vLLM/SGLang servers, etc.) that don't reliably stream
+            # function.name. Route it into the same retry path as a
+            # dropped stream by clearing finish_reason, since it's the same
+            # underlying failure: the backend claimed completion without
+            # delivering a usable result.
+            finish_reason = None
         return content, reasoning, tool_calls, finish_reason
 
     def _is_template_error(self, e: Exception) -> bool:
@@ -6612,15 +6661,37 @@ class NeonArchitect:
                 f"explicitly in a future turn; do not assume they happened."
             )
 
-        formatted = sanitize_tool_calls([
+        formatted_input = [
             {
                 "id": tc.get("id") or "",
                 "name": tc.get("name") or "",
                 "arguments": tc.get("arguments") or "{}",
             }
             for tc in tool_calls
-        ])
-        formatted = [f for f in formatted if f.get("function", {}).get("name")]
+        ]
+        formatted = sanitize_tool_calls(formatted_input)
+        # sanitize_tool_calls() fills a missing/empty name with the literal
+        # placeholder "unknown" (so downstream formatting always has a
+        # non-empty string to show), which means checking
+        # f["function"]["name"] here can never be falsy and this filter
+        # could never actually drop anything — a genuinely nameless tool
+        # call would still be added to context as a call to a tool
+        # literally named "unknown", confusing the model on later turns
+        # even though execute_tool() separately handles an empty name
+        # safely at call time. Filter on the pre-sanitization names
+        # instead. Correlating by id doesn't work here: providers that
+        # omit tool-call ids leave every real entry's id as "" too, so an
+        # id-based filter drops legitimate calls right along with the
+        # malformed one (worse than the bug being fixed). formatted_input
+        # is built 1:1 from tool_calls immediately above with no
+        # intervening filtering, and every element is a dict literal, so
+        # sanitize_tool_calls's own "isinstance(tc, dict): continue" skip
+        # can never fire on it — output stays positionally aligned with
+        # formatted_input/tool_calls, so a straight zip is safe here.
+        formatted = [
+            f for f, orig in zip(formatted, formatted_input)
+            if str(orig.get("name") or "").strip()
+        ]
         self.ctx.add_assistant(content="", tool_calls=formatted)
 
         spam_blocks = 0
@@ -7298,10 +7369,8 @@ class NeonArchitect:
                 )
                 time.sleep(0.5)
                 continue
-            self._malformed_tool_streak = 0
-
+            self.nudges = 0
             if tool_calls:
-                self.nudges = 0
                 self._execute_tools(tool_calls)
                 self._consecutive_no_tool_turns = 0
                 tool_names = {tc.get("name", "") for tc in tool_calls}
@@ -7328,6 +7397,21 @@ class NeonArchitect:
                         or "full implementation" in stated_intent
                     ):
                         is_degenerate_write = True
+                if not is_degenerate_write:
+                    # Reset only on a genuinely healthy turn. A prior version
+                    # reset this streak unconditionally (before this
+                    # degenerate-write check even ran), which wiped out any
+                    # malformed-tool-call streak accumulated on earlier turns
+                    # the instant a degenerate-write turn followed it — so a
+                    # mixed sequence (e.g. 2 malformed-syntax turns then 1
+                    # degenerate write) could never reach the streak-of-3
+                    # rotation threshold, directly contradicting the
+                    # "continuation, not a reset" intent below.
+                    self._malformed_tool_streak = 0
+            else:
+                self._malformed_tool_streak = 0
+
+            if tool_calls:
                 if is_degenerate_write:
                     self._malformed_tool_streak += 1
                     UI.warn(
@@ -7348,8 +7432,6 @@ class NeonArchitect:
                         except Exception:
                             pass
                         self._malformed_tool_streak = 0
-                else:
-                    self._malformed_tool_streak = 0
                 if tool_names & {"todo", "write", "edit"}:
                     self.persist(force=True)
                 delay = self._effective_inter_turn_delay()
@@ -9046,11 +9128,21 @@ if HAS_TEXTUAL:
             if self._busy:
                 self.write_log("[yellow]busy — wait for the current turn to finish[/]")
                 return
+            # Set _busy here, synchronously, on the main/event thread —
+            # not inside run_agent_turn. @work(thread=True) schedules the
+            # worker and returns immediately without waiting for the
+            # thread body to start, so if the flag were set on the worker
+            # thread instead, two Enter presses close enough together
+            # could both observe self._busy == False above and both spawn
+            # a worker, racing on the global sys.stdout/stderr swap below
+            # and on concurrent self.agent.run_turn() calls (which mutates
+            # shared agent/context state and isn't safe to run twice at
+            # once). Setting it here closes that window.
+            self._busy = True
             self.run_agent_turn(text)
 
         @work(thread=True)
         def run_agent_turn(self, user_text: str) -> None:
-            self._busy = True
             self.call_from_thread(self.set_status, "thinking…")
             self.call_from_thread(self.write_log, f"[bold cyan]you[/]  {user_text}")
 
@@ -10723,6 +10815,18 @@ class SpecializedAgent:
 
             try:
                 resp = provider.client.chat.completions.create(**payload)
+                # A malformed/empty response — e.g. resp.choices == [] under
+                # a content-filter block or certain backend error conditions
+                # that don't raise — throws IndexError/AttributeError here,
+                # neither of which is in OPENAI_ERRORS below. Without this
+                # check that exception escapes the except clause entirely,
+                # skipping every retry/rotation/backoff this loop provides
+                # for every other failure mode and crashing straight out of
+                # _call_nim on the very first bad response from any
+                # provider, permanent or not. Treat it as just another
+                # provider-side failure so it gets the same retry treatment.
+                if not getattr(resp, "choices", None):
+                    raise RuntimeError(f"Empty choices in response from {provider.name}")
                 provider.record_success()
                 return (resp.choices[0].message.content or "").strip()
             except OPENAI_ERRORS as e:
@@ -10736,6 +10840,13 @@ class SpecializedAgent:
                 else:
                     provider.record_failure()
                     time.sleep(2.0)
+            except (IndexError, AttributeError, KeyError, RuntimeError) as e:
+                # Malformed-response class of failure (empty choices, missing
+                # message/content on the returned object, etc.) — same
+                # retry/backoff treatment as the generic OPENAI_ERRORS branch
+                # above, just not wrapped in one of those SDK exception types.
+                provider.record_failure()
+                time.sleep(2.0)
         raise RuntimeError(f"[{self.role}] All NIM attempts exhausted")
 
     def _messages(self, user_content: str) -> List[Dict[str, str]]:
@@ -11210,26 +11321,59 @@ class LivePreviewManager:
             except RuntimeError:
                 return None
 
-            cmd = cls._server_cmd(stack, project_dir, port)
-            if not cmd:
-                return None
-
-            try:
-                env = {**os.environ, "PORT": str(port)}
-                proc = subprocess.Popen(
-                    cmd,
-                    cwd=str(project_dir),
-                    env=env,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                )
-                cls._servers[key] = proc
-                cls._ports[key] = port
-                return f"http://localhost:{port}"
-            except Exception as e:
-                UI.warn(f"Preview server failed to start: {e}")
-                return None
+            # _find_free_port proves a port is free by binding then
+            # immediately releasing it (it has to — the port needs to be
+            # free for the *subprocess* to bind, not held by us). That
+            # leaves a real gap between "port confirmed free" and "the
+            # child process has actually called bind()" — Popen() returning
+            # only means the OS has forked/exec'd the child, not that
+            # uvicorn/npm/node has finished importing and reached its own
+            # listen() call, which is easily hundreds of ms to a couple of
+            # seconds away. cls._lock serializes assignment across start()
+            # calls, but it's released right after Popen() returns — before
+            # that gap closes — so a second start() call for a *different*
+            # project, arriving in that window, can call _find_free_port
+            # again, see the same port as free, and be handed the same
+            # port. Retry with a fresh port if the child looks like it
+            # died immediately (the classic signature of "address already
+            # in use" for a CLI dev server that exits on bind failure
+            # rather than retrying itself).
+            port_attempts_left = 3
+            proc = None
+            while port_attempts_left > 0:
+                port_attempts_left -= 1
+                cmd = cls._server_cmd(stack, project_dir, port)
+                if not cmd:
+                    return None
+                try:
+                    env = {**os.environ, "PORT": str(port)}
+                    proc = subprocess.Popen(
+                        cmd,
+                        cwd=str(project_dir),
+                        env=env,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                    )
+                except Exception as e:
+                    UI.warn(f"Preview server failed to start: {e}")
+                    return None
+                time.sleep(0.3)
+                if proc.poll() is None:
+                    # Still alive after a brief settle — treat as bound.
+                    cls._servers[key] = proc
+                    cls._ports[key] = port
+                    return f"http://localhost:{port}"
+                # Died immediately — most likely lost the port race.
+                # Pick a new port (skipping the one that just failed) and
+                # retry, rather than silently returning a URL nothing is
+                # listening on.
+                try:
+                    port = _find_free_port(port + 1, 3999)
+                except RuntimeError:
+                    return None
+            UI.warn("Preview server exited immediately on every port attempt.")
+            return None
 
     @classmethod
     def stop(cls, project_dir: Path) -> None:
@@ -11326,7 +11470,35 @@ class GenerateAppTool(Tool):
         chosen_stack = _detect_stack(spec) if stack == "auto" else stack
         project_dir = self.cwd
         if project_name:
-            project_dir = self.cwd / project_name
+            # project_name is model-controlled tool-call input, same as any
+            # path argument to read/write/edit — but unlike those tools,
+            # this one built the path with a plain self.cwd / project_name
+            # join and no resolution check, so a value like
+            # "../../../../tmp/evil" resolved straight through to a
+            # directory outside the project sandbox, and everything this
+            # tool goes on to write (scaffold files, every agent's
+            # generated files) would land there instead of under cwd.
+            # Route it through the same _sanitize_rel_path +
+            # relative_to(cwd) check every other tool in this file already
+            # trusts, instead of trusting it as a bare path segment.
+            safe_name = self._sanitize_rel_path(project_name)
+            if not safe_name:
+                return ToolResult(
+                    f"Rejected project_name {project_name!r}: must be a plain "
+                    "folder name, not empty or a reserved word.",
+                    is_error=True,
+                )
+            candidate = (self.cwd / safe_name).resolve()
+            try:
+                candidate.relative_to(self.cwd.resolve())
+            except ValueError:
+                return ToolResult(
+                    f"Rejected project_name {project_name!r}: resolves outside "
+                    f"the project folder ({self.cwd}). Use a plain subfolder "
+                    "name, not a path with '..' segments.",
+                    is_error=True,
+                )
+            project_dir = candidate
             project_dir.mkdir(parents=True, exist_ok=True)
 
         progress_lines: List[str] = []
