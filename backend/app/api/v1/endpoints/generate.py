@@ -1,0 +1,1 @@
+from app.api.v1.generate import router  # noqa: F401

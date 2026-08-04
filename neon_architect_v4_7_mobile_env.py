@@ -8298,10 +8298,27 @@ class NeonArchitect:
             else:
                 UI.info("No goal set. Use /goal <description> to set one, then /autopilot to start.")
             return
-        self.goal = goal_text.strip()
+        new_goal = goal_text.strip()
+        if self.goal == new_goal and self.sdlc_phase_idx > 0:
+            UI.info(
+                f"[SDLC SAFEGUARD] Goal re-asserted without changes. "
+                f"Retaining active SDLC phase: {SDLC_PHASES[self.sdlc_phase_idx].upper()} "
+                f"(completed: {', '.join(sorted(self.sdlc_completed)) or 'none'})."
+            )
+            self._rebuild_system()
+            self.persist(force=True)
+            return
+        self.goal = new_goal
         self.autopilot = False
-        self.sdlc_phase_idx = 0
-        self.sdlc_completed.clear()
+        if not self.sdlc_completed and self.sdlc_phase_idx == 0:
+            self.sdlc_phase_idx = 0
+            self.sdlc_completed.clear()
+        else:
+            UI.info(
+                f"[SDLC SAFEGUARD] Preserving active SDLC phase: {SDLC_PHASES[self.sdlc_phase_idx].upper()} "
+                f"(completed: {', '.join(sorted(self.sdlc_completed)) or 'none'}) for updated goal. "
+                "Use /reset to restart SDLC from planning."
+            )
         self._rebuild_system()
         self.persist(force=True)
         UI.ok(f"Goal set: {self.goal}")
@@ -8828,9 +8845,12 @@ def apply_session(agent: "NeonArchitect", data: Dict[str, Any]) -> None:
         UI.warn(f"Session restore (persona): {e}")
 
     try:
-        agent.goal = _safe_get(data, "goal")
-        agent.sdlc_phase_idx = int(_safe_get(data, "sdlc_phase_idx") or 0)
-        agent.sdlc_completed = set(_safe_get(data, "sdlc_completed") or [])
+        agent.goal = _safe_get(data, "goal") or agent.goal
+        loaded_idx = int(_safe_get(data, "sdlc_phase_idx") or 0)
+        # MONOTONIC PHASE LOCK SAFEGUARD: Ensure loading session data never demotes a higher reached phase
+        agent.sdlc_phase_idx = max(getattr(agent, "sdlc_phase_idx", 0), loaded_idx)
+        loaded_completed = set(_safe_get(data, "sdlc_completed") or [])
+        agent.sdlc_completed.update(loaded_completed)
         agent.autopilot_rounds = int(_safe_get(data, "autopilot_rounds") or 0)
         agent.autopilot = False 
         agent._session_wants_resume = bool(
