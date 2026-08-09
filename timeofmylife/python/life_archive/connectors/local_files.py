@@ -15,6 +15,7 @@ from typing import AsyncIterator
 import uuid
 
 from life_archive.hash import compute_file_hashes
+from life_archive.indexing import SearchIndex
 from life_archive.manifest import (
     ManifestReader,
     ManifestWriter,
@@ -354,8 +355,8 @@ class LocalFilesConnector:
     ) -> StoredItem:  # TODO: Return IndexedItem when search is implemented
         """Index file content for search.
 
-        Currently a stub. Will integrate with Meilisearch/Qdrant when
-        infrastructure is deployed.
+        Lexical indexing into Meilisearch when the server is reachable;
+        silently skipped otherwise so ingestion never depends on infra.
 
         Args:
             item: Stored item
@@ -363,9 +364,14 @@ class LocalFilesConnector:
         Returns:
             IndexedItem (currently same as StoredItem)
         """
+        search_index = SearchIndex()
+        if search_index.available():
+            search_index.ensure_index()
+            search_index.index_entry(item.manifest_entry, item.archive_path)
+
         # TODO: Extract text content
         # TODO: Generate embeddings
-        # TODO: Index in Meilisearch (lexical) and Qdrant (semantic)
+        # TODO: Index in Qdrant (semantic)
         return item
 
     async def normalize(

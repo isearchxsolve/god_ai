@@ -549,7 +549,8 @@ class BaseConnector(ABC, Generic[T]):
 | Prerequisite | Status | Owner |
 |--------------|--------|-------|
 | Docker Desktop running | ❌ Blocked: WSL2 unavailable — hardware virtualization must be enabled in BIOS first (2026-08-09) | User/Operator |
-| `docker-compose.yml` + `.env.example` | ✅ Written (2026-08-09); not yet run — blocked on Docker above | Operator |
+| `docker-compose.yml` + `.env.example` | ✅ Written (2026-08-09); host port mappings added and `docker compose config` validated, secrets staged via `scripts\generate_secrets.ps1` (2026-08-10); not yet run — blocked on Docker above | Operator |
+| Native prototype stack (Docker-free) | ✅ Meilisearch, MinIO, Qdrant run natively from `tools\bin` via `scripts\start_native_stack.ps1` alongside native PostgreSQL 18; ingest → Meilisearch index → CLI search proven end-to-end, `DatabaseManager` proven against PostgreSQL (2026-08-10) | Operator |
 | GitHub PAT provided | ❌ Not provided | User |
 | Test corpus in `00_RAW/` | ✅ Created (`00_RAW/test/`: 4 files) | Operator |
 | `local-files` connector | ✅ Implemented + tested (2026-08-09) | Operator |

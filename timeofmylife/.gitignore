@@ -7,6 +7,10 @@ secrets/
 # Docker volumes / local infra state
 letsencrypt/
 
+# Native prototype services (downloaded binaries + their data dirs)
+tools/
+.qdrant-initialized
+
 # Python
 __pycache__/
 *.pyc

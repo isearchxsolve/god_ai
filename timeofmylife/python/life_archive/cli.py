@@ -21,6 +21,7 @@ from life_archive.connectors.linkedin import LinkedInConnector
 from life_archive.connectors.local_files import LocalFilesConnector
 from life_archive.connectors.whatsapp import WhatsAppConnector
 from life_archive.hash import hash_file_sha256
+from life_archive.indexing import SearchIndex
 from life_archive.manifest import ManifestReader
 from life_archive.schemas.provenance import DedupeStatus
 from life_archive.storage import StoragePathBuilder
@@ -296,11 +297,41 @@ def search(
 ):
     """Search the archive.
 
-    Currently searches manifest entries by filename or MIME type.
-    Will integrate with Meilisearch/Qdrant when deployed.
+    Uses Meilisearch when reachable; otherwise falls back to scanning
+    manifest entries by filename or MIME type.
     """
     console.print(f"[bold blue]Searching for:[/bold blue] {query}")
 
+    # Preferred path: lexical search index
+    search_index = SearchIndex()
+    if search_index.available():
+        hits = search_index.search(query, limit=limit)
+        if not hits:
+            console.print("[yellow]No results found[/yellow]")
+            return
+
+        console.print(f"\n[bold]Results ({len(hits)})[/bold] [dim]via Meilisearch[/dim]")
+        table = Table()
+        table.add_column("Filename", style="cyan")
+        table.add_column("Source", style="magenta")
+        table.add_column("MIME Type", style="blue")
+        table.add_column("Size", style="green", justify="right")
+        table.add_column("Date", style="yellow")
+
+        for hit in hits:
+            size_kb = hit.get("size_bytes", 0) / 1024
+            table.add_row(
+                str(hit.get("original_filename", ""))[:40],
+                str(hit.get("source", "")),
+                str(hit.get("mime_type", "")),
+                f"{size_kb:.1f} KB",
+                str(hit.get("original_timestamp", ""))[:10],
+            )
+
+        console.print(table)
+        return
+
+    # Fallback: scan the manifest directly
     reader = ManifestReader(archive_root / "01_MANIFEST")
     results = []
 
