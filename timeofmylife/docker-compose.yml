@@ -1,0 +1,179 @@
+version: "3.9"
+
+# Life Archive Phase 1 infrastructure stack.
+# Per 06_IMPLEMENTATION_PLAN.md Section 2.1.
+#
+# Usage:
+#   1. Copy .env.example to .env and fill in POSTGRES_USER, NEO4J_AUTH,
+#      MEILI_MASTER_KEY, REDIS_PASSWORD, N8N_HOST.
+#   2. Create the secret files referenced below under ./secrets/ (see
+#      .env.example for the exact filenames expected).
+#   3. docker compose up -d
+#   4. docker compose ps   # verify all services report healthy
+
+services:
+  traefik:
+    image: traefik:v3.0
+    command:
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--certificatesresolvers.dev.acme.tlschallenge=true"
+      - "--api.dashboard=false"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - letsencrypt:/letsencrypt
+    networks:
+      - life-archive-net
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: life_archive
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d life_archive"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - life-archive-net
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:6333/healthz || exit 1"]
+      interval: 10s
+    networks:
+      - life-archive-net
+
+  neo4j:
+    image: neo4j:5.23-community
+    environment:
+      NEO4J_AUTH: ${NEO4J_AUTH}
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_memory_heap_initial__size: 512m
+      NEO4J_dbms_memory_heap_max__size: 2g
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:7474 || exit 1"]
+      interval: 10s
+    networks:
+      - life-archive-net
+
+  minio:
+    image: minio/minio:RELEASE.2024-08-17T01-24-54Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER_FILE: /run/secrets/minio_access_key
+      MINIO_ROOT_PASSWORD_FILE: /run/secrets/minio_secret_key
+    secrets:
+      - minio_access_key
+      - minio_secret_key
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live || exit 1"]
+      interval: 10s
+    networks:
+      - life-archive-net
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --requirepass ${REDIS_PASSWORD} --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a $${REDIS_PASSWORD} ping | grep PONG"]
+      interval: 10s
+    networks:
+      - life-archive-net
+
+  meilisearch:
+    image: getmeili/meilisearch:v1.11
+    environment:
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY}
+      MEILI_NO_ANALYTICS: "true"
+    volumes:
+      - meili_data:/meili_data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:7700/health || exit 1"]
+      interval: 10s
+    networks:
+      - life-archive-net
+
+  n8n:
+    image: n8nio/n8n:latest
+    environment:
+      N8N_ENCRYPTION_KEY_FILE: /run/secrets/n8n_encryption_key
+      N8N_HOST: ${N8N_HOST}
+      N8N_PORT: "5678"
+      N8N_PROTOCOL: https
+      WEBHOOK_URL: https://${N8N_HOST}/
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: "5432"
+      DB_POSTGRESDB_DATABASE: life_archive
+      DB_POSTGRESDB_USER: ${POSTGRES_USER}
+      DB_POSTGRESDB_PASSWORD_FILE: /run/secrets/postgres_password
+      EXECUTIONS_MODE: queue
+      QUEUE_BULL_REDIS_HOST: redis
+      QUEUE_BULL_REDIS_PORT: "6379"
+      QUEUE_BULL_REDIS_PASSWORD_FILE: /run/secrets/redis_password
+    secrets:
+      - postgres_password
+      - redis_password
+      - n8n_encryption_key
+    volumes:
+      - n8n_data:/home/node/.n8n
+    depends_on:
+      - postgres
+      - redis
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:5678/healthz || exit 1"]
+      interval: 10s
+    networks:
+      - life-archive-net
+
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password.txt
+  minio_access_key:
+    file: ./secrets/minio_access_key.txt
+  minio_secret_key:
+    file: ./secrets/minio_secret_key.txt
+  redis_password:
+    file: ./secrets/redis_password.txt
+  n8n_encryption_key:
+    file: ./secrets/n8n_encryption_key.txt
+
+volumes:
+  pgdata:
+  qdrant_data:
+  neo4j_data:
+  neo4j_logs:
+  minio_data:
+  redis_data:
+  meili_data:
+  n8n_data:
+  letsencrypt:
+
+networks:
+  life-archive-net:
+    driver: bridge
