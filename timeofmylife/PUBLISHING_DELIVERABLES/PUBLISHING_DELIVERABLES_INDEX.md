@@ -67,6 +67,12 @@ If you want the shortest version of the strategy, it is this:
 ### LinkedIn monetization assets
 `PUBLISHING_DELIVERABLES/books/commercial/linkedin/`
 
+### New reel and sales assets
+- `PUBLISHING_DELIVERABLES/LINKEDIN_30_DIRECT_OFFER_POSTS.pdf`
+- `PUBLISHING_DELIVERABLES/GUMROAD_PRODUCT_LISTINGS.pdf`
+- `PUBLISHING_DELIVERABLES/THE_CONFRONTATION_8_REEL_SERIES.pdf`
+- `PUBLISHING_DELIVERABLES/FIRST_RUPEE_10_REEL_SERIES.pdf`
+
 ## Commercial books
 
 ### Reader / literary
@@ -91,6 +97,19 @@ If you only use three files, use these:
 1. `PUBLISHING_DELIVERABLES/books/commercial/linkedin/LinkedIn_Monetization_Complete_Tutorial.pdf`
 2. `PUBLISHING_DELIVERABLES/books/commercial/07_Free_GPU_Film_Lab.pdf`
 3. `PUBLISHING_DELIVERABLES/books/commercial/06_GODSHAND_Starter_Manual.pdf`
+
+## Extra execution assets
+
+Use these when you want faster posting and selling support:
+
+- `PUBLISHING_DELIVERABLES/LINKEDIN_30_DIRECT_OFFER_POSTS.pdf`
+- `PUBLISHING_DELIVERABLES/LINKEDIN_30_FOUNDER_POSTS.pdf`
+- `PUBLISHING_DELIVERABLES/LINKEDIN_30_ARTIST_MUSICIAN_POSTS.pdf`
+- `PUBLISHING_DELIVERABLES/LINKEDIN_30_MEMOIR_STYLE_POSTS.pdf`
+- `PUBLISHING_DELIVERABLES/THE_BEHOLDER_10_REEL_SERIES.pdf`
+- `PUBLISHING_DELIVERABLES/THE_CONFRONTATION_8_REEL_SERIES.pdf`
+- `PUBLISHING_DELIVERABLES/FIRST_RUPEE_10_REEL_SERIES.pdf`
+- `PUBLISHING_DELIVERABLES/GUMROAD_PRODUCT_LISTINGS.pdf`
 
 ## Recommended pricing
 
