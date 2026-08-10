@@ -1,0 +1,39 @@
+# Secrets — never commit
+.env
+secrets/
+*.pem
+*.key
+
+# Docker volumes / local infra state
+letsencrypt/
+
+# Native prototype services (downloaded binaries + their data dirs)
+tools/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+.venv/
+venv/
+
+# TypeScript / Node
+node_modules/
+dist/
+
+# Archive contents — the LIFE_ARCHIVE directory structure (empty dirs via
+# .gitkeep) is tracked, but actual ingested personal data must never be
+# committed.
+LIFE_ARCHIVE/00_RAW/**
+!LIFE_ARCHIVE/00_RAW/**/.gitkeep
+LIFE_ARCHIVE/02_PROCESSED/**
+!LIFE_ARCHIVE/02_PROCESSED/**/.gitkeep
+LIFE_ARCHIVE/03_NORMALIZED/**
+!LIFE_ARCHIVE/03_NORMALIZED/**/.gitkeep
+LIFE_ARCHIVE/99_PRIVATE/**
+!LIFE_ARCHIVE/99_PRIVATE/**/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db

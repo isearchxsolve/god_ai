@@ -1,0 +1,45 @@
+{
+  "name": "life-archive",
+  "version": "0.1.0",
+  "description": "Complete digital life research and publishing platform",
+  "type": "module",
+  "bin": {
+    "life-archive": "./dist/cli.js"
+  },
+  "scripts": {
+    "dev": "bun run --watch src/cli.ts",
+    "build": "bun build src/cli.ts --target=node --outdir=dist",
+    "test": "bun test",
+    "test:coverage": "bun test --coverage",
+    "lint": "eslint src/",
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write ."
+  },
+  "dependencies": {
+    "pg": "^8.12.0",
+    "kysely": "^0.27.4",
+    "ioredis": "^5.4.1",
+    "minio": "^8.0.1",
+    "neo4j-driver": "^5.23.0",
+    "meilisearch": "^0.41.0",
+    "openai": "^4.55.0",
+    "zod": "^3.23.8",
+    "commander": "^12.1.0",
+    "ora": "^8.0.1",
+    "chalk": "^5.3.0",
+    "mime-types": "^2.1.35"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.12",
+    "@types/pg": "^8.11.6",
+    "@types/mime-types": "^2.1.4",
+    "typescript": "^5.5.4",
+    "eslint": "^9.8.0",
+    "prettier": "^3.3.3",
+    "@typescript-eslint/parser": "^8.0.0",
+    "@typescript-eslint/eslint-plugin": "^8.0.0"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  }
+}
