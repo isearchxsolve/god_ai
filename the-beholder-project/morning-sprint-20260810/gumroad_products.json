@@ -1,0 +1,37 @@
+[
+  {
+    "type": "service",
+    "name": "1 Cinematic Launch Reel",
+    "price_inr": 1500,
+    "price_usd": 18,
+    "description_short": "Short cinematic reel for your product, song, launch, or personal brand \u2014 built from your assets and story.",
+    "description_long": "You send: product link, goal, reference style. \nI deliver: 20\u201330s cinematic reel scripted, edited, and ready to post. Built with AI tools + human direction. 2 revisions included.\n\nTurnaround: 90 minutes after receiving your assets.\nFormat: 1080x1920 (9:16), MP4, 30fps.\nDelivery: Google Drive link.",
+    "tags": [
+      "reel",
+      "cinematic",
+      "founder",
+      "creator",
+      "musician",
+      "launch"
+    ],
+    "cover_image": "reel-offer.png"
+  },
+  {
+    "type": "digital",
+    "name": "Free GPU Film Lab",
+    "price_inr": 499,
+    "price_usd": 6,
+    "description_short": "Practical PDF guide for making cinematic AI films/reels using free tools, GPU workarounds, and lightweight workflows.",
+    "description_long": "If you want to create cinematic AI reels or film-style visuals without spending heavily on tools, this guide gives you a practical starting system.\n\nInside you will find:\n- free and low-cost workflow ideas\n- a clear starting path for cinematic AI production\n- practical framing for turning tools into output\n- a shortcut around random experimentation\n\nThis is best for:\n- creators\n- founders\n- musicians\n- solo filmmakers\n- people trying to start with limited budget\n\nIf you want a practical, low-cost entry point into cinematic AI production, start here.",
+    "file_path": "C:\\god_ai\\timeofmylife\\PUBLISHING_DELIVERABLES\\books\\commercial\\07_Free_GPU_Film_Lab.pdf",
+    "tags": [
+      "AI film",
+      "cinematic",
+      "free tools",
+      "GPU",
+      "reels",
+      "guide"
+    ],
+    "cover_image": "lab-cover.png"
+  }
+]

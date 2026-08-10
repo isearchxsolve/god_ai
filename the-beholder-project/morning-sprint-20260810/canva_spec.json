@@ -1,0 +1,59 @@
+{
+  "dimensions": "1200x1200",
+  "background": "white",
+  "font": "Inter Bold (or Montserrat Bold)",
+  "text_color": "#000000",
+  "accent_color": "#FF6B35",
+  "text_blocks": [
+    {
+      "text": "I create cinematic reels",
+      "size": 72,
+      "weight": "bold",
+      "y": 200
+    },
+    {
+      "text": "for founders, creators,",
+      "size": 72,
+      "weight": "bold",
+      "y": 290
+    },
+    {
+      "text": "and musicians",
+      "size": 72,
+      "weight": "bold",
+      "y": 380
+    },
+    {
+      "text": "",
+      "size": 20,
+      "y": 450
+    },
+    {
+      "text": "1 reel: \u20b91,500",
+      "size": 60,
+      "weight": "bold",
+      "y": 500
+    },
+    {
+      "text": "3 reels: \u20b94,000",
+      "size": 60,
+      "weight": "bold",
+      "y": 580
+    },
+    {
+      "text": "",
+      "size": 20,
+      "y": 650
+    },
+    {
+      "text": "Comment REEL",
+      "size": 64,
+      "weight": "bold",
+      "y": 700,
+      "color": "#FF6B35",
+      "underline": true
+    }
+  ],
+  "export": "PNG",
+  "filename": "reel-offer.png"
+}
