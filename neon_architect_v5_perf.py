@@ -58,13 +58,14 @@ except ImportError:
 
 try:
     import openai
-    OPENAI_ERRORS = (
-        openai.APITimeoutError,
-        openai.APIConnectionError,
-        openai.InternalServerError,
-        openai.RateLimitError,
-        openai.APIStatusError,
+    _OPENAI_ERROR_NAMES = (
+        "APITimeoutError", "APIConnectionError", "InternalServerError",
+        "RateLimitError", "APIStatusError", "APIError",
     )
+    OPENAI_ERRORS = tuple(
+        cls for cls in (getattr(openai, name, None) for name in _OPENAI_ERROR_NAMES)
+        if isinstance(cls, type) and issubclass(cls, Exception)
+    ) or (Exception,)
 except ImportError:
     OPENAI_ERRORS = (Exception,)
 from dataclasses import dataclass, field
@@ -232,14 +233,93 @@ def save_project_api_key(project_dir: Path, api_key: str) -> Path:
         pass  # best-effort; e.g. unsupported on some filesystems
     path = _project_key_path(project_dir)
     cleaned = api_key.strip().strip('"').strip("'").replace("\n", "").replace("\r", "")
-    payload = {
-        "project": str(Path(project_dir).resolve()),
-        "api_key": cleaned,
-        "updated": datetime.now().isoformat(),
-    }
+    # Merge into any existing file (dead_models / api_key_2) instead of
+    # blind-overwriting — this file is shared with mark_model_dead and,
+    # since a second key was added, save_project_api_key_2.
+    data = _safe_json_load(path) or {}
+    data["project"] = str(Path(project_dir).resolve())
+    data["api_key"] = cleaned
+    data["updated"] = datetime.now().isoformat()
     tmp = path.with_suffix(".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
+        json.dump(data, f, indent=2)
+    try:
+        os.chmod(tmp, 0o600)
+    except Exception:
+        pass  # best-effort; e.g. unsupported on some filesystems
+    tmp.replace(path)
+    return path
+
+
+def load_project_api_key_2(project_dir: Path) -> str:
+    """Optional second, independent-NVIDIA-account key — see build_pool."""
+    data = _safe_json_load(_project_key_path(project_dir))
+    if data and isinstance(data.get("api_key_2"), str):
+        return data["api_key_2"].strip()
+    return ""
+
+
+def save_project_api_key_2(project_dir: Path, api_key_2: str) -> Path:
+    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(SESSIONS_DIR, 0o700)
+    except Exception:
+        pass  # best-effort; e.g. unsupported on some filesystems
+    path = _project_key_path(project_dir)
+    cleaned = api_key_2.strip().strip('"').strip("'").replace("\n", "").replace("\r", "")
+    data = _safe_json_load(path) or {}
+    data["project"] = str(Path(project_dir).resolve())
+    data["api_key_2"] = cleaned
+    data["updated_2"] = datetime.now().isoformat()
+    tmp = path.with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    try:
+        os.chmod(tmp, 0o600)
+    except Exception:
+        pass  # best-effort; e.g. unsupported on some filesystems
+    tmp.replace(path)
+    return path
+
+
+def load_project_api_key_n(project_dir: Path, n: int) -> str:
+    """Optional Nth (N>=2) independent-NVIDIA-account key — see build_pool.
+
+    Generalizes load_project_api_key_2 to an arbitrary slot number, stored
+    under an "api_key_N" field in the same per-project JSON file.
+    """
+    if n == 2:
+        return load_project_api_key_2(project_dir)
+    data = _safe_json_load(_project_key_path(project_dir))
+    field = f"api_key_{n}"
+    if data and isinstance(data.get(field), str):
+        return data[field].strip()
+    return ""
+
+
+def save_project_api_key_n(project_dir: Path, n: int, api_key_n: str) -> Path:
+    """Save the Nth (N>=2) independent-NVIDIA-account key.
+
+    Generalizes save_project_api_key_2 to an arbitrary slot number so
+    /apikey3, /apikey4, ... don't each need a hand-written twin function.
+    """
+    if n == 2:
+        return save_project_api_key_2(project_dir, api_key_n)
+    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(SESSIONS_DIR, 0o700)
+    except Exception:
+        pass  # best-effort; e.g. unsupported on some filesystems
+    path = _project_key_path(project_dir)
+    cleaned = api_key_n.strip().strip('"').strip("'").replace("\n", "").replace("\r", "")
+    field = f"api_key_{n}"
+    data = _safe_json_load(path) or {}
+    data["project"] = str(Path(project_dir).resolve())
+    data[field] = cleaned
+    data[f"updated_{n}"] = datetime.now().isoformat()
+    tmp = path.with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
     try:
         os.chmod(tmp, 0o600)
     except Exception:
@@ -457,14 +537,15 @@ DEFAULT_CONFIG = {
     # already-known-dead account no longer cost budget, so 4 is enough
     # to try every distinct account plus one retry each post-cooldown,
     # while still failing fast when the whole pool is genuinely down.
-    "retry_max": 4,
+    "retry_max": 2,
+    "specialized_retry_max": 2,
     "retry_base_delay": 2.5,
     "enable_openrouter": True,
     "stream_content_timeout": 200.0,
     "first_token_timeout": 60.0,
     "http_read_timeout": 180.0,
     "http_connect_timeout": 8.0,
-    "max_retries_per_provider": 2,
+    "max_retries_per_provider": 1,
     "nim_shared_rpm": 38.0,
     "omniroute_shared_rpm": 8.0,
     "thinking_effort": "low",
@@ -481,9 +562,10 @@ DEFAULT_CONFIG = {
     "inter_turn_delay": 1.5,
     "post_429_backoff": 40.0,
     "max_autopilot_rounds": 0,
-    "max_phase_rounds": 150,
-    "testing_max_phase_rounds": 150,
-    "verification_max_phase_rounds": 150,
+    "max_phase_rounds": 80,
+    "testing_max_phase_rounds": 80,
+    "verification_max_phase_rounds": 50,
+    "provider_failure_circuit": 3,
     "min_tests_passed": 1,
     "min_coverage_pct": 0,
     "max_same_tool_successes": 3,
@@ -1456,10 +1538,12 @@ def _make_keepalive_http_client(connect_timeout: float, read_timeout: float):
 
 class Provider:
     def __init__(self, name: str, base_url: str, api_key: str, model_cfg: Dict[str, Any],
-                 connect_timeout: float = 10.0, read_timeout: float = 20.0, bucket: Optional[TokenBucket] = None):
+                 connect_timeout: float = 10.0, read_timeout: float = 20.0, bucket: Optional[TokenBucket] = None,
+                 priority: int = 100):
         self.name = name
         self.model_cfg = model_cfg
         self.model_id = model_cfg["id"]
+        self.priority = int(priority)
         self.bucket = bucket if bucket is not None else TokenBucket(model_cfg.get("rpm", 20), safety=0.80)
         # Identity of the account/endpoint this provider talks to. Used
         # solely to find "sibling" providers that share the same real
@@ -1539,41 +1623,68 @@ class Provider:
 
 
 class ProviderPool:
+    """Provider pool with account-aware fair scheduling.
+
+    Multiple model IDs can share one real quota account. Scheduling at the
+    model level creates fake diversity and turns a single account outage into
+    repeated 429/503 round-trips. This pool schedules independent accounts
+    first, then chooses the healthiest model inside the selected account.
+    """
     def __init__(self, providers: List[Provider]):
         self.providers = providers
         self.index = 0
         self.attempts_on_current = 0
+        self._account_index = 0
+        self._rebuild_accounts()
+
+    def _rebuild_accounts(self):
+        seen = set()
+        self.account_keys: List[Tuple[str, str]] = []
+        for p in self.providers:
+            key = getattr(p, "_account_key", None)
+            if key is not None and key not in seen:
+                seen.add(key)
+                self.account_keys.append(key)
+        if self.account_keys:
+            self._account_index %= len(self.account_keys)
+        else:
+            self._account_index = 0
 
     def current(self) -> Provider:
         return self.providers[self.index]
 
     def rotate(self):
+        if not self.providers:
+            return
         self.index = (self.index + 1) % len(self.providers)
         self.attempts_on_current = 0
 
     def next_available(self) -> Optional[Provider]:
-        for _ in range(len(self.providers)):
-            p = self.current()
-            if p.available() and p.bucket.try_acquire():
-                # Advance the index now, on hand-out, not only when a
-                # provider is found unavailable. Previously self.index
-                # only ever moved inside the `else: self.rotate()`
-                # branch below — meaning that with every provider
-                # healthy, next_available() always returned
-                # self.providers[self.index] unchanged, since nothing
-                # ever advanced it on a success path. Confirmed via
-                # simulation: 3 healthy providers, 6 consecutive calls,
-                # same provider returned every time. That's not a
-                # resilience bug (failure cooldown/permanent-disable
-                # still route around a broken provider correctly via
-                # this same loop) — it's a load-spreading bug: capacity
-                # on 2 of 3 configured providers went completely unused
-                # under normal healthy operation, concentrating rate
-                # limits and cost on a single account instead of
-                # spreading across the pool as configured.
-                self.rotate()
+        """Return the highest-priority healthy account/model.
+
+        The outer router is primary-first: healthy primary capacity is sticky;
+        lower-priority backends become eligible only when higher-priority
+        providers are unavailable or throttled. This prevents normal turns from
+        round-robining across NIM, OmniRoute, and OpenRouter.
+        """
+        if not self.providers:
+            return None
+        active = [
+            p for p in self.providers
+            if p.available() and not getattr(p, "permanently_disabled", False)
+        ]
+        if not active:
+            return None
+        best_priority = min(getattr(p, "priority", 100) for p in active)
+        candidates = [p for p in active if getattr(p, "priority", 100) == best_priority]
+        candidates.sort(key=lambda p: (p.failures, p.warm_latency or 1e9, p.name))
+        for p in candidates:
+            if p.bucket.try_acquire():
+                try:
+                    self.index = self.providers.index(p)
+                except ValueError:
+                    self.index = 0
                 return p
-            self.rotate()
         return None
 
     def should_rotate(self, max_per_provider: int = 3) -> bool:
@@ -1581,27 +1692,14 @@ class ProviderPool:
         return self.attempts_on_current >= max_per_provider
 
     def propagate_shared_cooldown(self, source: "Provider", cooldown: float) -> List[str]:
-        """After `source` gets a LIVE 429 from the server, apply the same
-        cooldown to every other provider sharing its (base_url, api_key)
-        — i.e. the same real account quota. The shared TokenBucket already
-        stops new *local* over-request between siblings, but a 429 that
-        already happened on the wire means the account is confirmed over
-        quota right now; without this, next_available() will still hand
-        out sibling providers (they pass their own, still-fresh
-        cooldown_until and their own try_acquire on the shared bucket
-        might still succeed depending on timing) and each one burns a
-        real network round-trip just to get its own 429 and its own
-        cooldown, which is exactly the back-to-back
-        NIM-Primary / NIM-minimax-m3 / NIM-laguna-xs-2.1 429 sequence
-        this exists to shorten. Returns the names of siblings that were
-        cooled down, for logging.
-        """
         cooled: List[str] = []
+        source_key = getattr(source, "_account_key", None)
+        until = time.monotonic() + cooldown
         for p in self.providers:
             if p is source or getattr(p, "permanently_disabled", False):
                 continue
-            if getattr(p, "_account_key", None) == getattr(source, "_account_key", None):
-                p.cooldown_until = max(p.cooldown_until, time.monotonic() + cooldown)
+            if getattr(p, "_account_key", None) == source_key:
+                p.cooldown_until = max(p.cooldown_until, until)
                 cooled.append(p.name)
         return cooled
 
@@ -1615,182 +1713,128 @@ class ProviderPool:
 
 
 def build_pool(config: Dict[str, Any], model_key_override: Optional[str] = None) -> ProviderPool:
-    """Build a provider pool for dual-backend operation.
+    """Build a small, backend-aware provider set.
 
-    Priority:
-      1. Selected model + its backend (OmniRoute local or NVIDIA NIM)
-      2. Coding-first OmniRoute free fallbacks (auto → qwen-coder → deepseek → …)
-      3. NIM fallbacks when an nvapi- key is present
-      4. Direct OpenRouter :free models when OPENROUTER_API_KEY is set
+    Design rule:
+      - NIM: direct model selection with a *small* curated fallback set.
+      - OmniRoute: ONE logical gateway model; OmniRoute owns upstream routing.
+      - OpenRouter: ONE logical free router; OpenRouter owns provider/model routing.
+
+    The outer Neon router therefore chooses between independent backend/account
+    domains instead of duplicating the routing logic already present inside
+    OmniRoute/OpenRouter.
     """
     providers: List[Provider] = []
     api_key = (config.get("api_key") or "").strip()
     is_nim_key = api_key.startswith("nvapi-") or api_key.startswith("Bearer nvapi-")
-    omni_base = (
-        config.get("omniroute_base_url")
-        or config.get("base_url")
-        or OMNIROUTE_BASE_URL
-    ).rstrip("/")
+    omni_base = (config.get("omniroute_base_url") or config.get("base_url") or OMNIROUTE_BASE_URL).rstrip("/")
     nim_base = NIM_BASE_URL
-    model_key = (
-        model_key_override
-        if model_key_override in MODELS
-        else config.get("default_model", "auto-best")
-    )
-    if model_key not in MODELS:
-        model_key = "auto-best"
+    selected_key = model_key_override if model_key_override in MODELS else config.get("default_model", "auto-best")
+    selected_cfg = MODELS.get(selected_key, MODELS["auto-best"])
+    dead_model_ids = set(load_dead_models(Path(config["project_dir"]).resolve())) if config.get("project_dir") else set()
     read_timeout = float(config.get("http_read_timeout") or 180.0)
     connect_timeout = float(config.get("http_connect_timeout") or 8.0)
-    _pd_raw = config.get("project_dir")
-    dead_model_ids = set(load_dead_models(Path(_pd_raw).resolve())) if _pd_raw else set()
-
-    omni_rpm = float(config.get("omniroute_shared_rpm", 40.0))
-    nim_shared_rpm = float(config.get("nim_shared_rpm", 38.0))
+    omni_rpm = float(config.get("omniroute_shared_rpm", 8.0) or 8.0)
+    nim_rpm = float(config.get("nim_shared_rpm", 38.0) or 38.0)
     shared_buckets: Dict[Tuple[str, str], TokenBucket] = {}
 
-    def get_or_create_bucket(account_key: Tuple[str, str], rpm: float) -> TokenBucket:
+    def get_bucket(account_key: Tuple[str, str], rpm: float) -> TokenBucket:
         if account_key not in shared_buckets:
             shared_buckets[account_key] = TokenBucket(rpm, safety=0.80)
         return shared_buckets[account_key]
 
-    # OmniRoute accepts any non-empty bearer; many local installs use a dummy.
-    omni_key = (
-        os.environ.get("OMNIROUTE_API_KEY")
-        or (api_key if api_key and not is_nim_key else "")
-        or "omniroute"
-    )
-    enable_omni = bool(config.get("enable_omniroute", True))
+    def add_provider(name: str, base: str, key: str, mkey: str, rpm: float, priority: int = 100) -> None:
+        cfg = MODELS.get(mkey)
+        if not cfg or cfg["id"] in dead_model_ids:
+            return
+        account_key = (base, key)
+        if any(p.model_id == cfg["id"] and p._account_key == account_key for p in providers):
+            return
+        providers.append(Provider(name, base, key, cfg, connect_timeout, read_timeout, get_bucket(account_key, rpm), priority=priority))
 
-    omni_fallbacks = [
-        "laguna-free",
-        "nemotron-3-ultra-free",
-        "deepseek-v4-flash-free",
-        "opencode-free",
-        "nemotron-3.5-lightning-free",
-        "auto-best",
-        # Reordered by measured latency from live probe (fastest clean
-        # 200s first). All ids switched to opencode/ prefix that the
-        # no-key probe confirmed. Thinking forced off + shared RPM
-        # crushed to 8 to stop the 429 cascade that was killing every
-        # free-pool turn.
-    ]
-    nim_fallbacks = [
-        "glm-5.2-fp8",
-        "minimax-m3",
-        "kimi-k2-thinking",
-        "laguna-xs-2.1",
-    ]
+    omni_key = os.environ.get("OMNIROUTE_API_KEY") or (api_key if api_key and not is_nim_key else "") or "omniroute"
 
-    def _add(name: str, base: str, key: str, mkey: str, rpm: float) -> None:
-        if mkey not in MODELS:
-            return
-        cfg = MODELS[mkey]
-        if cfg["id"] in dead_model_ids:
-            return
-        if any(p.model_id == cfg["id"] and getattr(p, "_account_key", None) == (base, key) for p in providers):
-            return
-        providers.append(
-            Provider(
-                name,
-                base,
-                key,
-                cfg,
+    # --- NIM: direct, deliberately small model set -------------------------
+    if is_nim_key:
+        # Preserve an explicitly selected NIM model when one was chosen.
+        if selected_cfg.get("backend") == "nim" and selected_key in MODELS:
+            add_provider("NIM-primary", nim_base, api_key, selected_key, nim_rpm, priority=0)
+        else:
+            add_provider("NIM-primary", nim_base, api_key, "glm-5.2", nim_rpm, priority=0)
+
+        # One reasoning-oriented fallback and one broad/fast fallback. Do not
+        # enumerate the entire NIM catalog; every model on this account shares
+        # the same server-side quota.
+        for mkey in ("laguna-xs-2.1", "minimax-m3"):
+            if mkey != selected_key:
+                add_provider(f"NIM-{mkey}", nim_base, api_key, mkey, nim_rpm, priority=1)
+
+        # Additional genuinely independent NIM accounts remain supported.
+        extra_keys: List[str] = []
+        extra_keys.extend([(k or "").strip() for k in (config.get("nim_api_keys") or []) if (k or "").strip()])
+        for n in range(2, 13):
+            k = (config.get(f"nim_api_key_{n}") or os.environ.get(f"NVIDIA_API_KEY_{n}") or "").strip()
+            if not k:
+                break
+            extra_keys.append(k)
+
+        seen = {api_key}
+        acct = 2
+        for key in extra_keys:
+            if not (key.startswith("nvapi-") or key.startswith("Bearer nvapi-")) or key in seen:
+                acct += 1
+                continue
+            seen.add(key)
+            rpm = float(config.get(f"nim_shared_rpm_{acct}", nim_rpm) or nim_rpm)
+            if selected_cfg.get("backend") == "nim" and selected_key in MODELS:
+                add_provider(f"NIM{acct}-primary", nim_base, key, selected_key, rpm, priority=10)
+            else:
+                add_provider(f"NIM{acct}-primary", nim_base, key, "glm-5.2", rpm, priority=10)
+            add_provider(f"NIM{acct}-fallback", nim_base, key, "laguna-xs-2.1", rpm, priority=11)
+            acct += 1
+
+    # --- OmniRoute: one logical gateway route -------------------------------
+    if config.get("enable_omniroute", True):
+        # If the user explicitly selected an OmniRoute model, honor it.
+        omni_model = selected_key if selected_cfg.get("backend") == "omniroute" else "auto-best"
+        if omni_model not in MODELS or MODELS[omni_model].get("backend") != "omniroute":
+            omni_model = "auto-best"
+        add_provider("OmniRoute", omni_base, omni_key, omni_model, omni_rpm, priority=20)
+
+    # --- OpenRouter: one logical free router -------------------------------
+    if config.get("enable_openrouter", True):
+        or_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+        if or_key:
+            or_cfg = {
+                "id": "openrouter/free",
+                "name": "OpenRouter Free Router",
+                "provider": "OpenRouter",
+                "backend": "openrouter",
+                "rpm": float(config.get("openrouter_shared_rpm", 8.0) or 8.0),
+                "max_tokens": 8192,
+                "ctx_window": 131072,
+                "thinking": False,
+                "extra_body": None,
+                "temperature": 0.2,
+                "top_p": 0.9,
+            }
+            account_key = (OPENROUTER_BASE_URL, or_key)
+            providers.append(Provider(
+                "OpenRouter-free",
+                OPENROUTER_BASE_URL,
+                or_key,
+                or_cfg,
                 connect_timeout,
                 read_timeout,
-                get_or_create_bucket((base, key), rpm),
-            )
-        )
-
-    primary_cfg = MODELS.get(model_key, MODELS["auto-best"])
-    primary_backend = primary_cfg.get("backend") or (
-        "nim" if primary_cfg.get("provider") == "NVIDIA NIM" else "omniroute"
-    )
-
-    # Primary
-    if primary_backend == "nim" and is_nim_key:
-        _add(f"NIM-Primary", nim_base, api_key, model_key, nim_shared_rpm)
-    elif enable_omni:
-        _add(f"Omni-Primary", omni_base, omni_key, model_key, omni_rpm)
-    elif is_nim_key:
-        _add(f"NIM-Primary", nim_base, api_key, model_key, nim_shared_rpm)
-
-    # OmniRoute free fallback chain (coding-first)
-    if enable_omni:
-        for fb in omni_fallbacks:
-            if fb == model_key:
-                continue
-            _add(f"Omni-{fb}", omni_base, omni_key, fb, omni_rpm)
-
-    # NIM fallbacks only with a real NVIDIA key
-    if is_nim_key:
-        for fb in nim_fallbacks:
-            if fb == model_key:
-                continue
-            _add(f"NIM-{fb}", nim_base, api_key, fb, nim_shared_rpm)
-        # Also expose glm-5.2 itself as last-resort if not primary
-        if model_key != "glm-5.2":
-            _add("NIM-glm-5.2", nim_base, api_key, "glm-5.2", nim_shared_rpm)
-
-    # Direct OpenRouter free (optional; needs OPENROUTER_API_KEY)
-    if config.get("enable_openrouter", True):
-        or_key = os.environ.get("OPENROUTER_API_KEY")
-        if not or_key:
-            # enable_openrouter=True is the default, so silently skipping
-            # this block makes the pool look like it has an independent
-            # third account when it doesn't — every provider in the pool
-            # is then really just 1-2 accounts (OmniRoute's shared local
-            # key, and/or one nvapi- key), so if those get rate-limited
-            # or go down together, there is NO fallback left, and the
-            # only sign of that at runtime is a same-account cooldown
-            # cascade followed by "All providers failed." Surface the gap
-            # at pool-build time instead of letting it fail silently mid-turn.
-            UI.warn(
-                "OpenRouter fallback is enabled in config but OPENROUTER_API_KEY "
-                "is not set — skipping it. The provider pool has no third, "
-                "independent account: if OmniRoute and your NIM key both "
-                "rate-limit/outage at once, there is no fallback left. "
-                "Set OPENROUTER_API_KEY to add real redundancy, or set "
-                "enable_openrouter=False to silence this warning."
-            )
-        if or_key:
-            or_models = [
-                ("OR-Qwen-Coder", "qwen/qwen-2.5-coder-32b-instruct:free"),
-                ("OR-DeepSeek", "deepseek/deepseek-chat:free"),
-                ("OR-Llama31-8B", "meta-llama/llama-3.1-8b-instruct:free"),
-            ]
-            or_bucket = TokenBucket(15, safety=0.80)
-            for name, mid in or_models:
-                if mid in dead_model_ids:
-                    continue
-                fake_cfg = {
-                    "id": mid,
-                    "name": name,
-                    "rpm": 15,
-                    "max_tokens": 8192,
-                    "ctx_window": 131072,
-                    "thinking": False,
-                    "extra_body": None,
-                    "backend": "openrouter",
-                }
-                providers.append(
-                    Provider(
-                        name,
-                        OPENROUTER_BASE_URL,
-                        or_key,
-                        fake_cfg,
-                        connect_timeout,
-                        read_timeout,
-                        or_bucket,
-                    )
-                )
+                get_bucket(account_key, or_cfg["rpm"]),
+                priority=30,
+            ))
+        else:
+            UI.warn("OpenRouter enabled but OPENROUTER_API_KEY is not set — no OpenRouter route added.")
 
     if not providers:
         raise RuntimeError(
-            "No providers configured for this project. "
-            "Options: (1) run OmniRoute locally (default http://localhost:20128/v1) "
-            "and use model auto-best; (2) set NVIDIA_API_KEY=nvapi-...; "
-            "(3) set OPENROUTER_API_KEY for direct OpenRouter free models. "
-            f"project={config.get('project_dir')} omniroute={omni_base}"
+            "No providers configured. Start OmniRoute, set NVIDIA_API_KEY, or set OPENROUTER_API_KEY."
         )
 
     return ProviderPool(providers)
@@ -1872,10 +1916,28 @@ def warmup_pool(pool: "ProviderPool", config: Dict[str, Any], max_wait: float = 
                 except Exception:
                     pass
         if cooled:
-            UI.warn(
-                f"Warmup: not enabled on this key — {', '.join(cooled)} cooled 5m "
-                f"(skips 404 round-trips)"
-            )
+            is_openrouter = base_url.rstrip("/") == OPENROUTER_BASE_URL.rstrip("/")
+            if is_openrouter and len(cooled) == len(siblings):
+                # The static OR-Seed ("openrouter/free") isn't visible on
+                # this key at all -> even the router-of-free-models is
+                # unreachable, so live discovery below has nothing to seed
+                # from either. This pool has NO working 3rd account this
+                # session — the exact gap that left Turn 126 (see user's
+                # log) with nothing left when NIM + OmniRoute cooled down
+                # together.
+                UI.warn(
+                    f"OpenRouter fallback: key is set but 'openrouter/free' "
+                    f"itself isn't visible on this account ({', '.join(cooled)}). "
+                    f"This pool has NO working 3rd account this session — if "
+                    f"NIM and OmniRoute both cool down at once, there's "
+                    f"nothing left. Check your OpenRouter account/key at "
+                    f"https://openrouter.ai/settings/keys."
+                )
+            else:
+                UI.warn(
+                    f"Warmup: not enabled on this key — {', '.join(cooled)} cooled 5m "
+                    f"(skips 404 round-trips)"
+                )
         UI.ok(
             f"Warmup: {base_url} reachable in {dt:.2f}s — TLS cached, {len(ids)} models visible"
         )
@@ -1889,309 +1951,9 @@ def warmup_pool(pool: "ProviderPool", config: Dict[str, Any], max_wait: float = 
     for t in threads:
         t.join(timeout=max(0.05, deadline - time.monotonic()))
 
-    # Live free-model chat probe (the missing piece). The /models list only
-    # tells us the id exists; it does not tell us whether a real completion
-    # returns 200, 429, 503, or an empty body. Running a tiny PONG probe here
-    # means we discover dead/rate-limited free models *before* autopilot
-    # burns turns on them.
-    try:
-        # Give the free probe real budget so it can discover ~30-50 models
-        _warmup_free_chat_probe(pool, config, max_wait=max(25.0, max_wait * 2.5, 45.0))
-    except Exception as e:
-        UI.warn(f"Warmup free-probe skipped: {str(e)[:80]}")
-
-
-def _warmup_free_chat_probe(pool: "ProviderPool", config: Dict[str, Any], max_wait: float = 45.0) -> None:
-    """Probe free Omni models with a real chat completion AND refresh the
-    live free-model set from /v1/models.
-
-    1. Probe every free provider already in the pool.
-    2. Pull the current /v1/models catalog and discover extra high-value
-       free candidates (opencode/*, auto/*, etc.) — up to ~50 dynamically.
-    3. Probe those discoveries (budget-limited by max_wait).
-    4. Dynamically inject any newly-found live models into the front of
-       the pool so the agent actually uses them this session.
-    5. Re-order pool.providers so live free models sit first by latency.
-
-    Live rule (tightened): any HTTP 200 counts as live. We no longer cool
-    a model just because the PONG body was empty or non-JSON — that used
-    to mis-classify healthy free models as dead.
-    """
-    if not HAS_HTTPX:
-        return
-
-    free_keys = {
-        "opencode-free", "laguna-free", "deepseek-v4-flash-free",
-        "nemotron-3-ultra-free", "nemotron-3.5-lightning-free", "auto-best",
-    }
-    # Broad free / auto prefixes we are willing to discover at runtime
-    DISCOVER_PREFIXES = (
-        "opencode/", "oc/", "auto/",
-    )
-    # Dynamic cap: prefer config override, else scale with max_wait, hard ceiling 50
-    cfg_cap = int(config.get("warmup_max_discover", 0) or 0)
-    if cfg_cap > 0:
-        MAX_EXTRA_DISCOVER = min(50, cfg_cap)
-    else:
-        # ~1.2 models per second of budget after base probes, capped at 50
-        MAX_EXTRA_DISCOVER = min(50, max(12, int(max_wait * 1.1)))
-
-    candidates: List["Provider"] = []
-    seen_ids: set = set()
-    omni_account: Optional[Tuple[str, str]] = None
-    omni_bucket = None
-    connect_timeout = float(config.get("http_connect_timeout") or 8.0)
-    read_timeout = float(config.get("http_read_timeout") or 180.0)
-
-    for p in pool.providers:
-        if getattr(p, "permanently_disabled", False):
-            continue
-        mkey = None
-        for k, v in MODELS.items():
-            if v.get("id") == p.model_id:
-                mkey = k
-                break
-        is_free = (
-            mkey in free_keys
-            or str(p.model_id).startswith(("opencode/", "oc/", "auto/"))
-        )
-        if not is_free:
-            continue
-        if p.model_id in seen_ids:
-            continue
-        seen_ids.add(p.model_id)
-        candidates.append(p)
-        if omni_account is None:
-            omni_account = getattr(p, "_account_key", None)
-            omni_bucket = getattr(p, "bucket", None)
-
-    project_dir = None
-    try:
-        _pd = config.get("project_dir")
-        if _pd:
-            project_dir = Path(_pd).resolve()
-    except Exception:
-        pass
-
-    # ── Discover extra free models from live /v1/models ──────────────────
-    extra_ids: List[str] = []
-    if omni_account is not None:
-        base_url, api_key = omni_account
-        try:
-            r = httpx.get(
-                f"{base_url}/models",
-                headers={"Authorization": f"Bearer {api_key}"},
-                timeout=8.0,
-            )
-            if r.status_code == 200:
-                live_ids = [
-                    m.get("id")
-                    for m in (r.json().get("data") or [])
-                    if isinstance(m, dict) and isinstance(m.get("id"), str)
-                ]
-                # Prefer coding / free / best / fast names, but take a broad
-                # slice of auto/ and opencode/ so the live set stays dynamic.
-                scored: List[Tuple[int, str]] = []
-                for mid in live_ids:
-                    if mid in seen_ids:
-                        continue
-                    if not any(mid.startswith(pref) for pref in DISCOVER_PREFIXES):
-                        continue
-                    low = mid.lower()
-                    score = 0
-                    if "free" in low:
-                        score += 5
-                    if any(x in low for x in ("coding", "best-", "pro-", "fast", "pickle", "laguna", "deepseek", "nemotron")):
-                        score += 3
-                    if any(x in low for x in ("cheap", "chat", "smart", "offline", "multimodal")):
-                        score += 1
-                    scored.append((score, mid))
-                scored.sort(key=lambda x: (-x[0], x[1]))
-                extra_ids = [m for _, m in scored[:MAX_EXTRA_DISCOVER]]
-        except Exception:
-            pass
-
-    # Build lightweight Provider shells for discovered ids so they can be probed
-    discovered_providers: List["Provider"] = []
-    if extra_ids and omni_account is not None:
-        base_url, api_key = omni_account
-        omni_rpm = float(config.get("omniroute_shared_rpm", 8.0) or 8.0)
-        for mid in extra_ids:
-            if mid in seen_ids:
-                continue
-            seen_ids.add(mid)
-            fake_cfg = {
-                "id": mid,
-                "name": f"Discovered {mid}",
-                "provider": "OmniRoute",
-                "backend": "omniroute",
-                "rpm": 10,
-                "max_tokens": 8192,
-                "ctx_window": 200000,
-                "thinking": False,
-                "extra_body": None,
-                "temperature": 0.2,
-                "top_p": 0.9,
-            }
-            try:
-                prov = Provider(
-                    f"Omni-discovered-{mid.split('/')[-1][:24]}",
-                    base_url,
-                    api_key,
-                    fake_cfg,
-                    connect_timeout,
-                    read_timeout,
-                    omni_bucket,
-                )
-                discovered_providers.append(prov)
-                candidates.append(prov)
-            except Exception:
-                pass
-
-    if not candidates:
-        return
-
-    results: List[Dict[str, Any]] = []
-    lock = threading.Lock()
-
-    def _one(prov: "Provider") -> None:
-        base_url, api_key = prov._account_key
-        payload = {
-            "model": prov.model_id,
-            "messages": [{"role": "user", "content": "Reply with exactly: PONG"}],
-            "max_tokens": 16,
-            "stream": False,
-            "temperature": 0,
-        }
-        t0 = time.monotonic()
-        note = ""
-        status = 0
-        try:
-            r = httpx.post(
-                f"{base_url}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-                timeout=10.0,
-            )
-            status = r.status_code
-            dt = round(time.monotonic() - t0, 1)
-            raw = (r.text or "")[:200]
-            if status == 200:
-                try:
-                    body = r.json()
-                    note = (
-                        (body.get("choices") or [{}])[0]
-                        .get("message", {})
-                        .get("content") or ""
-                    ).strip()[:40] or "EMPTY"
-                except Exception:
-                    note = f"NON_JSON: {raw[:60]}"
-            else:
-                try:
-                    note = (r.json().get("error", {}) or {}).get("message", raw)[:80]
-                except Exception:
-                    note = raw[:80]
-        except Exception as e:
-            dt = round(time.monotonic() - t0, 1)
-            status = 0
-            note = f"{type(e).__name__}: {str(e)[:60]}"
-
-        with lock:
-            results.append({
-                "model": prov.model_id,
-                "status": status,
-                "latency": dt,
-                "note": note,
-                "provider": prov,
-            })
-
-        # Tightened live rule: ANY HTTP 200 is live. Empty/non-JSON body no
-        # longer demotes a working free model into the cooled list.
-        if status == 200:
-            prov.record_success()
-            prov.warm_latency = dt
-        elif status in (404, 410):
-            prov.record_failure(cooldown=3600.0, permanent=True, absolute=True)
-            if project_dir:
-                try:
-                    mark_model_dead(project_dir, prov.model_id)
-                except Exception:
-                    pass
-        elif status == 429:
-            cool = float(config.get("post_429_backoff", 40.0) or 40.0)
-            prov.record_failure(cooldown=cool, absolute=True)
-            try:
-                pool.propagate_shared_cooldown(prov, cool)
-            except Exception:
-                pass
-        elif status in (503, 502, 0):
-            prov.record_failure(cooldown=45.0, absolute=True)
-        else:
-            prov.record_failure(cooldown=30.0, absolute=True)
-
-    threads = []
-    deadline = time.monotonic() + max_wait
-    # Adaptive stagger: tighter when probing many models so we stay inside budget
-    stagger = 0.12 if len(candidates) > 20 else 0.18
-    for p in candidates:
-        if time.monotonic() >= deadline:
-            break
-        t = threading.Thread(target=_one, args=(p,), daemon=True, name=f"neon-free-probe-{p.model_id[:24]}")
-        t.start()
-        threads.append(t)
-        time.sleep(stagger)
-    for t in threads:
-        t.join(timeout=max(0.05, deadline - time.monotonic()))
-
-    if not results:
-        return
-
-    def _is_live(r: Dict[str, Any]) -> bool:
-        # Any clean HTTP 200 counts as live — do not punish empty/short bodies.
-        return r["status"] == 200
-
-    live = sorted([r for r in results if _is_live(r)], key=lambda r: r["latency"])
-    cooled = [r for r in results if not _is_live(r)]
-
-    # ── Update the live model set: inject newly discovered live models ──
-    existing_ids = {p.model_id for p in pool.providers}
-    injected = 0
-    for r in live:
-        prov = r["provider"]
-        if prov.model_id in existing_ids:
-            continue
-        # Only inject ones we discovered this run (not already in MODELS pool)
-        if prov in discovered_providers or prov.model_id in extra_ids:
-            pool.providers.insert(0, prov)  # front of the queue
-            existing_ids.add(prov.model_id)
-            injected += 1
-
-    # ── Re-order: live free models first (by latency), then the rest ────
-    live_ids_ordered = [r["model"] for r in live]
-    live_map = {r["model"]: r["provider"] for r in live}
-    front: List["Provider"] = []
-    for mid in live_ids_ordered:
-        for p in pool.providers:
-            if p.model_id == mid and p not in front:
-                front.append(p)
-                break
-    rest = [p for p in pool.providers if p not in front]
-    pool.providers[:] = front + rest
-    pool.index = 0  # reset rotation so the fastest live free model is next
-
-    if live:
-        show = min(12, len(live))
-        ranking = ", ".join(f"{r['model'].split('/')[-1]} {r['latency']}s" for r in live[:show])
-        extra = f" · +{injected} discovered" if injected else ""
-        UI.ok(f"Warmup free-probe: {len(live)} live{extra} · {ranking}")
-    if cooled:
-        bits = [f"{r['model'].split('/')[-1]}→{r['status']}" for r in cooled[:12]]
-        UI.warn(f"Warmup free-probe cooled/dead: {', '.join(bits)}")
-    if injected:
-        UI.info(f"Live free-model set updated: {injected} new provider(s) injected at front of pool")
+    # Intentionally no downstream-model PONG sweep here. OmniRoute and
+    # OpenRouter are already routing layers; probing dozens of their child
+    # models burns scarce quota and duplicates their own health/fallback logic.
 
 
 @dataclass
@@ -6390,6 +6152,26 @@ def goal_looks_external(goal: str) -> bool:
     return False
 
 
+def backend_tag_from_provider_name(name: str) -> str:
+    """Coarse backend grouping for /status cooldown tallies.
+
+    Provider names follow fixed prefixes set in build_pool: "NIM-Primary",
+    "NIM2-auto-best", "Omni-laguna-free", "OR-Qwen-Coder", etc. This buckets
+    by account/backend rather than by individual model alias, since for
+    diagnosing pool health what matters is "is NIM cooling down a lot" not
+    "did NIM-laguna-xs-2.1 specifically 429 three times".
+    """
+    if name.startswith("NIM2-") or re.match(r"^NIM\d+-", name):
+        return re.match(r"^(NIM\d+)-", name).group(1)  # NIM2, NIM3, ...
+    if name.startswith("NIM-"):
+        return "NIM"
+    if name.startswith("Omni-"):
+        return "OmniRoute"
+    if name.startswith("OR-"):
+        return "OpenRouter"
+    return name.split("-", 1)[0] if "-" in name else name
+
+
 class NeonArchitect:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
@@ -6467,6 +6249,14 @@ class NeonArchitect:
         self._strategy_hints: List[str] = []
         self._rate_limit_until: float = 0.0
         self._recent_429_count: int = 0
+        self._recent_503_count: int = 0
+        # Per-backend cooldown tallies for /status visibility. Keyed by a
+        # coarse backend tag derived from provider.name prefix (Omni / NIM /
+        # NIM2.. / OR), not by individual provider, since what matters for
+        # diagnosing "is the fallback chain healthy" is the account-level
+        # picture, not per-model-alias noise.
+        self._backend_429_counts: Dict[str, int] = {}
+        self._backend_503_counts: Dict[str, int] = {}
         self.project_state_file = str(config.get("project_state_file") or ".neon_project_state.json")
         self.project_state: Dict[str, Any] = load_project_state(self.project_dir, self.project_state_file)
         self._validation_ready = bool(
@@ -6609,7 +6399,7 @@ class NeonArchitect:
             prompt += (
                 f"\n\n[SDLC PHASE: {phase.upper()}]\n{phase_prompt}\n"
                 f"Completed: {completed}\n"
-                "Turns are NOT limited by a fixed count. Produce required artifacts; orchestrator advances gates."
+                "Phase turns are bounded by a circuit breaker; produce required artifacts and let the orchestrator advance only when gates pass."
             )
             handoff = self._phase_handoff_block(phase)
             if handoff:
@@ -6895,6 +6685,7 @@ class NeonArchitect:
     def _autopilot_status(self):
         if not self.goal:
             UI.info("No goal set.")
+            self._provider_health_status()
             return
         if not self.autopilot:
             UI.info("Autopilot is OFF. Goal is set but not being actively pursued.")
@@ -6907,6 +6698,44 @@ class NeonArchitect:
         UI.info(f"Completed: {', '.join(self.sdlc_completed) if self.sdlc_completed else 'none'}")
         remaining = [p for p in SDLC_PHASES if p not in self.sdlc_completed]
         UI.info(f"Remaining: {', '.join(remaining)}")
+        self._provider_health_status()
+
+    def _provider_health_status(self):
+        """Per-backend 429/503 tallies and live cooldown state.
+
+        Session-lifetime counters (not just "recent"), so this answers
+        "which backend is actually struggling" across the whole run —
+        the gap that made a scrolling log the only way to notice NIM and
+        OmniRoute cooling down together (see Turn 126-style failures).
+        """
+        n429 = int(getattr(self, "_recent_429_count", 0) or 0)
+        n503 = int(getattr(self, "_recent_503_count", 0) or 0)
+        b429 = getattr(self, "_backend_429_counts", {}) or {}
+        b503 = getattr(self, "_backend_503_counts", {}) or {}
+        if not (n429 or n503):
+            UI.info("Provider health: no 429/503s this session.")
+            return
+        UI.separator("PROVIDER HEALTH")
+        UI.info(f"429s this session: {n429}   503s this session: {n503}")
+        backends = sorted(set(b429) | set(b503))
+        for b in backends:
+            c429 = b429.get(b, 0)
+            c503 = b503.get(b, 0)
+            UI.info(f"  {b:12s} 429={c429:<4d} 503={c503:<4d}")
+        pool = getattr(self, "pool", None)
+        if pool is not None:
+            now = time.monotonic()
+            cooling = [
+                p for p in getattr(pool, "providers", [])
+                if getattr(p, "cooldown_until", 0.0) > now
+            ]
+            if cooling:
+                UI.warn(f"{len(cooling)} provider(s) currently cooling down:")
+                for p in cooling[:10]:
+                    remain = max(0.0, p.cooldown_until - now)
+                    UI.info(f"    {p.name}: {remain:.0f}s left")
+                if len(cooling) > 10:
+                    UI.info(f"    ... and {len(cooling) - 10} more")
 
     def _read_artifact_snippet(self, relative_path: str, max_chars: int = 3500) -> str:
         try:
@@ -7352,11 +7181,17 @@ class NeonArchitect:
                     dump_dir.mkdir(parents=True, exist_ok=True)
                     dump_path = dump_dir / f"{int(time.time())}_{provider.model_id.replace('/', '_')}.json"
                     with open(dump_path, "w", encoding="utf-8") as f:
+                        messages = payload.get("messages") or []
                         json.dump(
                             {
                                 "model": provider.model_id,
+                                "provider": provider.name,
                                 "error": repr(ex),
-                                "payload": payload,
+                                "message_count": len(messages),
+                                "prompt_chars": sum(len(str(m.get("content") or "")) for m in messages if isinstance(m, dict)),
+                                "tool_count": len(payload.get("tools") or []),
+                                "stream": bool(payload.get("stream")),
+                                "timestamp": time.time(),
                             },
                             f,
                             indent=2,
@@ -7377,13 +7212,15 @@ class NeonArchitect:
             orphans = self._orphan_reader_threads = []
         orphans[:] = [th for th in orphans if th.is_alive()]
         if len(orphans) >= 6:
-            UI.warn(
-                f"{len(orphans)} abandoned provider-stream threads still running "
-                "in the background (likely a stuck connection pool)."
+            UI.err(
+                f"{len(orphans)} abandoned provider-stream threads are still running. "
+                "Refusing to create another stream until the leak clears."
             )
+            raise RuntimeError("Too many abandoned provider-stream threads")
 
         t = threading.Thread(target=_reader, daemon=True, name="neon-stream-reader")
         t.start()
+        orphans.append(t)
 
         try:
             while True:
@@ -7605,7 +7442,7 @@ class NeonArchitect:
 
     def _parse_stream(self, payload: Dict[str, Any]) -> Tuple[str, str, List[Dict[str, Any]]]:
         max_total_attempts = int(self.config.get("retry_max", 2))
-        max_per_provider = int(self.config.get("max_retries_per_provider", 2))
+        max_per_provider = int(self.config.get("max_retries_per_provider", 1))
         base_delay = float(self.config.get("retry_base_delay", 1.5))
         total_attempts = 0
         empty_pool_spins = 0
@@ -7646,6 +7483,8 @@ class NeonArchitect:
                 self._rate_limit_until = 0.0
 
         _last_cooldown_print = 0.0
+        provider_failure_streak = 0
+        provider_failure_circuit = max(1, int(self.config.get("provider_failure_circuit", 3) or 3))
         while total_attempts < max_total_attempts:
             provider = self.pool.next_available()
             if not provider:
@@ -7740,6 +7579,7 @@ class NeonArchitect:
 
                 if finish_reason is not None:
                     provider.record_success()
+                    provider_failure_streak = 0
                     self._note_provider_success()
                     return content, reasoning, tool_calls
                 else:
@@ -7870,19 +7710,49 @@ class NeonArchitect:
                             time.monotonic() + backoff,
                         )
                     self._recent_429_count = int(getattr(self, "_recent_429_count", 0)) + 1
+                    _tag = backend_tag_from_provider_name(provider.name)
+                    self._backend_429_counts[_tag] = self._backend_429_counts.get(_tag, 0) + 1
                 elif not self._is_transient_error(e):
                     UI.err(f"Fatal API error: {e}")
                     raise
                 else:
                     UI.warn(f"{provider.name} transient: {str(e)[:100]}")
                     err_l2 = str(e).lower()
-                    if any(x in err_l2 for x in ("first-token", "firsttoken", "first token", "stall", "buffering")):
+                    _status_code = getattr(e, "status_code", None)
+                    if _status_code is None:
+                        _resp = getattr(e, "response", None)
+                        _status_code = getattr(_resp, "status_code", None) if _resp is not None else None
+                    if _status_code in (502, 503) or (
+                        _status_code is None
+                        and any(x in err_l2 for x in ("service_unavailable", "endpoint is unavailable", "bad gateway"))
+                    ):
+                        # Endpoint-down, not a blip: retrying in a few
+                        # seconds just re-hits the same dead upstream (see
+                        # the Turn 126 log pattern: 503 -> quick retry ->
+                        # 503 again -> retry budget exhausted with nothing
+                        # else left). Match warmup_pool's existing 45s for
+                        # the same status codes instead of the short
+                        # blip-style cooldown below.
+                        provider.record_failure(cooldown=45.0, absolute=True)
+                        self._recent_503_count = int(getattr(self, "_recent_503_count", 0)) + 1
+                        _tag = backend_tag_from_provider_name(provider.name)
+                        self._backend_503_counts[_tag] = self._backend_503_counts.get(_tag, 0) + 1
+                    elif any(x in err_l2 for x in ("first-token", "firsttoken", "first token", "stall", "buffering")):
                         provider.record_failure(cooldown=4.0)
                     else:
                         provider.record_failure(cooldown=8.0)
                     if self.pool.should_rotate(max_per_provider):
                         self.pool.rotate()
 
+                provider_failure_streak += 1
+                if provider_failure_streak >= provider_failure_circuit:
+                    UI.err(
+                        f"Provider circuit breaker opened after {provider_failure_streak} consecutive failures. "
+                        "Stopping this logical request instead of multiplying retries across aliases."
+                    )
+                    raise RuntimeError(
+                        f"Provider circuit open after {provider_failure_streak} consecutive failures: {e}"
+                    )
                 if total_attempts < max_total_attempts:
                     delay = min(base_delay + random.uniform(0, 1.0), 5.0)
                     UI.info(f"Retrying in {delay:.1f}s...")
@@ -8725,7 +8595,7 @@ class NeonArchitect:
                             self._stop_autopilot()
                             break
                     else:
-                        max_pr = int(self.config.get("max_phase_rounds", 150) or 0)
+                        max_pr = int(self.config.get("max_phase_rounds", 80) or 0)
                         if (
                             max_pr > 0
                             and self._phase_rounds >= max_pr
@@ -8964,7 +8834,7 @@ class NeonArchitect:
                 "(can't confirm pass count)."
             )
             return False
-        max_t = int(self.config.get("testing_max_phase_rounds", 150) or 150)
+        max_t = int(self.config.get("testing_max_phase_rounds", 80) or 80)
         if max_t > 0 and self._phase_rounds >= max_t:
             # Previously this force-passed the phase after the round
             # limit ("soft-pass with blocker recorded"), which is the
@@ -9424,7 +9294,7 @@ class NeonArchitect:
                     # of the check. Mirror the testing breaker's behavior:
                     # halt autopilot and record a blocker rather than
                     # looping forever or silently soft-passing.
-                    max_v = int(self.config.get("verification_max_phase_rounds", 150) or 150)
+                    max_v = int(self.config.get("verification_max_phase_rounds", 50) or 50)
                     if max_v > 0 and self._phase_rounds >= max_v:
                         UI.warn(
                             f"VERIFICATION circuit-breaker: {self._phase_rounds} rounds without "
@@ -9913,18 +9783,20 @@ def load_config() -> Dict[str, Any]:
         # configs on every load (line ~9925), so patching only
         # DEFAULT_CONFIG above would have no effect on any project that
         # already has a config.json on disk.
-        "retry_max": 4,
+        "retry_max": 2,
+        "specialized_retry_max": 2,
         "retry_base_delay": 2.5,
-        "max_retries_per_provider": 3,
+        "max_retries_per_provider": 1,
         "nim_shared_rpm": 38.0,
         "inter_turn_delay": 0.35,
         "compact_threshold": 5000,
         "startup_compact_tokens": 60000,
         "max_rounds": 0,
         "max_autopilot_rounds": 0,
-        "max_phase_rounds": 150,
-        "testing_max_phase_rounds": 150,
-        "verification_max_phase_rounds": 150,
+        "max_phase_rounds": 80,
+        "testing_max_phase_rounds": 80,
+        "verification_max_phase_rounds": 50,
+        "provider_failure_circuit": 3,
         "max_same_tool_successes": 3,
         "post_429_backoff": 12.0,
         "rpm_safety": 0.80,
@@ -10016,6 +9888,21 @@ def ensure_api_key(cfg: Dict[str, Any], project_dir: Optional[Path] = None) -> b
         cfg["_root"] = root
     root.setdefault("projects", {})
     entry = get_project_entry(root, project)
+
+    # Optional second, independent-NVIDIA-account key (see build_pool /
+    # api_key_2). Never required for boot — a missing or invalid key_2
+    # here just means build_pool skips the NIM2-* providers, same as if
+    # it were never set. Env var wins over a previously-saved key.json
+    # entry wins over whatever's already in the config entry.
+    try:
+        env_key_2 = (os.environ.get("NVIDIA_API_KEY_2") or "").strip()
+        saved_key_2 = (load_project_api_key_2(project) or "").strip()
+        k2 = env_key_2 or saved_key_2 or (entry.get("nim_api_key_2") or "").strip()
+        if k2:
+            entry["nim_api_key_2"] = k2
+            cfg["nim_api_key_2"] = k2
+    except Exception:
+        pass  # best-effort — second key is a pure bonus, never blocks boot
 
     def _save(key: str) -> None:
         key = key.strip().strip('"').strip("'")
@@ -10624,14 +10511,19 @@ def main():
 
     UI.separator("Ready")
     _k = (agent.config.get("api_key") or "")
+    _k2 = (agent.config.get("nim_api_key_2") or "")
     _nproj = len((agent.config.get("_root") or load_config()).get("projects") or {})
     _masked = ("***" + _k[-4:]) if len(_k) > 8 else ("***" if _k else None)
+    _masked2 = ("***" + _k2[-4:]) if len(_k2) > 8 else ("***" if _k2 else None)
     if HAS_RICH:
         summary = Table.grid(padding=(0, 2))
         summary.add_column(style="cc_muted", justify="right", min_width=10)
         summary.add_column(style="cc_body")
-        summary.add_row("API key", (f"{_masked}  ({_nproj} project{'s' if _nproj != 1 else ''} configured)"
-                                      if _masked else "[cc_warn]not set — use /apikey[/cc_warn]"))
+        _api_key_line = (f"{_masked}  ({_nproj} project{'s' if _nproj != 1 else ''} configured)"
+                          if _masked else "[cc_warn]not set — use /apikey[/cc_warn]")
+        if _masked2:
+            _api_key_line += f"  ·  2nd key {_masked2}"
+        summary.add_row("API key", _api_key_line)
         summary.add_row("Timeouts", f"first-token {agent.config.get('first_token_timeout', 60):.0f}s"
                                      f"  ·  retries {agent.config.get('retry_max', 2)}"
                                      f"  ·  thinking {agent.config.get('thinking_effort', 'off')}")
@@ -10654,7 +10546,10 @@ def main():
         console.print()
     else:
         if _masked:
-            print(f"  API key: {_masked}  ({_nproj} project(s) configured)")
+            _line = f"  API key: {_masked}  ({_nproj} project(s) configured)"
+            if _masked2:
+                _line += f"  ·  2nd key {_masked2}"
+            print(_line)
         else:
             print("  No API key for this project — set with /apikey")
         print(f"  Timeouts: first-token {agent.config.get('first_token_timeout', 60):.0f}s, "
@@ -10720,6 +10615,8 @@ def main():
                     ("Project", [
                         ("/files", "show project file tree"),
                         ("/apikey <key>", "set API key for this project"),
+                        ("/apikey2 <key>", "set 2nd NVIDIA key (separate account)"),
+                        ("/apikeyN <key>", "set Nth NVIDIA key, e.g. /apikey3 /apikey4 ..."),
                         ("/permission", "review file/bash permissions"),
                         ("/worktree", "git worktree status"),
                     ]),
@@ -10737,7 +10634,7 @@ def main():
                 console.print()
             else:
                 print("Commands: /new /reset /clear /exit /goal /autopilot /status /stop /todo "
-                      "/model /persona /compact /cost /files /apikey /permission /worktree")
+                      "/model /persona /compact /cost /files /apikey /apikey2 /apikey3... /permission /worktree")
             continue
         if raw == "/files":
             agent.cmd_files()
@@ -10788,31 +10685,50 @@ def main():
         if raw == "/full-access" or raw == "/fullaccess":
             agent.cmd_permission("full")
             continue
-        if raw.startswith("/apikey"):
+        if raw == "/apikey" or raw.startswith("/apikey ") or (
+            len(raw.split(None, 1)[0]) > 7
+            and raw.split(None, 1)[0][:7] == "/apikey"
+            and raw.split(None, 1)[0][7:].isdigit()
+            and int(raw.split(None, 1)[0][7:]) >= 2
+        ):
+            cmd_word = raw.split(None, 1)[0]
+            is_primary = cmd_word == "/apikey"
+            slot_n = 1 if is_primary else int(cmd_word[7:])
             parts = raw.split(None, 1)
             root = agent.config.get("_root") or load_config()
             entry = get_project_entry(root, agent.project_dir)
+            cfg_field = "api_key" if is_primary else f"nim_api_key_{slot_n}"
             if len(parts) < 2 or not parts[1].strip():
-                UI.info(f"Project: {agent.project_dir}")
-                UI.info(f"Config:  {CONFIG_FILE}")
-                k = (entry.get("api_key") or agent.config.get("api_key") or "")
+                if is_primary:
+                    UI.info(f"Project: {agent.project_dir}")
+                    UI.info(f"Config:  {CONFIG_FILE}")
+                k = (entry.get(cfg_field) or agent.config.get(cfg_field) or "")
+                label = "Current key" if is_primary else f"Current key {slot_n}"
                 if k:
-                    UI.info(f"Current key: {'***' + k[-4:] if len(k) > 8 else '***'}")
+                    UI.info(f"{label}: {'***' + k[-4:] if len(k) > 8 else '***'}")
                 else:
-                    UI.warn("No API key set for this project.")
-                UI.info(f"Projects in config: {len(root.get('projects') or {})}")
-                for pp in sorted((root.get("projects") or {}).keys()):
-                    has = "key=yes" if (root["projects"][pp] or {}).get("api_key") else "key=no"
-                    mark = "→" if pp == str(agent.project_dir.resolve()) else " "
-                    UI.info(f"  {mark} {pp} ({has})")
-                UI.info("Usage: /apikey <your-nvidia-key>")
+                    UI.warn(f"No {'API' if is_primary else f'{slot_n}th NVIDIA'} key set for this project.")
+                if is_primary:
+                    UI.info(f"Projects in config: {len(root.get('projects') or {})}")
+                    for pp in sorted((root.get("projects") or {}).keys()):
+                        has = "key=yes" if (root["projects"][pp] or {}).get("api_key") else "key=no"
+                        mark = "→" if pp == str(agent.project_dir.resolve()) else " "
+                        UI.info(f"  {mark} {pp} ({has})")
+                    UI.info("Usage: /apikey <your-nvidia-key>")
+                else:
+                    UI.info(f"A key only adds real capacity if it belongs to a")
+                    UI.info("genuinely separate NVIDIA account — see build_pool.")
+                    UI.info(f"Usage: {cmd_word} <nvapi-key-from-a-different-account>")
                 continue
             new_key = parts[1].strip().strip('"').strip("'").replace("\n","").replace("\r","")
-            save_project_settings(root, agent.project_dir, api_key=new_key)
-            agent.config["api_key"] = new_key
+            save_project_settings(root, agent.project_dir, **{cfg_field: new_key})
+            agent.config[cfg_field] = new_key
             agent.config["_root"] = root
             try:
-                save_project_api_key(agent.project_dir, new_key)
+                if is_primary:
+                    save_project_api_key(agent.project_dir, new_key)
+                else:
+                    save_project_api_key_n(agent.project_dir, slot_n, new_key)
             except Exception:
                 pass
             try:
@@ -10821,7 +10737,7 @@ def main():
                     warmup_pool(agent.pool, agent.config)
                 except Exception:
                     pass
-                UI.ok(f"API key saved for this project → {CONFIG_FILE}")
+                UI.ok(f"{'API key' if is_primary else f'Key {slot_n}'} saved for this project → {CONFIG_FILE}")
                 UI.info(f"Providers: {', '.join(p.name for p in agent.pool.providers)}")
             except Exception as e:
                 UI.err(f"Key saved but pool rebuild failed: {e}")
@@ -12210,16 +12126,17 @@ class SpecializedAgent:
         if not HAS_OPENAI:
             return f"# {self.role} output\n# openai package not available\n"
 
-        for attempt in range(8):
+        max_attempts = max(1, int(self.config.get("specialized_retry_max", self.config.get("retry_max", 2)) or 2))
+        for attempt in range(max_attempts):
             provider = None
-            # Wait for an available provider (up to 60 s)
-            for _ in range(30):
+            # Wait briefly for an available provider.
+            for _ in range(15):
                 provider = self.pool.next_available()
                 if provider:
                     break
                 time.sleep(2.0)
             if not provider:
-                raise RuntimeError(f"[{self.role}] No NIM provider available after 60 s")
+                raise RuntimeError(f"[{self.role}] No provider available after 30 s")
 
             model_cfg = provider.model_cfg
             payload: Dict[str, Any] = {
@@ -12267,7 +12184,7 @@ class SpecializedAgent:
                 # above, just not wrapped in one of those SDK exception types.
                 provider.record_failure()
                 time.sleep(2.0)
-        raise RuntimeError(f"[{self.role}] All NIM attempts exhausted")
+        raise RuntimeError(f"[{self.role}] All provider attempts exhausted ({max_attempts})")
 
     def _messages(self, user_content: str) -> List[Dict[str, str]]:
         return [
