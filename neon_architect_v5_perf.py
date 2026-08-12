@@ -49,6 +49,7 @@ import platform
 from collections import deque
 import random
 import atexit
+import hashlib
 
 try:
     import httpx
@@ -58,13 +59,13 @@ except ImportError:
 
 try:
     import openai
-    _OPENAI_ERROR_NAMES = (
+    _openai_error_names = (
         "APITimeoutError", "APIConnectionError", "InternalServerError",
         "RateLimitError", "APIStatusError", "APIError",
     )
     OPENAI_ERRORS = tuple(
-        cls for cls in (getattr(openai, name, None) for name in _OPENAI_ERROR_NAMES)
-        if isinstance(cls, type) and issubclass(cls, Exception)
+        getattr(openai, name) for name in _openai_error_names
+        if getattr(openai, name, None) is not None
     ) or (Exception,)
 except ImportError:
     OPENAI_ERRORS = (Exception,)
@@ -157,7 +158,7 @@ if LEGACY_WIN_CONSOLE:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 APP_NAME = "NEON ARCHITECT"
-APP_VERSION = "5.0.0"
+APP_VERSION = "5.1.0-canonical"
 APP_TAGLINE = "GLM-5.2 · NVIDIA NIM · Design-System UI · Layered Backend · Multi-Platform"
 
 CONFIG_DIR = Path.home() / ".neon_architect"
@@ -184,6 +185,14 @@ def _project_key_path(project_dir: Path) -> Path:
     return SESSIONS_DIR / f"project_{_project_id(project_dir)}.key.json"
 
 
+def _account_fingerprint(account_key: Optional[Tuple[str, str]]) -> str:
+    if not account_key:
+        return ""
+    return hashlib.sha256(
+        f"{account_key[0]}\0{account_key[1]}".encode("utf-8", errors="replace")
+    ).hexdigest()[:16]
+
+
 def load_project_api_key(project_dir: Path) -> str:
     data = _safe_json_load(_project_key_path(project_dir))
     if data and isinstance(data.get("api_key"), str):
@@ -191,38 +200,53 @@ def load_project_api_key(project_dir: Path) -> str:
     return ""
 
 
-def load_dead_models(project_dir: Path) -> List[str]:
-    """Model ids that returned a permanent-miss status (404 Not Found or
-    410 Gone — not enabled on this account's key, or retired/renamed on
-    the provider's end) in a past session. Persisted so every fresh
-    launch/pool-rebuild doesn't have to re-discover the same unavailable
-    models via live errors before falling through to a working provider —
-    this was previously pure wasted wall-clock + retry budget on every
-    single turn/session.
+def load_dead_models(project_dir: Path, account_key: Optional[Tuple[str, str]] = None) -> List[str]:
+    """Load permanent model misses. Account-scoped misses stay isolated.
+
+    Legacy ``dead_models`` is treated as a global/provider-wide retired-model
+    list for compatibility. New 404/410 observations are stored under an
+    account fingerprint so one NIM account cannot poison the same model on
+    another independent account.
     """
-    data = _safe_json_load(_project_key_path(project_dir))
-    if data and isinstance(data.get("dead_models"), list):
-        return [m for m in data["dead_models"] if isinstance(m, str)]
-    return []
+    data = _safe_json_load(_project_key_path(project_dir)) or {}
+    dead = set(m for m in (data.get("dead_models") or []) if isinstance(m, str))
+    if account_key:
+        fp = _account_fingerprint(account_key)
+        scoped = (data.get("dead_models_by_account") or {}).get(fp) or []
+        dead.update(m for m in scoped if isinstance(m, str))
+    return sorted(dead)
 
 
-def mark_model_dead(project_dir: Path, model_id: str) -> None:
-    """Record a permanently-missing (404/410) model id so future sessions skip it at pool-build time."""
+def mark_model_dead(
+    project_dir: Path,
+    model_id: str,
+    account_key: Optional[Tuple[str, str]] = None,
+) -> None:
+    """Persist a permanent miss without cross-account poisoning."""
     try:
         path = _project_key_path(project_dir)
         data = _safe_json_load(path) or {}
-        dead = set(data.get("dead_models") or [])
-        if model_id in dead:
-            return
-        dead.add(model_id)
-        data["dead_models"] = sorted(dead)
+        if account_key:
+            fp = _account_fingerprint(account_key)
+            by_account = data.setdefault("dead_models_by_account", {})
+            dead = set(by_account.get(fp) or [])
+            if model_id in dead:
+                return
+            dead.add(model_id)
+            by_account[fp] = sorted(dead)
+        else:
+            dead = set(data.get("dead_models") or [])
+            if model_id in dead:
+                return
+            dead.add(model_id)
+            data["dead_models"] = sorted(dead)
         SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
         tmp.replace(path)
     except Exception:
-        pass  # best-effort; never let bookkeeping break the retry loop
+        pass  # bookkeeping must never break the provider loop
 
 
 def save_project_api_key(project_dir: Path, api_key: str) -> Path:
@@ -518,7 +542,7 @@ DEFAULT_CONFIG = {
     "project_dir": str(Path.cwd()),
     "temperature": 0.2,
     "max_rounds": 0,
-    "compact_threshold": 5000,
+    "compact_threshold": 24000,
     "auto_nudge": True,
     "max_nudges": 2,
     "stream_timeout": 420.0,
@@ -538,7 +562,6 @@ DEFAULT_CONFIG = {
     # to try every distinct account plus one retry each post-cooldown,
     # while still failing fast when the whole pool is genuinely down.
     "retry_max": 2,
-    "specialized_retry_max": 2,
     "retry_base_delay": 2.5,
     "enable_openrouter": True,
     "stream_content_timeout": 200.0,
@@ -548,8 +571,8 @@ DEFAULT_CONFIG = {
     "max_retries_per_provider": 1,
     "nim_shared_rpm": 38.0,
     "omniroute_shared_rpm": 8.0,
-    "thinking_effort": "low",
-    "allow_medium_high_thinking": False,
+    "thinking_effort": "high",
+    "allow_medium_high_thinking": True,
     "first_token_timeout_off": 60.0,
     "first_token_timeout_low": 150.0,
     "first_token_timeout_medium": 240.0,
@@ -565,7 +588,6 @@ DEFAULT_CONFIG = {
     "max_phase_rounds": 80,
     "testing_max_phase_rounds": 80,
     "verification_max_phase_rounds": 50,
-    "provider_failure_circuit": 3,
     "min_tests_passed": 1,
     "min_coverage_pct": 0,
     "max_same_tool_successes": 3,
@@ -1538,12 +1560,10 @@ def _make_keepalive_http_client(connect_timeout: float, read_timeout: float):
 
 class Provider:
     def __init__(self, name: str, base_url: str, api_key: str, model_cfg: Dict[str, Any],
-                 connect_timeout: float = 10.0, read_timeout: float = 20.0, bucket: Optional[TokenBucket] = None,
-                 priority: int = 100):
+                 connect_timeout: float = 10.0, read_timeout: float = 20.0, bucket: Optional[TokenBucket] = None):
         self.name = name
         self.model_cfg = model_cfg
         self.model_id = model_cfg["id"]
-        self.priority = int(priority)
         self.bucket = bucket if bucket is not None else TokenBucket(model_cfg.get("rpm", 20), safety=0.80)
         # Identity of the account/endpoint this provider talks to. Used
         # solely to find "sibling" providers that share the same real
@@ -1623,68 +1643,114 @@ class Provider:
 
 
 class ProviderPool:
-    """Provider pool with account-aware fair scheduling.
+    """Account-aware provider scheduler.
 
-    Multiple model IDs can share one real quota account. Scheduling at the
-    model level creates fake diversity and turns a single account outage into
-    repeated 429/503 round-trips. This pool schedules independent accounts
-    first, then chooses the healthiest model inside the selected account.
+    Providers sharing the same (base_url, api_key) are one capacity domain.
+    Scheduling is round-robin across distinct account domains first, then
+    round-robin within the selected account. This prevents five independent
+    NIM accounts from being collapsed into one hot provider/model.
     """
     def __init__(self, providers: List[Provider]):
         self.providers = providers
-        self.index = 0
+        self.index = 0  # account cursor (legacy callers only inspect, not mutate)
         self.attempts_on_current = 0
-        self._account_index = 0
+        self._account_order: List[Tuple[str, str]] = []
+        self._account_pos: Dict[Tuple[str, str], int] = {}
+        self._account_provider_pos: Dict[Tuple[str, str], int] = {}
+        self._account_cursor = 0
+        self._current_provider: Optional[Provider] = None
         self._rebuild_accounts()
 
-    def _rebuild_accounts(self):
-        seen = set()
-        self.account_keys: List[Tuple[str, str]] = []
+    def _rebuild_accounts(self) -> None:
+        order: List[Tuple[str, str]] = []
         for p in self.providers:
             key = getattr(p, "_account_key", None)
-            if key is not None and key not in seen:
-                seen.add(key)
-                self.account_keys.append(key)
-        if self.account_keys:
-            self._account_index %= len(self.account_keys)
+            if key is not None and key not in order:
+                order.append(key)
+        self._account_order = order
+        self._account_pos = {k: i for i, k in enumerate(order)}
+        for k in order:
+            self._account_provider_pos.setdefault(k, 0)
+
+    def add_provider(self, provider: Provider, *, front: bool = False) -> None:
+        """Add a provider without disturbing account fairness."""
+        key = getattr(provider, "_account_key", None)
+        if any(
+            p.model_id == provider.model_id and getattr(p, "_account_key", None) == key
+            for p in self.providers
+        ):
+            return
+        if front:
+            # Backward-compatible option, but never used by discovery.
+            self.providers.insert(0, provider)
         else:
-            self._account_index = 0
+            self.providers.append(provider)
+        self._rebuild_accounts()
 
     def current(self) -> Provider:
-        return self.providers[self.index]
+        # The account-aware scheduler no longer stores a flat provider index.
+        # Return the provider actually handed out for the current logical turn,
+        # falling back to the first non-disabled provider before the first turn.
+        if self._current_provider is not None and self._current_provider in self.providers:
+            return self._current_provider
+        for p in self.providers:
+            if not getattr(p, "permanently_disabled", False):
+                return p
+        return self.providers[0]
 
-    def rotate(self):
-        if not self.providers:
-            return
-        self.index = (self.index + 1) % len(self.providers)
+    def rotate(self) -> None:
+        if self._account_order:
+            if self._current_provider is not None:
+                key = getattr(self._current_provider, "_account_key", None)
+                try:
+                    pos = self._account_order.index(key)
+                    self._account_cursor = (pos + 1) % len(self._account_order)
+                except ValueError:
+                    self._account_cursor = (self._account_cursor + 1) % len(self._account_order)
+            else:
+                self._account_cursor = (self._account_cursor + 1) % len(self._account_order)
+            self.index = self._account_cursor
+        else:
+            self.index = 0
+        self._current_provider = None
         self.attempts_on_current = 0
 
-    def next_available(self) -> Optional[Provider]:
-        """Return the highest-priority healthy account/model.
+    def _providers_for_account(self, key: Tuple[str, str]) -> List[Provider]:
+        return [
+            p for p in self.providers
+            if getattr(p, "_account_key", None) == key
+            and not getattr(p, "permanently_disabled", False)
+        ]
 
-        The outer router is primary-first: healthy primary capacity is sticky;
-        lower-priority backends become eligible only when higher-priority
-        providers are unavailable or throttled. This prevents normal turns from
-        round-robining across NIM, OmniRoute, and OpenRouter.
-        """
+    def next_available(self) -> Optional[Provider]:
         if not self.providers:
             return None
-        active = [
-            p for p in self.providers
-            if p.available() and not getattr(p, "permanently_disabled", False)
-        ]
-        if not active:
+        self._rebuild_accounts()
+        if not self._account_order:
             return None
-        best_priority = min(getattr(p, "priority", 100) for p in active)
-        candidates = [p for p in active if getattr(p, "priority", 100) == best_priority]
-        candidates.sort(key=lambda p: (p.failures, p.warm_latency or 1e9, p.name))
-        for p in candidates:
-            if p.bucket.try_acquire():
-                try:
-                    self.index = self.providers.index(p)
-                except ValueError:
-                    self.index = 0
-                return p
+
+        # One logical turn chooses among independent capacity domains first.
+        # Within a chosen domain, models rotate so one model does not monopolize
+        # that account.
+        n_accounts = len(self._account_order)
+        start = self._account_cursor % n_accounts
+        for off in range(n_accounts):
+            apos = (start + off) % n_accounts
+            key = self._account_order[apos]
+            candidates = self._providers_for_account(key)
+            if not candidates:
+                continue
+            ppos = self._account_provider_pos.get(key, 0) % len(candidates)
+            for inner in range(len(candidates)):
+                p = candidates[(ppos + inner) % len(candidates)]
+                if p.available() and p.bucket.try_acquire():
+                    self._account_provider_pos[key] = (candidates.index(p) + 1) % len(candidates)
+                    self._account_cursor = (apos + 1) % n_accounts
+                    self.index = self._account_cursor
+                    self._current_provider = p
+                    self.attempts_on_current = 0
+                    return p
+
         return None
 
     def should_rotate(self, max_per_provider: int = 3) -> bool:
@@ -1693,15 +1759,29 @@ class ProviderPool:
 
     def propagate_shared_cooldown(self, source: "Provider", cooldown: float) -> List[str]:
         cooled: List[str] = []
-        source_key = getattr(source, "_account_key", None)
-        until = time.monotonic() + cooldown
         for p in self.providers:
             if p is source or getattr(p, "permanently_disabled", False):
                 continue
-            if getattr(p, "_account_key", None) == source_key:
-                p.cooldown_until = max(p.cooldown_until, until)
+            if getattr(p, "_account_key", None) == getattr(source, "_account_key", None):
+                p.cooldown_until = max(p.cooldown_until, time.monotonic() + cooldown)
                 cooled.append(p.name)
         return cooled
+
+    def account_snapshot(self) -> List[Dict[str, Any]]:
+        self._rebuild_accounts()
+        rows: List[Dict[str, Any]] = []
+        for idx, key in enumerate(self._account_order, 1):
+            providers = [p for p in self.providers if getattr(p, "_account_key", None) == key]
+            fp = _account_fingerprint(key)[:10]
+            rows.append({
+                "account": idx,
+                "fingerprint": fp,
+                "providers": len(providers),
+                "nim": sum(1 for p in providers if str(getattr(p, "name", "")).startswith("NIM")),
+                "omni": sum(1 for p in providers if str(getattr(p, "name", "")).startswith("Omni")),
+                "openrouter": sum(1 for p in providers if str(getattr(p, "name", "")).startswith("OR-")),
+            })
+        return rows
 
     def shortest_wait(self) -> float:
         active = [p for p in self.providers if not getattr(p, "permanently_disabled", False)]
@@ -1713,128 +1793,274 @@ class ProviderPool:
 
 
 def build_pool(config: Dict[str, Any], model_key_override: Optional[str] = None) -> ProviderPool:
-    """Build a small, backend-aware provider set.
+    """Build a provider pool for dual-backend operation.
 
-    Design rule:
-      - NIM: direct model selection with a *small* curated fallback set.
-      - OmniRoute: ONE logical gateway model; OmniRoute owns upstream routing.
-      - OpenRouter: ONE logical free router; OpenRouter owns provider/model routing.
-
-    The outer Neon router therefore chooses between independent backend/account
-    domains instead of duplicating the routing logic already present inside
-    OmniRoute/OpenRouter.
+    Construction order is not execution priority. Runtime scheduling is account-aware:
+      1. independent NIM account domains
+      2. OmniRoute gateway domain
+      3. direct OpenRouter domain when explicitly configured
+    Within each domain, models share that account's capacity bucket/circuit state.
     """
     providers: List[Provider] = []
     api_key = (config.get("api_key") or "").strip()
     is_nim_key = api_key.startswith("nvapi-") or api_key.startswith("Bearer nvapi-")
-    omni_base = (config.get("omniroute_base_url") or config.get("base_url") or OMNIROUTE_BASE_URL).rstrip("/")
+    omni_base = (
+        config.get("omniroute_base_url")
+        or config.get("base_url")
+        or OMNIROUTE_BASE_URL
+    ).rstrip("/")
     nim_base = NIM_BASE_URL
-    selected_key = model_key_override if model_key_override in MODELS else config.get("default_model", "auto-best")
-    selected_cfg = MODELS.get(selected_key, MODELS["auto-best"])
-    dead_model_ids = set(load_dead_models(Path(config["project_dir"]).resolve())) if config.get("project_dir") else set()
+    model_key = (
+        model_key_override
+        if model_key_override in MODELS
+        else config.get("default_model", "auto-best")
+    )
+    if model_key not in MODELS:
+        model_key = "auto-best"
     read_timeout = float(config.get("http_read_timeout") or 180.0)
     connect_timeout = float(config.get("http_connect_timeout") or 8.0)
-    omni_rpm = float(config.get("omniroute_shared_rpm", 8.0) or 8.0)
-    nim_rpm = float(config.get("nim_shared_rpm", 38.0) or 38.0)
+    _pd_raw = config.get("project_dir")
+    project_path = Path(_pd_raw).resolve() if _pd_raw else None
+    dead_model_ids = set(load_dead_models(project_path)) if project_path else set()
+
+    omni_rpm = float(config.get("omniroute_shared_rpm", 40.0))
+    nim_shared_rpm = float(config.get("nim_shared_rpm", 38.0))
     shared_buckets: Dict[Tuple[str, str], TokenBucket] = {}
 
-    def get_bucket(account_key: Tuple[str, str], rpm: float) -> TokenBucket:
+    def get_or_create_bucket(account_key: Tuple[str, str], rpm: float) -> TokenBucket:
         if account_key not in shared_buckets:
             shared_buckets[account_key] = TokenBucket(rpm, safety=0.80)
         return shared_buckets[account_key]
 
-    def add_provider(name: str, base: str, key: str, mkey: str, rpm: float, priority: int = 100) -> None:
-        cfg = MODELS.get(mkey)
-        if not cfg or cfg["id"] in dead_model_ids:
+    # OmniRoute accepts any non-empty bearer; many local installs use a dummy.
+    omni_key = (
+        os.environ.get("OMNIROUTE_API_KEY")
+        or (api_key if api_key and not is_nim_key else "")
+        or "omniroute"
+    )
+    enable_omni = bool(config.get("enable_omniroute", True))
+
+    omni_fallbacks = [
+        "laguna-free",
+        "nemotron-3-ultra-free",
+        "deepseek-v4-flash-free",
+        "opencode-free",
+        "nemotron-3.5-lightning-free",
+        "auto-best",
+        # Reordered by measured latency from live probe (fastest clean
+        # 200s first). All ids switched to opencode/ prefix that the
+        # no-key probe confirmed. Thinking forced off + shared RPM
+        # crushed to 8 to stop the 429 cascade that was killing every
+        # free-pool turn.
+    ]
+    nim_fallbacks = [
+        "glm-5.2-fp8",
+        "minimax-m3",
+        "kimi-k2-thinking",
+        "laguna-xs-2.1",
+    ]
+
+    def _add(name: str, base: str, key: str, mkey: str, rpm: float) -> None:
+        if mkey not in MODELS:
             return
-        account_key = (base, key)
-        if any(p.model_id == cfg["id"] and p._account_key == account_key for p in providers):
+        cfg = MODELS[mkey]
+        if cfg["id"] in dead_model_ids:
             return
-        providers.append(Provider(name, base, key, cfg, connect_timeout, read_timeout, get_bucket(account_key, rpm), priority=priority))
-
-    omni_key = os.environ.get("OMNIROUTE_API_KEY") or (api_key if api_key and not is_nim_key else "") or "omniroute"
-
-    # --- NIM: direct, deliberately small model set -------------------------
-    if is_nim_key:
-        # Preserve an explicitly selected NIM model when one was chosen.
-        if selected_cfg.get("backend") == "nim" and selected_key in MODELS:
-            add_provider("NIM-primary", nim_base, api_key, selected_key, nim_rpm, priority=0)
-        else:
-            add_provider("NIM-primary", nim_base, api_key, "glm-5.2", nim_rpm, priority=0)
-
-        # One reasoning-oriented fallback and one broad/fast fallback. Do not
-        # enumerate the entire NIM catalog; every model on this account shares
-        # the same server-side quota.
-        for mkey in ("laguna-xs-2.1", "minimax-m3"):
-            if mkey != selected_key:
-                add_provider(f"NIM-{mkey}", nim_base, api_key, mkey, nim_rpm, priority=1)
-
-        # Additional genuinely independent NIM accounts remain supported.
-        extra_keys: List[str] = []
-        extra_keys.extend([(k or "").strip() for k in (config.get("nim_api_keys") or []) if (k or "").strip()])
-        for n in range(2, 13):
-            k = (config.get(f"nim_api_key_{n}") or os.environ.get(f"NVIDIA_API_KEY_{n}") or "").strip()
-            if not k:
-                break
-            extra_keys.append(k)
-
-        seen = {api_key}
-        acct = 2
-        for key in extra_keys:
-            if not (key.startswith("nvapi-") or key.startswith("Bearer nvapi-")) or key in seen:
-                acct += 1
-                continue
-            seen.add(key)
-            rpm = float(config.get(f"nim_shared_rpm_{acct}", nim_rpm) or nim_rpm)
-            if selected_cfg.get("backend") == "nim" and selected_key in MODELS:
-                add_provider(f"NIM{acct}-primary", nim_base, key, selected_key, rpm, priority=10)
-            else:
-                add_provider(f"NIM{acct}-primary", nim_base, key, "glm-5.2", rpm, priority=10)
-            add_provider(f"NIM{acct}-fallback", nim_base, key, "laguna-xs-2.1", rpm, priority=11)
-            acct += 1
-
-    # --- OmniRoute: one logical gateway route -------------------------------
-    if config.get("enable_omniroute", True):
-        # If the user explicitly selected an OmniRoute model, honor it.
-        omni_model = selected_key if selected_cfg.get("backend") == "omniroute" else "auto-best"
-        if omni_model not in MODELS or MODELS[omni_model].get("backend") != "omniroute":
-            omni_model = "auto-best"
-        add_provider("OmniRoute", omni_base, omni_key, omni_model, omni_rpm, priority=20)
-
-    # --- OpenRouter: one logical free router -------------------------------
-    if config.get("enable_openrouter", True):
-        or_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
-        if or_key:
-            or_cfg = {
-                "id": "openrouter/free",
-                "name": "OpenRouter Free Router",
-                "provider": "OpenRouter",
-                "backend": "openrouter",
-                "rpm": float(config.get("openrouter_shared_rpm", 8.0) or 8.0),
-                "max_tokens": 8192,
-                "ctx_window": 131072,
-                "thinking": False,
-                "extra_body": None,
-                "temperature": 0.2,
-                "top_p": 0.9,
-            }
-            account_key = (OPENROUTER_BASE_URL, or_key)
-            providers.append(Provider(
-                "OpenRouter-free",
-                OPENROUTER_BASE_URL,
-                or_key,
-                or_cfg,
+        if project_path:
+            scoped_dead = set(load_dead_models(project_path, (base, key)))
+            if cfg["id"] in scoped_dead:
+                return
+        if any(p.model_id == cfg["id"] and getattr(p, "_account_key", None) == (base, key) for p in providers):
+            return
+        providers.append(
+            Provider(
+                name,
+                base,
+                key,
+                cfg,
                 connect_timeout,
                 read_timeout,
-                get_bucket(account_key, or_cfg["rpm"]),
-                priority=30,
-            ))
-        else:
-            UI.warn("OpenRouter enabled but OPENROUTER_API_KEY is not set — no OpenRouter route added.")
+                get_or_create_bucket((base, key), rpm),
+            )
+        )
+
+    primary_cfg = MODELS.get(model_key, MODELS["auto-best"])
+    primary_backend = primary_cfg.get("backend") or (
+        "nim" if primary_cfg.get("provider") == "NVIDIA NIM" else "omniroute"
+    )
+
+    # --- Ordering: NIM (primary key) first, then NIM2 (second account) if
+    # configured, then OmniRoute last as the free/diverse but higher-
+    # maintenance safety net. If there's no usable NIM key at all,
+    # OmniRoute becomes primary by necessity. ---
+
+    # Primary: prefer NIM over OmniRoute whenever a real NVIDIA key exists,
+    # regardless of which backend the selected model nominally belongs to,
+    # so picking an OmniRoute-flavored model doesn't drag OmniRoute back to
+    # the front of the pool.
+    if is_nim_key:
+        _add(f"NIM-Primary", nim_base, api_key, model_key, nim_shared_rpm)
+    elif enable_omni:
+        _add(f"Omni-Primary", omni_base, omni_key, model_key, omni_rpm)
+
+    # NIM fallbacks on the primary key
+    if is_nim_key:
+        for fb in nim_fallbacks:
+            if fb == model_key:
+                continue
+            _add(f"NIM-{fb}", nim_base, api_key, fb, nim_shared_rpm)
+        # Also expose glm-5.2 itself as last-resort if not primary
+        if model_key != "glm-5.2":
+            _add("NIM-glm-5.2", nim_base, api_key, "glm-5.2", nim_shared_rpm)
+
+    # Additional, independent NVIDIA NIM accounts (optional, unbounded).
+    # Only worth adding if a key belongs to a genuinely separate NVIDIA
+    # account/org — a key minted from an account already in the pool
+    # typically still shares that account's server-side rate limit, so
+    # build_pool would create a local TokenBucket that doesn't correspond
+    # to any real extra capacity on NVIDIA's end. If it IS a separate
+    # account, this gives real additive throughput: get_or_create_bucket
+    # keys strictly on (base_url, api_key), so a different api_key here
+    # always yields a separate TokenBucket instance, and
+    # propagate_shared_cooldown only cools providers sharing the exact
+    # same _account_key tuple — so a 429 on one key will NOT cool another
+    # key's providers, and vice versa. That isolation is the whole point
+    # of running more than one account.
+    #
+    # Discovery: nim_api_keys (list, in config) is checked first; then
+    # numbered slots nim_api_key_2.._N / NVIDIA_API_KEY_2.._N are merged
+    # in, stopping at the first gap. NIM_MAX_ACCOUNTS caps how far the
+    # numbered-slot scan looks so a stray unrelated env var can't make
+    # this loop run forever.
+    NIM_MAX_ACCOUNTS = 12
+    extra_keys: List[str] = []
+    for k in config.get("nim_api_keys", []) or []:
+        k = (k or "").strip()
+        if k:
+            extra_keys.append(k)
+    n = 2
+    while n <= NIM_MAX_ACCOUNTS:
+        k = (
+            config.get(f"nim_api_key_{n}")
+            or os.environ.get(f"NVIDIA_API_KEY_{n}")
+            or ""
+        ).strip()
+        if k:
+            extra_keys.append(k)
+        n += 1
+
+    seen_nim_keys = {api_key} if is_nim_key else set()
+    account_num = 2
+    for k in extra_keys:
+        is_valid = k.startswith("nvapi-") or k.startswith("Bearer nvapi-")
+        if not is_valid:
+            continue
+        if k in seen_nim_keys:
+            UI.warn(
+                f"A configured NIM key (slot {account_num}) duplicates an "
+                "account already in the pool — skipping. A key only helps "
+                "if it belongs to a different NVIDIA account; reusing one "
+                "adds no real capacity."
+            )
+            account_num += 1
+            continue
+        seen_nim_keys.add(k)
+        tag = f"NIM{account_num}"
+        rpm_n = float(
+            config.get(f"nim_shared_rpm_{account_num}", nim_shared_rpm)
+        )
+        _add(f"{tag}-{model_key}", nim_base, k, model_key, rpm_n)
+        for fb in nim_fallbacks:
+            if fb == model_key:
+                continue
+            _add(f"{tag}-{fb}", nim_base, k, fb, rpm_n)
+        if model_key != "glm-5.2":
+            _add(f"{tag}-glm-5.2", nim_base, k, "glm-5.2", rpm_n)
+        account_num += 1
+
+    # OmniRoute — moved after NIM/NIM2. Free and gives wide model
+    # diversity via warmup discovery, but is the highest-maintenance
+    # backend in this pool (rotating OAuth provider connections that go
+    # reauth_required, RPM crushed to 8 to survive 429 cascades), so it
+    # now only gets hit once both NIM tiers are exhausted, instead of
+    # eating every turn as primary by default.
+    if enable_omni:
+        # If neither NIM key was usable, OmniRoute has to cover primary too.
+        if not is_nim_key:
+            _add(f"Omni-Primary", omni_base, omni_key, model_key, omni_rpm)
+        for fb in omni_fallbacks:
+            if fb == model_key:
+                continue
+            _add(f"Omni-{fb}", omni_base, omni_key, fb, omni_rpm)
+
+    # Direct OpenRouter free (optional; needs OPENROUTER_API_KEY). This is a
+    # MINIMAL static seed only — the real, current free-model list is
+    # unreliable to hardcode (OpenRouter's free tier churns weekly; see
+    # warmup_pool's OpenRouter discovery block, which queries live pricing
+    # and replaces/extends this seed at warmup time). Keeping one seed
+    # entry here just means the pool isn't completely empty of an
+    # OpenRouter provider in the brief window before warmup_pool runs.
+    if config.get("enable_openrouter", True):
+        or_key = os.environ.get("OPENROUTER_API_KEY")
+        if not or_key:
+            # enable_openrouter=True is the default, so silently skipping
+            # this block makes the pool look like it has an independent
+            # third account when it doesn't — every provider in the pool
+            # is then really just 1-2 accounts (OmniRoute's shared local
+            # key, and/or one nvapi- key), so if those get rate-limited
+            # or go down together, there is NO fallback left, and the
+            # only sign of that at runtime is a same-account cooldown
+            # cascade followed by "All providers failed." Surface the gap
+            # at pool-build time instead of letting it fail silently mid-turn.
+            UI.warn(
+                "OpenRouter fallback is enabled in config but OPENROUTER_API_KEY "
+                "is not set — skipping it. The provider pool has no third, "
+                "independent account: if OmniRoute and your NIM key both "
+                "rate-limit/outage at once, there is no fallback left. "
+                "Set OPENROUTER_API_KEY to add real redundancy, or set "
+                "enable_openrouter=False to silence this warning."
+            )
+        if or_key:
+            # Single static seed, kept deliberately generic (OpenRouter's
+            # own free-model router) rather than a specific model that may
+            # be delisted by the time this runs — live discovery in
+            # warmup_pool is what actually populates the real free list.
+            or_models = [
+                ("OR-Seed", "openrouter/free"),
+            ]
+            or_bucket = TokenBucket(15, safety=0.80)
+            for name, mid in or_models:
+                if mid in dead_model_ids:
+                    continue
+                fake_cfg = {
+                    "id": mid,
+                    "name": name,
+                    "rpm": 15,
+                    "max_tokens": 8192,
+                    "ctx_window": 131072,
+                    "thinking": False,
+                    "extra_body": None,
+                    "backend": "openrouter",
+                }
+                providers.append(
+                    Provider(
+                        name,
+                        OPENROUTER_BASE_URL,
+                        or_key,
+                        fake_cfg,
+                        connect_timeout,
+                        read_timeout,
+                        or_bucket,
+                    )
+                )
 
     if not providers:
         raise RuntimeError(
-            "No providers configured. Start OmniRoute, set NVIDIA_API_KEY, or set OPENROUTER_API_KEY."
+            "No providers configured for this project. "
+            "Options: (1) run OmniRoute locally (default http://localhost:20128/v1) "
+            "and use model auto-best; (2) set NVIDIA_API_KEY=nvapi-...; "
+            "(3) set OPENROUTER_API_KEY for direct OpenRouter free models. "
+            f"project={config.get('project_dir')} omniroute={omni_base}"
         )
 
     return ProviderPool(providers)
@@ -1912,7 +2138,7 @@ def warmup_pool(pool: "ProviderPool", config: Dict[str, Any], max_wait: float = 
                 try:
                     _pd = config.get("project_dir")
                     if _pd:
-                        mark_model_dead(Path(_pd).resolve(), p.model_id)
+                        mark_model_dead(Path(_pd).resolve(), p.model_id, getattr(p, "_account_key", None))
                 except Exception:
                     pass
         if cooled:
@@ -1951,9 +2177,222 @@ def warmup_pool(pool: "ProviderPool", config: Dict[str, Any], max_wait: float = 
     for t in threads:
         t.join(timeout=max(0.05, deadline - time.monotonic()))
 
-    # Intentionally no downstream-model PONG sweep here. OmniRoute and
-    # OpenRouter are already routing layers; probing dozens of their child
-    # models burns scarce quota and duplicates their own health/fallback logic.
+    # Live free-model chat probe (the missing piece). The /models list only
+    # tells us the id exists; it does not tell us whether a real completion
+    # returns 200, 429, 503, or an empty body. Running a tiny PONG probe here
+    # means we discover dead/rate-limited free models *before* autopilot
+    # burns turns on them.
+    try:
+        # Give the free probe real budget so it can discover ~30-50 models
+        _warmup_free_chat_probe(pool, config, max_wait=max(25.0, max_wait * 2.5, 45.0))
+    except Exception as e:
+        UI.warn(f"Warmup free-probe skipped: {str(e)[:80]}")
+
+
+def _warmup_free_chat_probe(pool: "ProviderPool", config: Dict[str, Any], max_wait: float = 45.0) -> None:
+    """Open-ended, account-aware discovery and bounded live probing.
+
+    /models defines the discovery universe. We score dynamically, select a
+    configurable number of candidates per independent account, probe those
+    candidates, and APPEND successful discoveries to the pool. We never
+    reorder the pool around discovery latency and never inject dozens of
+    models at the front, so discovery cannot starve another account.
+    """
+    if not HAS_HTTPX:
+        return
+
+    project_dir = None
+    try:
+        if config.get("project_dir"):
+            project_dir = Path(config["project_dir"]).resolve()
+    except Exception:
+        pass
+
+    per_account = max(1, int(config.get("warmup_probe_per_account", 4) or 4))
+    max_discover = max(per_account, int(config.get("warmup_max_discover", 24) or 24))
+    connect_timeout = float(config.get("http_connect_timeout") or 8.0)
+    probe_timeout = min(15.0, max(5.0, float(config.get("warmup_probe_timeout") or 10.0)))
+
+    # Unique account domains present in the pool. This is intentionally NOT
+    # "first NIM account"; all five independent NIM accounts are eligible.
+    accounts: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for p in pool.providers:
+        key = getattr(p, "_account_key", None)
+        if key is None or getattr(p, "permanently_disabled", False):
+            continue
+        base, api_key = key
+        kind = "unknown"
+        if str(getattr(p, "name", "")).startswith("NIM"):
+            kind = "nim"
+        elif str(getattr(p, "name", "")).startswith("Omni"):
+            kind = "omni"
+        elif str(getattr(p, "name", "")).startswith("OR-"):
+            kind = "openrouter"
+        slot = accounts.setdefault(key, {"base": base, "api_key": api_key, "kind": kind, "seed": p, "bucket": getattr(p, "bucket", None)})
+        if slot["kind"] == "unknown" and kind != "unknown":
+            slot["kind"] = kind
+
+    if not accounts:
+        return
+
+    dead_models_global = set(load_dead_models(project_dir)) if project_dir else set()
+    discovered: List[Provider] = []
+    probe_jobs: List[Provider] = []
+    seen_pairs: set = {(p.model_id, getattr(p, "_account_key", None)) for p in pool.providers}
+
+    def score_model(mid: str, kind: str) -> int:
+        low = mid.lower()
+        score = 0
+        if kind == "openrouter":
+            score += 10 if "free" in low else 0
+            score += 6 if any(x in low for x in ("coder", "coding", "code")) else 0
+            score += 2 if any(x in low for x in ("instruct", "chat", "thinking")) else 0
+        elif kind == "nim":
+            score += 7 if any(x in low for x in ("coder", "coding", "code")) else 0
+            score += 4 if any(x in low for x in ("thinking", "instruct", "chat")) else 0
+            score += 2 if any(x in low for x in ("glm", "kimi", "deepseek", "minimax", "laguna", "qwen")) else 0
+        else:
+            score += 5 if any(x in low for x in ("free", "auto/", "opencode/")) else 0
+            score += 4 if any(x in low for x in ("coding", "coder", "code")) else 0
+            score += 2 if any(x in low for x in ("thinking", "reasoning", "pro-")) else 0
+            score += 1 if any(x in low for x in ("fast", "chat", "pickle", "deepseek", "nemotron")) else 0
+        return score
+
+    for key, meta in accounts.items():
+        base, api_key = key
+        kind = meta["kind"]
+        try:
+            dead_models = set(dead_models_global)
+            if project_dir:
+                dead_models.update(load_dead_models(project_dir, key))
+            r = httpx.get(
+                f"{base}/models",
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=connect_timeout,
+            )
+            if r.status_code != 200:
+                continue
+            data = (r.json() or {}).get("data") or []
+            ids: List[str] = []
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                mid = item.get("id")
+                if not isinstance(mid, str) or not mid or (mid, key) in seen_pairs or mid in dead_models:
+                    continue
+                if kind == "openrouter":
+                    pricing = item.get("pricing") or {}
+                    try:
+                        if float(pricing.get("prompt", "1") or "1") != 0.0 or float(pricing.get("completion", "1") or "1") != 0.0:
+                            continue
+                    except (TypeError, ValueError):
+                        continue
+                ids.append(mid)
+            ids.sort(key=lambda m: (-score_model(m, kind), m))
+            ids = ids[:max_discover]
+            seed_cfg = meta["seed"].model_cfg
+            for mid in ids[:per_account]:
+                fake_cfg = dict(seed_cfg)
+                fake_cfg.update({"id": mid, "name": f"Discovered {mid}", "backend": kind, "provider": kind})
+                try:
+                    prov = Provider(
+                        f"{kind.upper()}-discovered-{mid.split('/')[-1][:24]}",
+                        base,
+                        api_key,
+                        fake_cfg,
+                        connect_timeout,
+                        float(config.get("http_read_timeout") or 180.0),
+                        meta["bucket"],
+                    )
+                    discovered.append(prov)
+                    probe_jobs.append(prov)
+                    seen_pairs.add((mid, key))
+                except Exception:
+                    continue
+        except Exception:
+            continue
+
+    # Bound real probe traffic: at most one small completion per discovered
+    # candidate, with the account's shared token bucket respected.
+    results: List[Dict[str, Any]] = []
+    lock = threading.Lock()
+
+    def probe(prov: Provider) -> None:
+        bucket = prov.bucket
+        if bucket is not None and not bucket.try_acquire():
+            return
+        base, api_key = prov._account_key
+        payload = {
+            "model": prov.model_id,
+            "messages": [{"role": "user", "content": "Reply with exactly: PONG"}],
+            "max_tokens": 16,
+            "stream": False,
+            "temperature": 0,
+        }
+        t0 = time.monotonic()
+        status = 0
+        try:
+            r = httpx.post(
+                f"{base}/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json=payload,
+                timeout=probe_timeout,
+            )
+            status = r.status_code
+        except Exception:
+            status = 0
+        dt = round(time.monotonic() - t0, 2)
+        # Record health in the same account-aware state used by real turns.
+        if status == 200:
+            prov.record_success()
+            prov.warm_latency = dt
+        elif status in (404, 410):
+            prov.record_failure(cooldown=3600.0, permanent=True, absolute=True)
+        elif status == 429:
+            cool = float(config.get("post_429_backoff", 12.0) or 12.0)
+            prov.record_failure(cooldown=cool, absolute=True)
+            pool.propagate_shared_cooldown(prov, cool)
+        elif status in (502, 503, 504, 0):
+            prov.record_failure(cooldown=45.0, absolute=True)
+        elif status:
+            prov.record_failure(cooldown=30.0, absolute=True)
+        else:
+            prov.record_failure(cooldown=15.0, absolute=True)
+        with lock:
+            results.append({"provider": prov, "status": status, "latency": dt})
+
+    deadline = time.monotonic() + max_wait
+    for prov in probe_jobs:
+        if time.monotonic() >= deadline:
+            break
+        t = threading.Thread(target=probe, args=(prov,), daemon=True)
+        t.start()
+        t.join(timeout=max(0.05, min(probe_timeout, deadline - time.monotonic())))
+
+    live = [r for r in results if r["status"] == 200]
+    live.sort(key=lambda r: r["latency"])
+    live_pairs = {(r["provider"].model_id, r["provider"]._account_key) for r in live}
+
+    # Append only; never front-load discoveries. Match liveness by BOTH model
+    # and account: model X may be enabled on NIM account A but return 404 on
+    # independent NIM account B. A global model-id set would leak health across
+    # accounts and reintroduce exactly the cross-account coupling we removed.
+    for prov in discovered:
+        if (prov.model_id, prov._account_key) in live_pairs:
+            pool.add_provider(prov, front=False)
+
+    snapshot = pool.account_snapshot()
+    nim_count = sum(1 for row in snapshot if row["nim"] > 0)
+    UI.info(
+        f"Provider discovery: {len(accounts)} capacity domains · "
+        f"NIM domains={nim_count} · probed={len(results)} · live={len(live)} · "
+        f"discovered-live={sum(1 for p in discovered if (p.model_id, p._account_key) in live_pairs)}"
+    )
+    if snapshot:
+        rendered = " | ".join(
+            f"A{r['account']}[{r['fingerprint']}] p={r['providers']}" for r in snapshot
+        )
+        UI.info(f"NIM capacity domains: {nim_count} | all domains: {rendered}")
 
 
 @dataclass
@@ -5482,8 +5921,8 @@ class ContextManager:
         if files_touched:
             lines = [f"  - {p} ({v})" for p, v in sorted(files_touched.items())]
             manifest = (
-                "\n\n[FILES ALREADY SEEN THIS SESSION — do NOT re-read unless you "
-                "suspect they changed; use the summary above and proceed]\n"
+                "\n\n[FILES PREVIOUSLY TOUCHED — navigation hints only; the summary is lossy. "
+                "Re-read the actual file whenever exact current contents, line-level state, or validation matters.]\n"
                 + "\n".join(lines)
             )
 
@@ -5491,7 +5930,7 @@ class ContextManager:
             f"[FOLDED {len(old)} MESSAGES]\n" + "\n".join(summaries[-30:]) + manifest
         )
         self.messages = sys_msgs + [
-            {"role": "user", "content": f"[PRIOR CONTEXT SUMMARY]\n{self.compaction_summary}\n\nYou are mid-task. Continue executing the next required tool immediately. Do not re-read files listed as already seen unless you have a specific reason to believe they changed."},
+            {"role": "user", "content": f"[PRIOR CONTEXT SUMMARY]\n{self.compaction_summary}\n\nYou are mid-task. Continue from the summary, but treat it as lossy. Re-read source files, tests, and generated artifacts whenever exact state matters before editing or asserting facts."},
             {"role": "assistant", "content": "Context acknowledged. Proceeding with next tool execution."},
         ] + recent
         return True
@@ -6399,7 +6838,7 @@ class NeonArchitect:
             prompt += (
                 f"\n\n[SDLC PHASE: {phase.upper()}]\n{phase_prompt}\n"
                 f"Completed: {completed}\n"
-                "Phase turns are bounded by a circuit breaker; produce required artifacts and let the orchestrator advance only when gates pass."
+                "Turns are NOT limited by a fixed count. Produce required artifacts; orchestrator advances gates."
             )
             handoff = self._phase_handoff_block(phase)
             if handoff:
@@ -7181,17 +7620,11 @@ class NeonArchitect:
                     dump_dir.mkdir(parents=True, exist_ok=True)
                     dump_path = dump_dir / f"{int(time.time())}_{provider.model_id.replace('/', '_')}.json"
                     with open(dump_path, "w", encoding="utf-8") as f:
-                        messages = payload.get("messages") or []
                         json.dump(
                             {
                                 "model": provider.model_id,
-                                "provider": provider.name,
                                 "error": repr(ex),
-                                "message_count": len(messages),
-                                "prompt_chars": sum(len(str(m.get("content") or "")) for m in messages if isinstance(m, dict)),
-                                "tool_count": len(payload.get("tools") or []),
-                                "stream": bool(payload.get("stream")),
-                                "timestamp": time.time(),
+                                "payload": payload,
                             },
                             f,
                             indent=2,
@@ -7212,15 +7645,13 @@ class NeonArchitect:
             orphans = self._orphan_reader_threads = []
         orphans[:] = [th for th in orphans if th.is_alive()]
         if len(orphans) >= 6:
-            UI.err(
-                f"{len(orphans)} abandoned provider-stream threads are still running. "
-                "Refusing to create another stream until the leak clears."
+            UI.warn(
+                f"{len(orphans)} abandoned provider-stream threads still running "
+                "in the background (likely a stuck connection pool)."
             )
-            raise RuntimeError("Too many abandoned provider-stream threads")
 
         t = threading.Thread(target=_reader, daemon=True, name="neon-stream-reader")
         t.start()
-        orphans.append(t)
 
         try:
             while True:
@@ -7442,7 +7873,7 @@ class NeonArchitect:
 
     def _parse_stream(self, payload: Dict[str, Any]) -> Tuple[str, str, List[Dict[str, Any]]]:
         max_total_attempts = int(self.config.get("retry_max", 2))
-        max_per_provider = int(self.config.get("max_retries_per_provider", 1))
+        max_per_provider = int(self.config.get("max_retries_per_provider", 2))
         base_delay = float(self.config.get("retry_base_delay", 1.5))
         total_attempts = 0
         empty_pool_spins = 0
@@ -7483,8 +7914,6 @@ class NeonArchitect:
                 self._rate_limit_until = 0.0
 
         _last_cooldown_print = 0.0
-        provider_failure_streak = 0
-        provider_failure_circuit = max(1, int(self.config.get("provider_failure_circuit", 3) or 3))
         while total_attempts < max_total_attempts:
             provider = self.pool.next_available()
             if not provider:
@@ -7579,7 +8008,6 @@ class NeonArchitect:
 
                 if finish_reason is not None:
                     provider.record_success()
-                    provider_failure_streak = 0
                     self._note_provider_success()
                     return content, reasoning, tool_calls
                 else:
@@ -7607,7 +8035,7 @@ class NeonArchitect:
                     _pd = self.config.get("project_dir")
                     if _pd:
                         try:
-                            mark_model_dead(Path(_pd).resolve(), provider.model_id)
+                            mark_model_dead(Path(_pd).resolve(), provider.model_id, getattr(provider, "_account_key", None))
                         except Exception:
                             pass
                     self.pool.rotate()
@@ -7744,15 +8172,6 @@ class NeonArchitect:
                     if self.pool.should_rotate(max_per_provider):
                         self.pool.rotate()
 
-                provider_failure_streak += 1
-                if provider_failure_streak >= provider_failure_circuit:
-                    UI.err(
-                        f"Provider circuit breaker opened after {provider_failure_streak} consecutive failures. "
-                        "Stopping this logical request instead of multiplying retries across aliases."
-                    )
-                    raise RuntimeError(
-                        f"Provider circuit open after {provider_failure_streak} consecutive failures: {e}"
-                    )
                 if total_attempts < max_total_attempts:
                     delay = min(base_delay + random.uniform(0, 1.0), 5.0)
                     UI.info(f"Retrying in {delay:.1f}s...")
@@ -8448,23 +8867,36 @@ class NeonArchitect:
                     if n_fail >= 3:
                         wait = min(wait * n_fail, 180.0)
                     phase = SDLC_PHASES[min(self.sdlc_phase_idx, len(SDLC_PHASES) - 1)].upper()
-                    if n_fail == 3:
-                        UI.warn(
-                            f"Sustained provider outage: {n_fail} turns in a row have failed "
-                            f"(phase={phase}). Backing off to {wait:.0f}s between attempts. "
-                            "/stop to halt, or check API key / network / provider status."
+                    if n_fail >= 3:
+                        UI.err(
+                            f"Autopilot circuit-breaker: {n_fail} consecutive provider failures "
+                            f"in {phase}. Stopping instead of burning retries on the same outage. "
+                            "Fix provider/account health, then resume with /autopilot."
                         )
-                    else:
-                        UI.warn(
-                            f"Provider hiccup — sleeping {wait:.0f}s then continuing "
-                            f"(phase={phase}, round={self.autopilot_rounds}, "
-                            f"consecutive_failures={n_fail}). /stop to halt."
-                        )
+                        try:
+                            self.project_state.setdefault("blockers", []).append(
+                                f"{phase}: {n_fail} consecutive provider failures — autopilot halted to prevent retry waste"
+                            )
+                            self.project_state["blockers"] = self.project_state["blockers"][-10:]
+                            self._update_working_memory(
+                                f"{phase} PROVIDER BLOCKED: {n_fail} consecutive provider failures. "
+                                "Autopilot halted by circuit-breaker; no phase completion recorded.",
+                                section="Blockers",
+                            )
+                        except Exception:
+                            pass
+                        self._stop_autopilot()
+                        break
+                    UI.warn(
+                        f"Provider hiccup — sleeping {wait:.0f}s then continuing "
+                        f"(phase={phase}, round={self.autopilot_rounds}, "
+                        f"consecutive_failures={n_fail}). One more failure will trip the circuit-breaker."
+                    )
                     if self.autopilot:
                         self.ctx.add_user(
-                            "SYSTEM: Provider stalled. Do NOT rewrite huge DESIGN.md/SPEC.md. "
-                            "Call write on ONE small source file (<200 lines) under src/ or backend/ or frontend/. "
-                            "path required. No questions."
+                            "SYSTEM: Provider temporarily failed. Keep the next action tiny and concrete; "
+                            "do not generate large design/spec documents. Call ONE tool on ONE source/test file. "
+                            "Do not ask the user."
                         )
                     time.sleep(wait)
                     continue
@@ -8595,7 +9027,7 @@ class NeonArchitect:
                             self._stop_autopilot()
                             break
                     else:
-                        max_pr = int(self.config.get("max_phase_rounds", 80) or 0)
+                        max_pr = int(self.config.get("max_phase_rounds", 150) or 0)
                         if (
                             max_pr > 0
                             and self._phase_rounds >= max_pr
@@ -8834,7 +9266,7 @@ class NeonArchitect:
                 "(can't confirm pass count)."
             )
             return False
-        max_t = int(self.config.get("testing_max_phase_rounds", 80) or 80)
+        max_t = int(self.config.get("testing_max_phase_rounds", 150) or 150)
         if max_t > 0 and self._phase_rounds >= max_t:
             # Previously this force-passed the phase after the round
             # limit ("soft-pass with blocker recorded"), which is the
@@ -9294,7 +9726,7 @@ class NeonArchitect:
                     # of the check. Mirror the testing breaker's behavior:
                     # halt autopilot and record a blocker rather than
                     # looping forever or silently soft-passing.
-                    max_v = int(self.config.get("verification_max_phase_rounds", 50) or 50)
+                    max_v = int(self.config.get("verification_max_phase_rounds", 150) or 150)
                     if max_v > 0 and self._phase_rounds >= max_v:
                         UI.warn(
                             f"VERIFICATION circuit-breaker: {self._phase_rounds} rounds without "
@@ -9784,28 +10216,24 @@ def load_config() -> Dict[str, Any]:
         # DEFAULT_CONFIG above would have no effect on any project that
         # already has a config.json on disk.
         "retry_max": 2,
-        "specialized_retry_max": 2,
         "retry_base_delay": 2.5,
         "max_retries_per_provider": 1,
         "nim_shared_rpm": 38.0,
         "inter_turn_delay": 0.35,
-        "compact_threshold": 5000,
+        "compact_threshold": 24000,
         "startup_compact_tokens": 60000,
         "max_rounds": 0,
         "max_autopilot_rounds": 0,
         "max_phase_rounds": 80,
         "testing_max_phase_rounds": 80,
         "verification_max_phase_rounds": 50,
-        "provider_failure_circuit": 3,
         "max_same_tool_successes": 3,
         "post_429_backoff": 12.0,
         "rpm_safety": 0.80,
-        # Was hardwired to "off" — every config load silently reset this
-        # back regardless of what was saved. Now hardwired to "low" instead,
-        # per explicit request. allow_medium_high_thinking stays False, so
-        # "low" is the ceiling; raise both together if you want more.
-        "thinking_effort": "low",
-        "allow_medium_high_thinking": False,
+        # Keep thinking policy configurable; unlike the legacy branch, the
+        # loader must not silently downgrade a saved medium/high setting.
+        "thinking_effort": "high",
+        "allow_medium_high_thinking": True,
         "show_thinking": True,
         "autopilot_thinking": False,
     }
@@ -12126,17 +12554,16 @@ class SpecializedAgent:
         if not HAS_OPENAI:
             return f"# {self.role} output\n# openai package not available\n"
 
-        max_attempts = max(1, int(self.config.get("specialized_retry_max", self.config.get("retry_max", 2)) or 2))
-        for attempt in range(max_attempts):
+        for attempt in range(8):
             provider = None
-            # Wait briefly for an available provider.
-            for _ in range(15):
+            # Wait for an available provider (up to 60 s)
+            for _ in range(30):
                 provider = self.pool.next_available()
                 if provider:
                     break
                 time.sleep(2.0)
             if not provider:
-                raise RuntimeError(f"[{self.role}] No provider available after 30 s")
+                raise RuntimeError(f"[{self.role}] No NIM provider available after 60 s")
 
             model_cfg = provider.model_cfg
             payload: Dict[str, Any] = {
@@ -12184,7 +12611,7 @@ class SpecializedAgent:
                 # above, just not wrapped in one of those SDK exception types.
                 provider.record_failure()
                 time.sleep(2.0)
-        raise RuntimeError(f"[{self.role}] All provider attempts exhausted ({max_attempts})")
+        raise RuntimeError(f"[{self.role}] All NIM attempts exhausted")
 
     def _messages(self, user_content: str) -> List[Dict[str, str]]:
         return [
