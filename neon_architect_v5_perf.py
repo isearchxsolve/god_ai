@@ -266,100 +266,97 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 # ── Model Registry ────────────────────────────────────────────────────────────
 MODELS: Dict[str, Dict[str, Any]] = {
     # ── OmniRoute / free (coding-first) ───────────────────────────────────────
-    # Confirmed working on the user's OmniRoute instance. Model ids are the
-    # router-facing names OmniRoute exposes (or OpenRouter free ids when
-    # routed through OmniRoute's openrouter provider).
+    # Every id below was confirmed present in this instance's own
+    # GET /v1/models response (2372 models). Earlier ids in this file
+    # ("auto", "opencode", "felo", "g4f-groq", openrouter/*:free bare
+    # names) 400'd with "Unable to determine provider" or 404'd because
+    # they don't exist on THIS OmniRoute instance/session — a router can
+    # expose a different model set per install, so the probe file from a
+    # different session was not a reliable source. Always re-derive from
+    # a live GET {OMNIROUTE_BASE_URL}/models before trusting an id here.
     "auto-best": {
-        "id": "auto",
-        "name": "Auto (Smart Router)",
+        "id": "auto/best-coding",
+        "name": "Auto Best Coding (Smart Router)",
         "provider": "OmniRoute",
         "backend": "omniroute",
         "rpm": 40,
         "max_tokens": 16384,
-        "ctx_window": 128000,
-        "thinking": False,
-        "extra_body": None,
-        "temperature": 0.2,
-        "top_p": 0.9,
-    },
-    "qwen-coder-7b-free": {
-        "id": "openrouter/qwen/qwen-2.5-coder-7b:free",
-        "name": "Qwen Coder 7B (Free)",
-        "provider": "OmniRoute / OpenRouter",
-        "backend": "omniroute",
-        "rpm": 20,
-        "max_tokens": 8192,
-        "ctx_window": 128000,
-        "thinking": False,
-        "extra_body": None,
-        "temperature": 0.2,
-        "top_p": 0.9,
-    },
-    "deepseek-chat-free": {
-        "id": "openrouter/deepseek/deepseek-chat:free",
-        "name": "DeepSeek Chat (Free)",
-        "provider": "OmniRoute / OpenRouter",
-        "backend": "omniroute",
-        "rpm": 20,
-        "max_tokens": 8192,
-        "ctx_window": 128000,
-        "thinking": False,
-        "extra_body": None,
-        "temperature": 0.2,
-        "top_p": 0.9,
-    },
-    "llama3.1-8b-free": {
-        "id": "openrouter/meta-llama/llama-3.1-8b-instruct:free",
-        "name": "Llama 3.1 8B (Free)",
-        "provider": "OmniRoute / OpenRouter",
-        "backend": "omniroute",
-        "rpm": 20,
-        "max_tokens": 8192,
-        "ctx_window": 8192,
-        "thinking": False,
+        "ctx_window": 1048576,
+        "thinking": True,
         "extra_body": None,
         "temperature": 0.2,
         "top_p": 0.9,
     },
     "opencode-free": {
-        "id": "opencode",
-        "name": "OpenCode (Free via OmniRoute)",
+        "id": "oc/big-pickle",
+        "name": "OpenCode Big Pickle (Free via OmniRoute)",
         "provider": "OmniRoute",
         "backend": "omniroute",
         "rpm": 30,
         "max_tokens": 8192,
-        "ctx_window": 8192,
+        "ctx_window": 200000,
+        "thinking": True,
+        "extra_body": None,
+        "temperature": 0.2,
+        "top_p": 0.9,
+    },
+    "laguna-free": {
+        "id": "oc/laguna-s-2.1-free",
+        "name": "Laguna S 2.1 (Free via OmniRoute)",
+        "provider": "OmniRoute",
+        "backend": "omniroute",
+        "rpm": 30,
+        "max_tokens": 8192,
+        "ctx_window": 200000,
         "thinking": False,
         "extra_body": None,
         "temperature": 0.2,
         "top_p": 0.9,
     },
-    "groq-llama3-70b-free": {
-        "id": "g4f-groq",
-        "name": "Groq Llama 3 70B (Free via OmniRoute)",
+    "deepseek-v4-flash-free": {
+        "id": "oc/deepseek-v4-flash-free",
+        "name": "DeepSeek V4 Flash (Free via OmniRoute)",
         "provider": "OmniRoute",
         "backend": "omniroute",
         "rpm": 30,
         "max_tokens": 8192,
-        "ctx_window": 8192,
+        "ctx_window": 1000000,
+        "thinking": True,
+        "extra_body": None,
+        "temperature": 0.2,
+        "top_p": 0.9,
+    },
+    "nemotron-3-ultra-free": {
+        "id": "oc/nemotron-3-ultra-free",
+        "name": "Nemotron 3 Ultra (Free via OmniRoute)",
+        "provider": "OmniRoute",
+        "backend": "omniroute",
+        "rpm": 30,
+        "max_tokens": 8192,
+        "ctx_window": 200000,
         "thinking": False,
         "extra_body": None,
         "temperature": 0.2,
         "top_p": 0.9,
     },
-    "felo-free": {
-        "id": "felo",
-        "name": "Felo (Free via OmniRoute)",
+    "nemotron-3.5-lightning-free": {
+        "id": "oc/nemotron-3.5-lightning-free",
+        "name": "Nemotron 3.5 Lightning (Free via OmniRoute)",
         "provider": "OmniRoute",
         "backend": "omniroute",
         "rpm": 30,
         "max_tokens": 8192,
-        "ctx_window": 8192,
+        "ctx_window": 200000,
         "thinking": False,
         "extra_body": None,
         "temperature": 0.2,
         "top_p": 0.9,
     },
+    # "felo-free" and "groq-llama3-70b-free" removed: no felo/* or
+    # g4f-groq id exists in this instance's own /v1/models response.
+    # felo/felo-chat DOES exist under owned_by "felo-web" but a past
+    # live probe showed it 429ing (rate-limited) — re-verify before
+    # re-adding.
     # ── NVIDIA NIM (used only when an nvapi- key is present) ──────────────────
     "glm-5.2": {
         "id": "z-ai/glm-5.2",
@@ -489,13 +486,15 @@ DEFAULT_CONFIG = {
     # SDLC by default (default_model); this lets specific phases opt into a
     # stronger/different model without paying for it everywhere. Empty/absent
     # phase -> falls back to default_model. Keys must be SDLC_PHASES entries,
-    # values must be MODELS keys. testing/verification default to MiniMax M3
-    # (previously the 120B Nemotron, now removed) since that's where GLM-5.2
-    # was observed getting stuck producing collapsed-source writes it
-    # couldn't self-correct.
+    # values must be MODELS keys. testing/verification point at
+    # deepseek-v4-flash-free (confirmed live in this instance's
+    # /v1/models) rather than the deleted qwen-coder-7b-free key, which
+    # doesn't exist on this OmniRoute instance and was triggering the
+    # "not a known model; removing this stale override" warning on every
+    # autopilot run.
     "phase_models": {
-        "testing": "qwen-coder-7b-free",
-        "verification": "qwen-coder-7b-free",
+        "testing": "deepseek-v4-flash-free",
+        "verification": "deepseek-v4-flash-free",
     },
     "require_research_for_external": True,
     "full_access": True,
@@ -1651,13 +1650,19 @@ def build_pool(config: Dict[str, Any], model_key_override: Optional[str] = None)
     enable_omni = bool(config.get("enable_omniroute", True))
 
     omni_fallbacks = [
-        "auto-best",
-        "qwen-coder-7b-free",
-        "deepseek-chat-free",
-        "llama3.1-8b-free",
+        "deepseek-v4-flash-free",
+        "nemotron-3.5-lightning-free",
         "opencode-free",
-        "groq-llama3-70b-free",
-        "felo-free",
+        "laguna-free",
+        "nemotron-3-ultra-free",
+        "auto-best",
+        # All ids above are confirmed present in this instance's live
+        # GET /v1/models response. "qwen-coder-7b-free",
+        # "deepseek-chat-free", "llama3.1-8b-free", "groq-llama3-70b-free",
+        # and "felo-free" removed — none of those model ids exist on this
+        # OmniRoute instance (confirmed 400/"Unable to determine provider"
+        # in the actual run log), so keeping them here was pure dead
+        # weight burning retry budget every turn.
     ]
     nim_fallbacks = [
         "glm-5.2-fp8",
