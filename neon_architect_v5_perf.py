@@ -70,7 +70,7 @@ except ImportError:
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from enum import Enum
 from collections import defaultdict
@@ -446,7 +446,18 @@ DEFAULT_CONFIG = {
     "rpm_safety": 0.55,
     "show_thinking": True,
     "theme": "neon",
-    "retry_max": 8,
+    # Was 8. With only ~2 real accounts behind this pool (OmniRoute's
+    # shared local key + one nvapi- key — see build_pool), 8 attempts
+    # meant grinding through several rounds of cascading same-account
+    # cooldowns before failing, producing a noisy "Max retries exceeded"
+    # instead of the clearer "All providers unavailable... check API key /
+    # rate limits" message the empty-pool path already gives. The
+    # account-aware refund logic in _parse_stream (search
+    # _dead_accounts_this_turn) means repeat 429s against an
+    # already-known-dead account no longer cost budget, so 4 is enough
+    # to try every distinct account plus one retry each post-cooldown,
+    # while still failing fast when the whole pool is genuinely down.
+    "retry_max": 4,
     "retry_base_delay": 2.5,
     "enable_openrouter": True,
     "stream_content_timeout": 200.0,
@@ -1723,6 +1734,24 @@ def build_pool(config: Dict[str, Any], model_key_override: Optional[str] = None)
     # Direct OpenRouter free (optional; needs OPENROUTER_API_KEY)
     if config.get("enable_openrouter", True):
         or_key = os.environ.get("OPENROUTER_API_KEY")
+        if not or_key:
+            # enable_openrouter=True is the default, so silently skipping
+            # this block makes the pool look like it has an independent
+            # third account when it doesn't — every provider in the pool
+            # is then really just 1-2 accounts (OmniRoute's shared local
+            # key, and/or one nvapi- key), so if those get rate-limited
+            # or go down together, there is NO fallback left, and the
+            # only sign of that at runtime is a same-account cooldown
+            # cascade followed by "All providers failed." Surface the gap
+            # at pool-build time instead of letting it fail silently mid-turn.
+            UI.warn(
+                "OpenRouter fallback is enabled in config but OPENROUTER_API_KEY "
+                "is not set — skipping it. The provider pool has no third, "
+                "independent account: if OmniRoute and your NIM key both "
+                "rate-limit/outage at once, there is no fallback left. "
+                "Set OPENROUTER_API_KEY to add real redundancy, or set "
+                "enable_openrouter=False to silence this warning."
+            )
         if or_key:
             or_models = [
                 ("OR-Qwen-Coder", "qwen/qwen-2.5-coder-32b-instruct:free"),
@@ -1859,6 +1888,310 @@ def warmup_pool(pool: "ProviderPool", config: Dict[str, Any], max_wait: float = 
     deadline = time.monotonic() + max_wait
     for t in threads:
         t.join(timeout=max(0.05, deadline - time.monotonic()))
+
+    # Live free-model chat probe (the missing piece). The /models list only
+    # tells us the id exists; it does not tell us whether a real completion
+    # returns 200, 429, 503, or an empty body. Running a tiny PONG probe here
+    # means we discover dead/rate-limited free models *before* autopilot
+    # burns turns on them.
+    try:
+        # Give the free probe real budget so it can discover ~30-50 models
+        _warmup_free_chat_probe(pool, config, max_wait=max(25.0, max_wait * 2.5, 45.0))
+    except Exception as e:
+        UI.warn(f"Warmup free-probe skipped: {str(e)[:80]}")
+
+
+def _warmup_free_chat_probe(pool: "ProviderPool", config: Dict[str, Any], max_wait: float = 45.0) -> None:
+    """Probe free Omni models with a real chat completion AND refresh the
+    live free-model set from /v1/models.
+
+    1. Probe every free provider already in the pool.
+    2. Pull the current /v1/models catalog and discover extra high-value
+       free candidates (opencode/*, auto/*, etc.) — up to ~50 dynamically.
+    3. Probe those discoveries (budget-limited by max_wait).
+    4. Dynamically inject any newly-found live models into the front of
+       the pool so the agent actually uses them this session.
+    5. Re-order pool.providers so live free models sit first by latency.
+
+    Live rule (tightened): any HTTP 200 counts as live. We no longer cool
+    a model just because the PONG body was empty or non-JSON — that used
+    to mis-classify healthy free models as dead.
+    """
+    if not HAS_HTTPX:
+        return
+
+    free_keys = {
+        "opencode-free", "laguna-free", "deepseek-v4-flash-free",
+        "nemotron-3-ultra-free", "nemotron-3.5-lightning-free", "auto-best",
+    }
+    # Broad free / auto prefixes we are willing to discover at runtime
+    DISCOVER_PREFIXES = (
+        "opencode/", "oc/", "auto/",
+    )
+    # Dynamic cap: prefer config override, else scale with max_wait, hard ceiling 50
+    cfg_cap = int(config.get("warmup_max_discover", 0) or 0)
+    if cfg_cap > 0:
+        MAX_EXTRA_DISCOVER = min(50, cfg_cap)
+    else:
+        # ~1.2 models per second of budget after base probes, capped at 50
+        MAX_EXTRA_DISCOVER = min(50, max(12, int(max_wait * 1.1)))
+
+    candidates: List["Provider"] = []
+    seen_ids: set = set()
+    omni_account: Optional[Tuple[str, str]] = None
+    omni_bucket = None
+    connect_timeout = float(config.get("http_connect_timeout") or 8.0)
+    read_timeout = float(config.get("http_read_timeout") or 180.0)
+
+    for p in pool.providers:
+        if getattr(p, "permanently_disabled", False):
+            continue
+        mkey = None
+        for k, v in MODELS.items():
+            if v.get("id") == p.model_id:
+                mkey = k
+                break
+        is_free = (
+            mkey in free_keys
+            or str(p.model_id).startswith(("opencode/", "oc/", "auto/"))
+        )
+        if not is_free:
+            continue
+        if p.model_id in seen_ids:
+            continue
+        seen_ids.add(p.model_id)
+        candidates.append(p)
+        if omni_account is None:
+            omni_account = getattr(p, "_account_key", None)
+            omni_bucket = getattr(p, "bucket", None)
+
+    project_dir = None
+    try:
+        _pd = config.get("project_dir")
+        if _pd:
+            project_dir = Path(_pd).resolve()
+    except Exception:
+        pass
+
+    # ── Discover extra free models from live /v1/models ──────────────────
+    extra_ids: List[str] = []
+    if omni_account is not None:
+        base_url, api_key = omni_account
+        try:
+            r = httpx.get(
+                f"{base_url}/models",
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=8.0,
+            )
+            if r.status_code == 200:
+                live_ids = [
+                    m.get("id")
+                    for m in (r.json().get("data") or [])
+                    if isinstance(m, dict) and isinstance(m.get("id"), str)
+                ]
+                # Prefer coding / free / best / fast names, but take a broad
+                # slice of auto/ and opencode/ so the live set stays dynamic.
+                scored: List[Tuple[int, str]] = []
+                for mid in live_ids:
+                    if mid in seen_ids:
+                        continue
+                    if not any(mid.startswith(pref) for pref in DISCOVER_PREFIXES):
+                        continue
+                    low = mid.lower()
+                    score = 0
+                    if "free" in low:
+                        score += 5
+                    if any(x in low for x in ("coding", "best-", "pro-", "fast", "pickle", "laguna", "deepseek", "nemotron")):
+                        score += 3
+                    if any(x in low for x in ("cheap", "chat", "smart", "offline", "multimodal")):
+                        score += 1
+                    scored.append((score, mid))
+                scored.sort(key=lambda x: (-x[0], x[1]))
+                extra_ids = [m for _, m in scored[:MAX_EXTRA_DISCOVER]]
+        except Exception:
+            pass
+
+    # Build lightweight Provider shells for discovered ids so they can be probed
+    discovered_providers: List["Provider"] = []
+    if extra_ids and omni_account is not None:
+        base_url, api_key = omni_account
+        omni_rpm = float(config.get("omniroute_shared_rpm", 8.0) or 8.0)
+        for mid in extra_ids:
+            if mid in seen_ids:
+                continue
+            seen_ids.add(mid)
+            fake_cfg = {
+                "id": mid,
+                "name": f"Discovered {mid}",
+                "provider": "OmniRoute",
+                "backend": "omniroute",
+                "rpm": 10,
+                "max_tokens": 8192,
+                "ctx_window": 200000,
+                "thinking": False,
+                "extra_body": None,
+                "temperature": 0.2,
+                "top_p": 0.9,
+            }
+            try:
+                prov = Provider(
+                    f"Omni-discovered-{mid.split('/')[-1][:24]}",
+                    base_url,
+                    api_key,
+                    fake_cfg,
+                    connect_timeout,
+                    read_timeout,
+                    omni_bucket,
+                )
+                discovered_providers.append(prov)
+                candidates.append(prov)
+            except Exception:
+                pass
+
+    if not candidates:
+        return
+
+    results: List[Dict[str, Any]] = []
+    lock = threading.Lock()
+
+    def _one(prov: "Provider") -> None:
+        base_url, api_key = prov._account_key
+        payload = {
+            "model": prov.model_id,
+            "messages": [{"role": "user", "content": "Reply with exactly: PONG"}],
+            "max_tokens": 16,
+            "stream": False,
+            "temperature": 0,
+        }
+        t0 = time.monotonic()
+        note = ""
+        status = 0
+        try:
+            r = httpx.post(
+                f"{base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=10.0,
+            )
+            status = r.status_code
+            dt = round(time.monotonic() - t0, 1)
+            raw = (r.text or "")[:200]
+            if status == 200:
+                try:
+                    body = r.json()
+                    note = (
+                        (body.get("choices") or [{}])[0]
+                        .get("message", {})
+                        .get("content") or ""
+                    ).strip()[:40] or "EMPTY"
+                except Exception:
+                    note = f"NON_JSON: {raw[:60]}"
+            else:
+                try:
+                    note = (r.json().get("error", {}) or {}).get("message", raw)[:80]
+                except Exception:
+                    note = raw[:80]
+        except Exception as e:
+            dt = round(time.monotonic() - t0, 1)
+            status = 0
+            note = f"{type(e).__name__}: {str(e)[:60]}"
+
+        with lock:
+            results.append({
+                "model": prov.model_id,
+                "status": status,
+                "latency": dt,
+                "note": note,
+                "provider": prov,
+            })
+
+        # Tightened live rule: ANY HTTP 200 is live. Empty/non-JSON body no
+        # longer demotes a working free model into the cooled list.
+        if status == 200:
+            prov.record_success()
+            prov.warm_latency = dt
+        elif status in (404, 410):
+            prov.record_failure(cooldown=3600.0, permanent=True, absolute=True)
+            if project_dir:
+                try:
+                    mark_model_dead(project_dir, prov.model_id)
+                except Exception:
+                    pass
+        elif status == 429:
+            cool = float(config.get("post_429_backoff", 40.0) or 40.0)
+            prov.record_failure(cooldown=cool, absolute=True)
+            try:
+                pool.propagate_shared_cooldown(prov, cool)
+            except Exception:
+                pass
+        elif status in (503, 502, 0):
+            prov.record_failure(cooldown=45.0, absolute=True)
+        else:
+            prov.record_failure(cooldown=30.0, absolute=True)
+
+    threads = []
+    deadline = time.monotonic() + max_wait
+    # Adaptive stagger: tighter when probing many models so we stay inside budget
+    stagger = 0.12 if len(candidates) > 20 else 0.18
+    for p in candidates:
+        if time.monotonic() >= deadline:
+            break
+        t = threading.Thread(target=_one, args=(p,), daemon=True, name=f"neon-free-probe-{p.model_id[:24]}")
+        t.start()
+        threads.append(t)
+        time.sleep(stagger)
+    for t in threads:
+        t.join(timeout=max(0.05, deadline - time.monotonic()))
+
+    if not results:
+        return
+
+    def _is_live(r: Dict[str, Any]) -> bool:
+        # Any clean HTTP 200 counts as live — do not punish empty/short bodies.
+        return r["status"] == 200
+
+    live = sorted([r for r in results if _is_live(r)], key=lambda r: r["latency"])
+    cooled = [r for r in results if not _is_live(r)]
+
+    # ── Update the live model set: inject newly discovered live models ──
+    existing_ids = {p.model_id for p in pool.providers}
+    injected = 0
+    for r in live:
+        prov = r["provider"]
+        if prov.model_id in existing_ids:
+            continue
+        # Only inject ones we discovered this run (not already in MODELS pool)
+        if prov in discovered_providers or prov.model_id in extra_ids:
+            pool.providers.insert(0, prov)  # front of the queue
+            existing_ids.add(prov.model_id)
+            injected += 1
+
+    # ── Re-order: live free models first (by latency), then the rest ────
+    live_ids_ordered = [r["model"] for r in live]
+    live_map = {r["model"]: r["provider"] for r in live}
+    front: List["Provider"] = []
+    for mid in live_ids_ordered:
+        for p in pool.providers:
+            if p.model_id == mid and p not in front:
+                front.append(p)
+                break
+    rest = [p for p in pool.providers if p not in front]
+    pool.providers[:] = front + rest
+    pool.index = 0  # reset rotation so the fastest live free model is next
+
+    if live:
+        show = min(12, len(live))
+        ranking = ", ".join(f"{r['model'].split('/')[-1]} {r['latency']}s" for r in live[:show])
+        extra = f" · +{injected} discovered" if injected else ""
+        UI.ok(f"Warmup free-probe: {len(live)} live{extra} · {ranking}")
+    if cooled:
+        bits = [f"{r['model'].split('/')[-1]}→{r['status']}" for r in cooled[:12]]
+        UI.warn(f"Warmup free-probe cooled/dead: {', '.join(bits)}")
+    if injected:
+        UI.info(f"Live free-model set updated: {injected} new provider(s) injected at front of pool")
 
 
 @dataclass
@@ -2053,6 +2386,16 @@ class ReadTool(Tool):
     _cache: Dict[str, Tuple[float, int, str, List[str]]] = {}
     _cache_lock = threading.Lock()
 
+    # Optional callback: fn(path: str, line_count: int) -> None. Set by the
+    # orchestrator after tool construction so a cache-hit ("already read
+    # this session, unchanged") gets recorded in durable working memory,
+    # not just the in-process file cache. Without this, the fact "I
+    # already know what's in this file" is lost the moment context gets
+    # compacted, and the agent re-reads the same files turn after turn
+    # instead of proceeding to write. Left as None it's a pure no-op —
+    # existing behavior is unchanged unless the orchestrator opts in.
+    on_cache_hit: Optional[Callable[[str, int], None]] = None
+
     def execute(self, path: str, offset: int = 1, limit: int = 2000) -> ToolResult:
         try:
             fp = self._safe_path(path)
@@ -2082,6 +2425,11 @@ class ReadTool(Tool):
             prefix = ""
             if was_cached and offset == 1:
                 prefix = f"[already read this session, unchanged — {len(lines)} lines total]\n"
+                if self.on_cache_hit is not None:
+                    try:
+                        self.on_cache_hit(path, len(lines))
+                    except Exception:
+                        pass
 
             if remaining > 0:
                 chunk += (
@@ -3127,6 +3475,11 @@ class LsTool(Tool):
     _cache: Dict[str, str] = {}
     _cache_lock = threading.Lock()
 
+    # See ReadTool.on_cache_hit for rationale: records repeated, unchanged
+    # listings into durable working memory so the fact survives context
+    # compaction instead of causing re-listing loops. No-op if unset.
+    on_cache_hit: Optional[Callable[[str, int], None]] = None
+
     def execute(self, path: str = ".") -> ToolResult:
         try:
             base = self._safe_path(path)
@@ -3148,6 +3501,11 @@ class LsTool(Tool):
                     f"[unchanged since your last listing of {path} this session]\n"
                     + listing
                 )
+                if self.on_cache_hit is not None:
+                    try:
+                        self.on_cache_hit(path, len(items))
+                    except Exception:
+                        pass
             return ToolResult(listing)
         except Exception as e:
             return ToolResult("", error=str(e), is_error=True)
@@ -6052,6 +6410,7 @@ class NeonArchitect:
             allow_local=bool(config.get("allow_local_network", True)),
             bash_confirm=bool(config.get("bash_confirm_destructive", False)),
         )
+        self._wire_read_cache_to_working_memory()
         self.config["allow_path_outside_project"] = False
         # ── Generation Layer: inject generate_app tool ───────────────────────
         try:
@@ -6580,6 +6939,34 @@ class NeonArchitect:
             parts.append(f"[ARCHITECTURE — follow]\nSource: {arch_name}\n{arch}" if arch else f"[ARCHITECTURE MISSING] {arch_name}")
         parts.append(f"[TODOS]\n{self._todo_handoff_text()}")
         return "\n\n".join(parts)
+
+    def _wire_read_cache_to_working_memory(self) -> None:
+        """Connect ReadTool/LsTool cache-hit events to working memory.
+
+        Without this, a repeated read/list of an unchanged file or
+        directory is only reflected in each tool's private in-process
+        cache. That cache survives across turns but is invisible to the
+        model once context gets compacted — so the agent forgets it
+        already inventoried a file and re-reads it, sometimes for dozens
+        of turns, instead of proceeding to write. Recording cache hits as
+        Facts makes "already read X, Y, Z — proceed to write" durable
+        across compaction the same way Decisions/Blockers already are.
+        Safe to call multiple times (idempotent) and safe if a tool is
+        absent from self.tools for a given permission mode.
+        """
+        def _on_hit(path: str, count: int) -> None:
+            self._update_working_memory(
+                f"already inventoried {path} ({count} lines/items) — do not re-read, proceed",
+                section="Facts",
+            )
+
+        for _name in ("read", "ls"):
+            _tool = self.tools.get(_name)
+            if _tool is not None:
+                try:
+                    _tool.on_cache_hit = _on_hit
+                except Exception:
+                    pass
 
     def _working_memory_path(self) -> Path:
         return self.project_dir / getattr(self, "working_memory_file", ".neon_working_memory.md")
@@ -7242,6 +7629,10 @@ class NeonArchitect:
         empty_pool_waited = 0.0
         max_empty_wait = float(self.config.get("empty_pool_max_wait", 120.0))
         tools_stripped = False
+        # Per-turn set of (base_url, api_key) accounts already confirmed
+        # dead by a live 429 — see refund logic below, next to
+        # propagate_shared_cooldown's call site.
+        self._dead_accounts_this_turn = set()
 
         rl_until = float(getattr(self, "_rate_limit_until", 0.0) or 0.0)
         if rl_until > time.monotonic():
@@ -7447,6 +7838,25 @@ class NeonArchitect:
                             f"{', '.join(sibling_names)} for {cooldown:.0f}s "
                             f"(avoids each one round-tripping to its own 429)."
                         )
+                    # Refund this attempt against the retry budget if the
+                    # account behind it was already known-dead this turn.
+                    # Without this, retry_max (default 8) is spent counting
+                    # per-provider swaps rather than per-account failures —
+                    # with only 1-2 real accounts in the pool (OmniRoute's
+                    # shared local key + one nvapi- key; see build_pool),
+                    # a single account outage can burn most of the budget
+                    # just re-discovering the same 429 through its sibling
+                    # aliases, leaving little budget left for the
+                    # empty-pool wait to actually pay off once it kicks in.
+                    acct = getattr(provider, "_account_key", None)
+                    known_dead = getattr(self, "_dead_accounts_this_turn", None)
+                    if known_dead is None:
+                        known_dead = set()
+                        self._dead_accounts_this_turn = known_dead
+                    if acct in known_dead:
+                        total_attempts = max(0, total_attempts - 1)
+                    else:
+                        known_dead.add(acct)
                     # Single-wait policy: when Retry-After was present, the
                     # provider cooldowns above already enforce the wait —
                     # layering a ≥25s session pause on top was double-counting.
@@ -9326,6 +9736,7 @@ class NeonArchitect:
                 self.project_dir, full_access=True, allow_outside=False,
                 allow_local=True, bash_confirm=False,
             )
+            self._wire_read_cache_to_working_memory()
             UI.ok("Full in-project permission (default). Files stay inside project folder.")
             return
         if mode in ("strict", "sandbox", "safe"):
@@ -9337,6 +9748,7 @@ class NeonArchitect:
                 allow_local=bool(self.config.get("allow_local_network", True)),
                 bash_confirm=True,
             )
+            self._wire_read_cache_to_working_memory()
             UI.ok("Strict mode enabled. Files still project-only. (run tool blocks destructive git ops outright; no confirm step exists yet.)")
             return
         if mode == "local":
@@ -9496,7 +9908,12 @@ def load_config() -> Dict[str, Any]:
         "first_token_timeout": 60.0,
         "http_read_timeout": 180.0,
         "http_connect_timeout": 8.0,
-        "retry_max": 8,
+        # Kept in sync with DEFAULT_CONFIG's retry_max — see the comment
+        # there. This _HARDWIRE block force-overwrites saved project
+        # configs on every load (line ~9925), so patching only
+        # DEFAULT_CONFIG above would have no effect on any project that
+        # already has a config.json on disk.
+        "retry_max": 4,
         "retry_base_delay": 2.5,
         "max_retries_per_provider": 3,
         "nim_shared_rpm": 38.0,
