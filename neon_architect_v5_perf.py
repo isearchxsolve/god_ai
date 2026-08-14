@@ -3,7 +3,7 @@
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  NEON ARCHITECT v4.6  —  Monolithic Coding Agent for NVIDIA NIM              ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
-║  Backend:   NVIDIA NIM  →  GLM-5.2 (primary) | MiniMax M3 / Laguna XS (fallback)║
+║  Backend:   Dynamic NIM / OmniRoute / OpenRouter discovery with account-aware routing║
 ║  Design:    Warm terminal UI · Zero Bottlenecks · Self-Healing Streams       ║
 ║  Features:  Auto-Nudge · XML Interceptor · Smart Compaction · Token Bucket   ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
@@ -50,6 +50,7 @@ from collections import deque
 import random
 import atexit
 import hashlib
+import tempfile
 
 try:
     import httpx
@@ -81,6 +82,8 @@ from collections import defaultdict
 _GENERATION_LAYER_READY: bool = False
 
 def verify_nim(base_url: str, api_key: str) -> bool:
+    if not HAS_HTTPX:
+        return False
     try:
         r = httpx.get(
             f"{base_url}/models",
@@ -241,10 +244,7 @@ def mark_model_dead(
             dead.add(model_id)
             data["dead_models"] = sorted(dead)
         SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-        tmp.replace(path)
+        _atomic_json_dump(path, data)
     except Exception:
         pass  # bookkeeping must never break the provider loop
 
@@ -264,14 +264,7 @@ def save_project_api_key(project_dir: Path, api_key: str) -> Path:
     data["project"] = str(Path(project_dir).resolve())
     data["api_key"] = cleaned
     data["updated"] = datetime.now().isoformat()
-    tmp = path.with_suffix(".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-    try:
-        os.chmod(tmp, 0o600)
-    except Exception:
-        pass  # best-effort; e.g. unsupported on some filesystems
-    tmp.replace(path)
+    _atomic_json_dump(path, data)
     return path
 
 
@@ -295,14 +288,7 @@ def save_project_api_key_2(project_dir: Path, api_key_2: str) -> Path:
     data["project"] = str(Path(project_dir).resolve())
     data["api_key_2"] = cleaned
     data["updated_2"] = datetime.now().isoformat()
-    tmp = path.with_suffix(".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-    try:
-        os.chmod(tmp, 0o600)
-    except Exception:
-        pass  # best-effort; e.g. unsupported on some filesystems
-    tmp.replace(path)
+    _atomic_json_dump(path, data)
     return path
 
 
@@ -341,14 +327,7 @@ def save_project_api_key_n(project_dir: Path, n: int, api_key_n: str) -> Path:
     data["project"] = str(Path(project_dir).resolve())
     data[field] = cleaned
     data[f"updated_{n}"] = datetime.now().isoformat()
-    tmp = path.with_suffix(".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-    try:
-        os.chmod(tmp, 0o600)
-    except Exception:
-        pass  # best-effort; e.g. unsupported on some filesystems
-    tmp.replace(path)
+    _atomic_json_dump(path, data)
     return path
 
 
@@ -362,6 +341,41 @@ def _safe_json_load(path: Path) -> Optional[Dict[str, Any]]:
     except Exception:
         pass
     return None
+
+
+def _atomic_json_dump(path: Path, data: Any, *, mode: Optional[int] = 0o600) -> None:
+    """Write JSON atomically without exposing a predictable shared temp file.
+
+    The old persistence helpers all used ``<target>.tmp``. Two overlapping
+    saves could therefore truncate or replace one another's temp file, and a
+    crash between the open and replace left a confusing stale temp artifact.
+    ``mkstemp`` gives each writer its own file; ``os.replace`` makes the final
+    publication atomic on the same filesystem.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+    )
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        if mode is not None:
+            try:
+                os.chmod(tmp, mode)
+            except OSError:
+                pass
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 NIM_BASE_URL = "https://integrate.api.nvidia.com/v1"
 OMNIROUTE_BASE_URL = os.environ.get("OMNIROUTE_BASE_URL", "http://localhost:20128/v1").rstrip("/")
@@ -556,14 +570,17 @@ DEFAULT_CONFIG = {
     # cooldowns before failing, producing a noisy "Max retries exceeded"
     # instead of the clearer "All providers unavailable... check API key /
     # rate limits" message the empty-pool path already gives. The
-    # account-aware refund logic in _parse_stream (search
-    # _dead_accounts_this_turn) means repeat 429s against an
-    # already-known-dead account no longer cost budget, so 4 is enough
-    # to try every distinct account plus one retry each post-cooldown,
-    # while still failing fast when the whole pool is genuinely down.
-    "retry_max": 2,
+    # account-aware failover excludes a failed account for the remainder of
+    # the logical turn, preventing sibling-model retry storms.
+    "retry_max": 6,
     "retry_base_delay": 2.5,
     "enable_openrouter": True,
+    "discovery_candidates_per_account": 4,
+    "nim_discovery_candidates": 4,
+    "omni_discovery_candidates": 6,
+    "openrouter_discovery_candidates": 6,
+    "openrouter_discovery_free_only": True,
+    "pin_model": False,
     "stream_content_timeout": 200.0,
     "first_token_timeout": 60.0,
     "http_read_timeout": 180.0,
@@ -1620,6 +1637,11 @@ class Provider:
 
     def record_failure(self, cooldown: float = 15.0, *, permanent: bool = False,
                        absolute: bool = False):
+        # A token is reserved before the request is sent. RPM limits count
+        # rejected, timed-out, and rate-limited requests too; recording only
+        # successful calls understated usage during outages and caused the
+        # pool to keep retrying an already-exhausted account.
+        self.bucket.commit()
         self.failures += 1
         self.consecutive_failures += 1
         if permanent:
@@ -1659,6 +1681,10 @@ class ProviderPool:
         self._account_provider_pos: Dict[Tuple[str, str], int] = {}
         self._account_cursor = 0
         self._current_provider: Optional[Provider] = None
+        # Accounts that failed during the current logical turn. They remain
+        # eligible again on the next logical turn, but MUST NOT consume another
+        # retry in this turn through a sibling model/provider alias.
+        self._turn_excluded_accounts: set[Tuple[str, str]] = set()
         self._rebuild_accounts()
 
     def _rebuild_accounts(self) -> None:
@@ -1696,7 +1722,7 @@ class ProviderPool:
         for p in self.providers:
             if not getattr(p, "permanently_disabled", False):
                 return p
-        return self.providers[0]
+        raise RuntimeError("No provider remains available for this model pool")
 
     def rotate(self) -> None:
         if self._account_order:
@@ -1722,6 +1748,19 @@ class ProviderPool:
             and not getattr(p, "permanently_disabled", False)
         ]
 
+    def begin_logical_turn(self) -> None:
+        self._turn_excluded_accounts.clear()
+        self.attempts_on_current = 0
+
+    def exclude_account_for_turn(self, key: Optional[Tuple[str, str]]) -> None:
+        if key is not None:
+            self._turn_excluded_accounts.add(key)
+        self._current_provider = None
+        self.attempts_on_current = 0
+
+    def turn_excluded_accounts(self) -> set[Tuple[str, str]]:
+        return set(self._turn_excluded_accounts)
+
     def next_available(self) -> Optional[Provider]:
         if not self.providers:
             return None
@@ -1737,6 +1776,8 @@ class ProviderPool:
         for off in range(n_accounts):
             apos = (start + off) % n_accounts
             key = self._account_order[apos]
+            if key in self._turn_excluded_accounts:
+                continue
             candidates = self._providers_for_account(key)
             if not candidates:
                 continue
@@ -1792,6 +1833,112 @@ class ProviderPool:
         return min(waits + bucket_waits) if (waits or bucket_waits) else 2.0
 
 
+
+def _discover_catalog_candidates(base: str, api_key: str, kind: str, config: Dict[str, Any], project_path: Optional[Path] = None) -> List[Dict[str, Any]]:
+    """Open-ended live discovery for any provider domain.
+
+    No model-id allowlist is used. The provider's live /models catalog is the
+    discovery universe; metadata/capability hints produce a preference score,
+    and only a configurable number of candidates are admitted to the active
+    pool. A failed catalog discovery returns an empty list rather than inventing
+    a model id.
+    """
+    if not HAS_HTTPX or not api_key or not base:
+        return []
+    try:
+        timeout = float(config.get("http_connect_timeout") or 8.0)
+        r = httpx.get(
+            f"{base.rstrip('/')}/models",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=timeout,
+        )
+        if r.status_code != 200:
+            return []
+        items = (r.json() or {}).get("data") or []
+    except Exception:
+        return []
+
+    dead_global = set(load_dead_models(project_path)) if project_path else set()
+    dead_scoped = set(load_dead_models(project_path, (base, api_key))) if project_path else set()
+    dead = dead_global | dead_scoped
+    task = str(config.get("discovery_task", "coding") or "coding").lower()
+
+    def score(item: Dict[str, Any]) -> int:
+        mid = str(item.get("id") or "")
+        low = mid.lower()
+        caps = item.get("capabilities") or {}
+        score_v = 0
+        if caps.get("tool_calling"):
+            score_v += 12
+        if caps.get("reasoning"):
+            score_v += 8
+        if caps.get("thinking") or caps.get("supportsThinking"):
+            score_v += 4
+        ctx = int(item.get("context_length") or item.get("max_input_tokens") or 0)
+        if ctx >= 200000:
+            score_v += 4
+        elif ctx >= 100000:
+            score_v += 2
+        if task == "coding":
+            score_v += 8 if any(k in low for k in ("code", "coder", "coding", "program", "dev", "engineer")) else 0
+        elif task == "reasoning":
+            score_v += 8 if any(k in low for k in ("reason", "thinking", "think")) else 0
+        elif task == "fast":
+            score_v += 6 if any(k in low for k in ("fast", "flash", "mini", "nano", "small")) else 0
+        # Provider-neutral preference signals only; these are not model IDs.
+        if kind == "openrouter":
+            pricing = item.get("pricing") or {}
+            try:
+                if float(pricing.get("prompt", "1") or "1") == 0.0 and float(pricing.get("completion", "1") or "1") == 0.0:
+                    score_v += 10
+            except (TypeError, ValueError):
+                pass
+        return score_v
+
+    candidates = []
+    seen = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        mid = item.get("id")
+        if not isinstance(mid, str) or not mid or mid in seen or mid in dead:
+            continue
+        if kind == "openrouter":
+            # Direct OpenRouter is intentionally useful only for currently free
+            # entries unless the caller explicitly opts into paid discovery.
+            if bool(config.get("openrouter_discovery_free_only", True)):
+                pricing = item.get("pricing") or {}
+                try:
+                    if float(pricing.get("prompt", "1") or "1") != 0.0 or float(pricing.get("completion", "1") or "1") != 0.0:
+                        continue
+                except (TypeError, ValueError):
+                    continue
+        seen.add(mid)
+        candidates.append((score(item), item))
+
+    candidates.sort(key=lambda x: (-x[0], str(x[1].get("id"))))
+    limit = max(1, int(config.get(f"{kind}_discovery_candidates", config.get("discovery_candidates_per_account", 4)) or 4))
+    return [item for _, item in candidates[:limit]]
+
+
+def _catalog_cfg(item: Dict[str, Any], *, backend: str, provider_name: str, default_rpm: float) -> Dict[str, Any]:
+    caps = item.get("capabilities") or {}
+    return {
+        "id": item.get("id"),
+        "name": item.get("name") or item.get("id"),
+        "provider": provider_name,
+        "backend": backend,
+        "rpm": float(item.get("rpm") or default_rpm),
+        "max_tokens": int(item.get("max_output_tokens") or item.get("max_tokens") or 8192),
+        "ctx_window": int(item.get("context_length") or item.get("max_input_tokens") or 128000),
+        "thinking": bool(caps.get("thinking") or caps.get("supportsThinking")),
+        "reasoning": bool(caps.get("reasoning")),
+        "tool_calling": bool(caps.get("tool_calling")),
+        "extra_body": None,
+        "temperature": item.get("temperature", 0.2),
+        "top_p": item.get("top_p", 0.9),
+    }
+
 def build_pool(config: Dict[str, Any], model_key_override: Optional[str] = None) -> ProviderPool:
     """Build a provider pool for dual-backend operation.
 
@@ -1840,111 +1987,46 @@ def build_pool(config: Dict[str, Any], model_key_override: Optional[str] = None)
     )
     enable_omni = bool(config.get("enable_omniroute", True))
 
-    omni_fallbacks = [
-        "laguna-free",
-        "nemotron-3-ultra-free",
-        "deepseek-v4-flash-free",
-        "opencode-free",
-        "nemotron-3.5-lightning-free",
-        "auto-best",
-        # Reordered by measured latency from live probe (fastest clean
-        # 200s first). All ids switched to opencode/ prefix that the
-        # no-key probe confirmed. Thinking forced off + shared RPM
-        # crushed to 8 to stop the 429 cascade that was killing every
-        # free-pool turn.
-    ]
-    nim_fallbacks = [
-        "glm-5.2-fp8",
-        "minimax-m3",
-        "kimi-k2-thinking",
-        "laguna-xs-2.1",
-    ]
-
-    def _add(name: str, base: str, key: str, mkey: str, rpm: float) -> None:
-        if mkey not in MODELS:
-            return
-        cfg = MODELS[mkey]
-        if cfg["id"] in dead_model_ids:
-            return
-        if project_path:
-            scoped_dead = set(load_dead_models(project_path, (base, key)))
-            if cfg["id"] in scoped_dead:
-                return
-        if any(p.model_id == cfg["id"] and getattr(p, "_account_key", None) == (base, key) for p in providers):
-            return
-        providers.append(
-            Provider(
-                name,
-                base,
-                key,
-                cfg,
-                connect_timeout,
-                read_timeout,
-                get_or_create_bucket((base, key), rpm),
-            )
-        )
-
-    primary_cfg = MODELS.get(model_key, MODELS["auto-best"])
-    primary_backend = primary_cfg.get("backend") or (
-        "nim" if primary_cfg.get("provider") == "NVIDIA NIM" else "omniroute"
-    )
-
-    # --- Ordering: NIM (primary key) first, then NIM2 (second account) if
-    # configured, then OmniRoute last as the free/diverse but higher-
-    # maintenance safety net. If there's no usable NIM key at all,
-    # OmniRoute becomes primary by necessity. ---
-
-    # Primary: prefer NIM over OmniRoute whenever a real NVIDIA key exists,
-    # regardless of which backend the selected model nominally belongs to,
-    # so picking an OmniRoute-flavored model doesn't drag OmniRoute back to
-    # the front of the pool.
-    if is_nim_key:
-        _add(f"NIM-Primary", nim_base, api_key, model_key, nim_shared_rpm)
-    elif enable_omni:
-        _add(f"Omni-Primary", omni_base, omni_key, model_key, omni_rpm)
-
-    # NIM fallbacks on the primary key
-    if is_nim_key:
-        for fb in nim_fallbacks:
-            if fb == model_key:
+    # Dynamic provider admission: no hardcoded model-id fallback lists.
+    # Each independent capacity domain discovers its current catalog and admits
+    # only a small live-ranked candidate set. Explicit model selection remains
+    # respected when the user chose --model/<configured default_model>.
+    def _add_catalog_candidates(name_prefix: str, base: str, key: str, kind: str, rpm: float) -> int:
+        added = 0
+        candidates = _discover_catalog_candidates(base, key, kind, config, project_path)
+        bucket = get_or_create_bucket((base, key), rpm)
+        for idx, item in enumerate(candidates, 1):
+            mid = str(item.get("id") or "")
+            if not mid:
                 continue
-            _add(f"NIM-{fb}", nim_base, api_key, fb, nim_shared_rpm)
-        # Also expose glm-5.2 itself as last-resort if not primary
-        if model_key != "glm-5.2":
-            _add("NIM-glm-5.2", nim_base, api_key, "glm-5.2", nim_shared_rpm)
+            cfg = _catalog_cfg(item, backend=kind, provider_name=("NVIDIA NIM" if kind == "nim" else ("OpenRouter" if kind == "openrouter" else "OmniRoute")), default_rpm=rpm)
+            if any(p.model_id == mid and getattr(p, "_account_key", None) == (base, key) for p in providers):
+                continue
+            providers.append(Provider(f"{name_prefix}-discovered-{idx}", base, key, cfg, connect_timeout, read_timeout, bucket))
+            added += 1
+        return added
 
-    # Additional, independent NVIDIA NIM accounts (optional, unbounded).
-    # Only worth adding if a key belongs to a genuinely separate NVIDIA
-    # account/org — a key minted from an account already in the pool
-    # typically still shares that account's server-side rate limit, so
-    # build_pool would create a local TokenBucket that doesn't correspond
-    # to any real extra capacity on NVIDIA's end. If it IS a separate
-    # account, this gives real additive throughput: get_or_create_bucket
-    # keys strictly on (base_url, api_key), so a different api_key here
-    # always yields a separate TokenBucket instance, and
-    # propagate_shared_cooldown only cools providers sharing the exact
-    # same _account_key tuple — so a 429 on one key will NOT cool another
-    # key's providers, and vice versa. That isolation is the whole point
-    # of running more than one account.
-    #
-    # Discovery: nim_api_keys (list, in config) is checked first; then
-    # numbered slots nim_api_key_2.._N / NVIDIA_API_KEY_2.._N are merged
-    # in, stopping at the first gap. NIM_MAX_ACCOUNTS caps how far the
-    # numbered-slot scan looks so a stray unrelated env var can't make
-    # this loop run forever.
-    NIM_MAX_ACCOUNTS = 12
+    # One explicit model may be selected by the operator; otherwise admission
+    # is determined entirely from the live provider catalog.
+    # Model IDs are never treated as routing seeds merely because they are the saved/default model.
+    # Only an explicit phase/CLI override or an operator opt-in pins a model.
+    explicit_model = bool(model_key_override) or bool(config.get("pin_model", False))
+
+    if is_nim_key:
+        if explicit_model and model_key in MODELS and MODELS[model_key].get("backend") == "nim":
+            _add("NIM-Explicit", nim_base, api_key, model_key, nim_shared_rpm)
+        _add_catalog_candidates("NIM", nim_base, api_key, "nim", nim_shared_rpm)
+
+    # Additional independent NIM accounts: each account discovers its own live
+    # catalog independently and gets its own bucket/circuit domain.
     extra_keys: List[str] = []
     for k in config.get("nim_api_keys", []) or []:
         k = (k or "").strip()
         if k:
             extra_keys.append(k)
     n = 2
-    while n <= NIM_MAX_ACCOUNTS:
-        k = (
-            config.get(f"nim_api_key_{n}")
-            or os.environ.get(f"NVIDIA_API_KEY_{n}")
-            or ""
-        ).strip()
+    while n <= 12:
+        k = (config.get(f"nim_api_key_{n}") or os.environ.get(f"NVIDIA_API_KEY_{n}") or "").strip()
         if k:
             extra_keys.append(k)
         n += 1
@@ -1952,107 +2034,34 @@ def build_pool(config: Dict[str, Any], model_key_override: Optional[str] = None)
     seen_nim_keys = {api_key} if is_nim_key else set()
     account_num = 2
     for k in extra_keys:
-        is_valid = k.startswith("nvapi-") or k.startswith("Bearer nvapi-")
-        if not is_valid:
+        if not (k.startswith("nvapi-") or k.startswith("Bearer nvapi-")):
             continue
         if k in seen_nim_keys:
-            UI.warn(
-                f"A configured NIM key (slot {account_num}) duplicates an "
-                "account already in the pool — skipping. A key only helps "
-                "if it belongs to a different NVIDIA account; reusing one "
-                "adds no real capacity."
-            )
             account_num += 1
             continue
         seen_nim_keys.add(k)
-        tag = f"NIM{account_num}"
-        rpm_n = float(
-            config.get(f"nim_shared_rpm_{account_num}", nim_shared_rpm)
-        )
-        _add(f"{tag}-{model_key}", nim_base, k, model_key, rpm_n)
-        for fb in nim_fallbacks:
-            if fb == model_key:
-                continue
-            _add(f"{tag}-{fb}", nim_base, k, fb, rpm_n)
-        if model_key != "glm-5.2":
-            _add(f"{tag}-glm-5.2", nim_base, k, "glm-5.2", rpm_n)
+        rpm_n = float(config.get(f"nim_shared_rpm_{account_num}", nim_shared_rpm))
+        _add_catalog_candidates(f"NIM{account_num}", nim_base, k, "nim", rpm_n)
         account_num += 1
 
-    # OmniRoute — moved after NIM/NIM2. Free and gives wide model
-    # diversity via warmup discovery, but is the highest-maintenance
-    # backend in this pool (rotating OAuth provider connections that go
-    # reauth_required, RPM crushed to 8 to survive 429 cascades), so it
-    # now only gets hit once both NIM tiers are exhausted, instead of
-    # eating every turn as primary by default.
+    # OmniRoute is a single logical gateway domain. Discover its current model
+    # catalog dynamically instead of seeding specific provider/model IDs.
     if enable_omni:
-        # If neither NIM key was usable, OmniRoute has to cover primary too.
-        if not is_nim_key:
-            _add(f"Omni-Primary", omni_base, omni_key, model_key, omni_rpm)
-        for fb in omni_fallbacks:
-            if fb == model_key:
-                continue
-            _add(f"Omni-{fb}", omni_base, omni_key, fb, omni_rpm)
+        if explicit_model and model_key in MODELS and MODELS[model_key].get("backend") == "omniroute":
+            _add("Omni-Explicit", omni_base, omni_key, model_key, omni_rpm)
+        _add_catalog_candidates("Omni", omni_base, omni_key, "omni", omni_rpm)
 
-    # Direct OpenRouter free (optional; needs OPENROUTER_API_KEY). This is a
-    # MINIMAL static seed only — the real, current free-model list is
-    # unreliable to hardcode (OpenRouter's free tier churns weekly; see
-    # warmup_pool's OpenRouter discovery block, which queries live pricing
-    # and replaces/extends this seed at warmup time). Keeping one seed
-    # entry here just means the pool isn't completely empty of an
-    # OpenRouter provider in the brief window before warmup_pool runs.
+    # Direct OpenRouter is optional and also fully dynamic. Nothing is admitted
+    # until the live catalog has been queried; free-only is the safe default.
     if config.get("enable_openrouter", True):
-        or_key = os.environ.get("OPENROUTER_API_KEY")
-        if not or_key:
-            # enable_openrouter=True is the default, so silently skipping
-            # this block makes the pool look like it has an independent
-            # third account when it doesn't — every provider in the pool
-            # is then really just 1-2 accounts (OmniRoute's shared local
-            # key, and/or one nvapi- key), so if those get rate-limited
-            # or go down together, there is NO fallback left, and the
-            # only sign of that at runtime is a same-account cooldown
-            # cascade followed by "All providers failed." Surface the gap
-            # at pool-build time instead of letting it fail silently mid-turn.
-            UI.warn(
-                "OpenRouter fallback is enabled in config but OPENROUTER_API_KEY "
-                "is not set — skipping it. The provider pool has no third, "
-                "independent account: if OmniRoute and your NIM key both "
-                "rate-limit/outage at once, there is no fallback left. "
-                "Set OPENROUTER_API_KEY to add real redundancy, or set "
-                "enable_openrouter=False to silence this warning."
-            )
+        or_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
         if or_key:
-            # Single static seed, kept deliberately generic (OpenRouter's
-            # own free-model router) rather than a specific model that may
-            # be delisted by the time this runs — live discovery in
-            # warmup_pool is what actually populates the real free list.
-            or_models = [
-                ("OR-Seed", "openrouter/free"),
-            ]
-            or_bucket = TokenBucket(15, safety=0.80)
-            for name, mid in or_models:
-                if mid in dead_model_ids:
-                    continue
-                fake_cfg = {
-                    "id": mid,
-                    "name": name,
-                    "rpm": 15,
-                    "max_tokens": 8192,
-                    "ctx_window": 131072,
-                    "thinking": False,
-                    "extra_body": None,
-                    "backend": "openrouter",
-                }
-                providers.append(
-                    Provider(
-                        name,
-                        OPENROUTER_BASE_URL,
-                        or_key,
-                        fake_cfg,
-                        connect_timeout,
-                        read_timeout,
-                        or_bucket,
-                    )
-                )
+            or_rpm = float(config.get("openrouter_shared_rpm", 15.0) or 15.0)
+            if explicit_model and model_key in MODELS and MODELS[model_key].get("backend") == "openrouter":
+                _add("OR-Explicit", OPENROUTER_BASE_URL, or_key, model_key, or_rpm)
+            _add_catalog_candidates("OR", OPENROUTER_BASE_URL, or_key, "openrouter", or_rpm)
+        else:
+            UI.warn("Direct OpenRouter discovery enabled but OPENROUTER_API_KEY is not set — no OpenRouter domain added.")
 
     if not providers:
         raise RuntimeError(
@@ -2144,20 +2153,14 @@ def warmup_pool(pool: "ProviderPool", config: Dict[str, Any], max_wait: float = 
         if cooled:
             is_openrouter = base_url.rstrip("/") == OPENROUTER_BASE_URL.rstrip("/")
             if is_openrouter and len(cooled) == len(siblings):
-                # The static OR-Seed ("openrouter/free") isn't visible on
-                # this key at all -> even the router-of-free-models is
-                # unreachable, so live discovery below has nothing to seed
-                # from either. This pool has NO working 3rd account this
-                # session — the exact gap that left Turn 126 (see user's
-                # log) with nothing left when NIM + OmniRoute cooled down
-                # together.
+                # No usable dynamically discovered OpenRouter candidate survived
+                # warmup for this account. This is a live-account condition, not
+                # a model-id seed failure; no static route is required.
                 UI.warn(
-                    f"OpenRouter fallback: key is set but 'openrouter/free' "
-                    f"itself isn't visible on this account ({', '.join(cooled)}). "
-                    f"This pool has NO working 3rd account this session — if "
-                    f"NIM and OmniRoute both cool down at once, there's "
-                    f"nothing left. Check your OpenRouter account/key at "
-                    f"https://openrouter.ai/settings/keys."
+                    f"OpenRouter fallback: no usable discovered candidates on this key "
+                    f"during warmup ({', '.join(cooled)}). "
+                    f"Discovery remains live/catalog-driven; verify the key "
+                    f"or account if the fallback is needed."
                 )
             else:
                 UI.warn(
@@ -2177,13 +2180,13 @@ def warmup_pool(pool: "ProviderPool", config: Dict[str, Any], max_wait: float = 
     for t in threads:
         t.join(timeout=max(0.05, deadline - time.monotonic()))
 
-    # Live free-model chat probe (the missing piece). The /models list only
+    # Live catalog chat probe. The /models list only
     # tells us the id exists; it does not tell us whether a real completion
     # returns 200, 429, 503, or an empty body. Running a tiny PONG probe here
     # means we discover dead/rate-limited free models *before* autopilot
     # burns turns on them.
     try:
-        # Give the free probe real budget so it can discover ~30-50 models
+        # Give bounded probes enough budget to validate dynamically selected candidates
         _warmup_free_chat_probe(pool, config, max_wait=max(25.0, max_wait * 2.5, 45.0))
     except Exception as e:
         UI.warn(f"Warmup free-probe skipped: {str(e)[:80]}")
@@ -2361,13 +2364,23 @@ def _warmup_free_chat_probe(pool: "ProviderPool", config: Dict[str, Any], max_wa
         with lock:
             results.append({"provider": prov, "status": status, "latency": dt})
 
+    # Start all bounded probes together. The previous start-and-join loop
+    # serialized candidates, so four ten-second probes consumed roughly forty
+    # seconds for one account and starved later accounts. The shared bucket is
+    # thread-safe, and the final join keeps the whole phase within max_wait.
     deadline = time.monotonic() + max_wait
+    probe_threads: List[threading.Thread] = []
     for prov in probe_jobs:
         if time.monotonic() >= deadline:
             break
-        t = threading.Thread(target=probe, args=(prov,), daemon=True)
+        t = threading.Thread(target=probe, args=(prov,), daemon=True, name="neon-model-probe")
         t.start()
-        t.join(timeout=max(0.05, min(probe_timeout, deadline - time.monotonic())))
+        probe_threads.append(t)
+    for t in probe_threads:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        t.join(timeout=remaining)
 
     live = [r for r in results if r["status"] == 200]
     live.sort(key=lambda r: r["latency"])
@@ -2938,7 +2951,7 @@ class WriteTool(Tool):
     def execute(self, path: str = "", content: str = None, append: bool = False, force: bool = False) -> ToolResult:
         try:
             if not path or not str(path).strip():
-                return ToolResult(
+                    return ToolResult(
                     "",
                     error="path is required. Example: path='src/core/agents/pm.py'",
                     is_error=True,
@@ -6167,7 +6180,7 @@ def save_project_state(project_dir: Path, state: Dict[str, Any], filename: str =
         state = dict(state)
         state["updated_at"] = datetime.now().isoformat(timespec="seconds")
         fp = project_dir / filename
-        fp.write_text(json.dumps(state, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        _atomic_json_dump(fp, state)
     except Exception:
         pass
 
@@ -7604,6 +7617,7 @@ class NeonArchitect:
 
         chunk_q: "queue.Queue" = __import__("queue").Queue(maxsize=256)
         SENTINEL = object()
+        reader_stop = threading.Event()
         reader_err: List[BaseException] = []
         resp_holder: List[Any] = []
 
@@ -7612,7 +7626,14 @@ class NeonArchitect:
                 resp = provider.client.chat.completions.create(**payload)
                 resp_holder.append(resp)
                 for chunk in resp:
-                    chunk_q.put(chunk)
+                    while not reader_stop.is_set():
+                        try:
+                            chunk_q.put(chunk, timeout=0.5)
+                            break
+                        except queue.Full:
+                            continue
+                    if reader_stop.is_set():
+                        break
             except BaseException as ex:
                 reader_err.append(ex)
                 try:
@@ -7633,7 +7654,12 @@ class NeonArchitect:
                 except Exception:
                     pass
             finally:
-                chunk_q.put(SENTINEL)
+                while not reader_stop.is_set():
+                    try:
+                        chunk_q.put(SENTINEL, timeout=0.5)
+                        break
+                    except queue.Full:
+                        continue
 
         # Prune/track orphaned reader threads from prior attempts that timed out
         # app-side but never returned (e.g. still blocked in the HTTP call).
@@ -7784,6 +7810,7 @@ class NeonArchitect:
                     console.print(UI.thinking_panel(reasoning))
 
         finally:
+            reader_stop.set()
             try:
                 if resp_holder:
                     resp = resp_holder[0]
@@ -7792,6 +7819,10 @@ class NeonArchitect:
                         close()
                     elif close is not None and hasattr(close, "close"):
                         close.close()
+            except Exception:
+                pass
+            try:
+                t.join(timeout=0.25)
             except Exception:
                 pass
             if t.is_alive():
@@ -7901,6 +7932,7 @@ class NeonArchitect:
         # dead by a live 429 — see refund logic below, next to
         # propagate_shared_cooldown's call site.
         self._dead_accounts_this_turn = set()
+        self.pool.begin_logical_turn()
 
         rl_until = float(getattr(self, "_rate_limit_until", 0.0) or 0.0)
         if rl_until > time.monotonic():
@@ -8117,6 +8149,7 @@ class NeonArchitect:
                     # aliases, leaving little budget left for the
                     # empty-pool wait to actually pay off once it kicks in.
                     acct = getattr(provider, "_account_key", None)
+                    self.pool.exclude_account_for_turn(acct)
                     known_dead = getattr(self, "_dead_accounts_this_turn", None)
                     if known_dead is None:
                         known_dead = set()
@@ -8145,6 +8178,11 @@ class NeonArchitect:
                     raise
                 else:
                     UI.warn(f"{provider.name} transient: {str(e)[:100]}")
+                    # Fail over to a different independent capacity domain on
+                    # the very next attempt. Retrying a sibling model on the same
+                    # NIM account/gateway can reproduce the same upstream failure.
+                    self._dead_accounts_this_turn.add(getattr(provider, "_account_key", None))
+                    self.pool.exclude_account_for_turn(getattr(provider, "_account_key", None))
                     err_l2 = str(e).lower()
                     _status_code = getattr(e, "status_code", None)
                     if _status_code is None:
@@ -10215,7 +10253,7 @@ def load_config() -> Dict[str, Any]:
         # configs on every load (line ~9925), so patching only
         # DEFAULT_CONFIG above would have no effect on any project that
         # already has a config.json on disk.
-        "retry_max": 2,
+        "retry_max": 6,
         "retry_base_delay": 2.5,
         "max_retries_per_provider": 1,
         "nim_shared_rpm": 38.0,
@@ -10257,8 +10295,7 @@ def save_config(cfg: Dict[str, Any]):
         out.pop(k, None)
     if not isinstance(out.get("projects"), dict) or not out["projects"]:
         out.setdefault("projects", {})
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(out, f, indent=2, ensure_ascii=False)
+    _atomic_json_dump(CONFIG_FILE, out)
 
 
 def get_project_entry(cfg: Dict[str, Any], project_dir: Path) -> Dict[str, Any]:
@@ -10476,10 +10513,7 @@ def save_session(agent: "NeonArchitect", *, also_config: bool = True) -> bool:
             "thinking_effort": agent.config.get("thinking_effort"),
         }
         sf = _project_session_path(agent.project_dir)
-        tmp = sf.with_suffix(".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(session, f, ensure_ascii=False, indent=2)
-        tmp.replace(sf)
+        _atomic_json_dump(sf, session)
 
         try:
             with open(HISTORY_FILE, "a", encoding="utf-8") as hf:
@@ -11266,6 +11300,32 @@ import socket as _socket
 import textwrap as _textwrap
 
 # ── v5 generation core (design system + multi-pass + layered backend) ────────
+_HAS_V5_CORE = False
+_V5_CORE_IMPORT_ERROR: Optional[str] = None
+try:
+    import importlib.util
+    _generation_core_candidates = []
+    if os.environ.get("NEON_GENERATION_CORE"):
+        _generation_core_candidates.append(Path(os.environ["NEON_GENERATION_CORE"]).expanduser())
+    _generation_core_candidates.append(Path(__file__).resolve().with_name("generation_core.py"))
+    for _gc_path in _generation_core_candidates:
+        if not _gc_path.is_file():
+            continue
+        _spec = importlib.util.spec_from_file_location("neon_generation_core", _gc_path)
+        if _spec is None or _spec.loader is None:
+            continue
+        _gc = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_gc)
+        GenerationOrchestratorV5 = _gc.GenerationOrchestratorV5
+        _v5_detect_stack = _gc.detect_stack
+        _V5_STACKS = _gc.SUPPORTED_STACKS
+        _HAS_V5_CORE = True
+        break
+    if not _HAS_V5_CORE:
+        _V5_CORE_IMPORT_ERROR = "generation_core.py is not present beside the agent"
+except Exception as _generation_core_exc:
+    _V5_CORE_IMPORT_ERROR = f"{type(_generation_core_exc).__name__}: {_generation_core_exc}"
+'''
 try:
     from generation_core import (
         GenerationOrchestratorV5,
@@ -11293,6 +11353,8 @@ except ImportError:
         _HAS_V5_CORE = False
 
 # ── Utility: find a free TCP port ────────────────────────────────────────────
+
+'''
 
 def _find_free_port(start: int = 3100, end: int = 3999) -> int:
     """Return the lowest free TCP port in [start, end]."""
@@ -12552,16 +12614,27 @@ class SpecializedAgent:
     def _call_nim(self, messages: List[Dict[str, str]], max_tokens: int = 8192) -> str:
         """Synchronous NIM call through the existing provider pool."""
         if not HAS_OPENAI:
-            return f"# {self.role} output\n# openai package not available\n"
+            raise RuntimeError(
+                f"[{self.role}] openai package is not available; refusing to emit "
+                "placeholder source from an unverified generation path."
+            )
 
-        for attempt in range(8):
+        # Reset logical-turn exclusions so a previous streamed turn cannot
+        # silently starve this independent generation request.
+        self.pool.begin_logical_turn()
+        max_attempts = max(1, int(self.config.get("generation_retry_max", 6) or 6))
+        base_delay = max(0.25, float(self.config.get("retry_base_delay", 2.5) or 2.5))
+
+        for attempt in range(max_attempts):
             provider = None
-            # Wait for an available provider (up to 60 s)
-            for _ in range(30):
+            deadline = time.monotonic() + float(
+                self.config.get("generation_pool_wait", 60.0) or 60.0
+            )
+            while time.monotonic() < deadline:
                 provider = self.pool.next_available()
                 if provider:
                     break
-                time.sleep(2.0)
+                time.sleep(max(0.05, min(self.pool.shortest_wait(), 2.0)))
             if not provider:
                 raise RuntimeError(f"[{self.role}] No NIM provider available after 60 s")
 
@@ -12577,7 +12650,18 @@ class SpecializedAgent:
             if model_cfg.get("top_p") is not None:
                 payload["top_p"] = model_cfg["top_p"]
 
+            extra = dict(model_cfg.get("extra_body") or {})
+            ctk = dict(extra.get("chat_template_kwargs") or {})
+            effort = str(self.config.get("thinking_effort") or "off").lower()
+            ctk["enable_thinking"] = effort in ("low", "medium", "high")
+            if ctk["enable_thinking"]:
+                ctk["reasoning_effort"] = effort
+            extra["chat_template_kwargs"] = ctk
+            payload["extra_body"] = extra
+
             try:
+                if provider.client is None:
+                    raise RuntimeError(f"Provider {provider.name} has no OpenAI client")
                 resp = provider.client.chat.completions.create(**payload)
                 # A malformed/empty response — e.g. resp.choices == [] under
                 # a content-filter block or certain backend error conditions
@@ -12591,27 +12675,69 @@ class SpecializedAgent:
                 # provider-side failure so it gets the same retry treatment.
                 if not getattr(resp, "choices", None):
                     raise RuntimeError(f"Empty choices in response from {provider.name}")
+                content = (getattr(resp.choices[0].message, "content", None) or "").strip()
+                if not content:
+                    raise RuntimeError(f"Empty content in response from {provider.name}")
                 provider.record_success()
-                return (resp.choices[0].message.content or "").strip()
-            except OPENAI_ERRORS as e:
+                return content
+            except Exception as e:
                 err_str = str(e).lower()
-                if "429" in err_str or "rate" in err_str:
-                    provider.record_failure(cooldown=self.config.get("post_429_backoff", 25.0))
-                    self.pool.propagate_shared_cooldown(provider, self.config.get("post_429_backoff", 25.0))
-                    time.sleep(5.0 * (attempt + 1))
-                elif "404" in err_str or "410" in err_str:
+                status_code = getattr(e, "status_code", None)
+                response = getattr(e, "response", None)
+                if status_code is None and response is not None:
+                    status_code = getattr(response, "status_code", None)
+                if status_code is None:
+                    for code in (404, 410, 429, 500, 502, 503, 504):
+                        if str(code) in err_str:
+                            status_code = code
+                            break
+
+                if status_code in (404, 410) or "model_not_found" in err_str:
                     provider.record_failure(permanent=True)
+                    self.pool.rotate()
+                    try:
+                        project = self.config.get("project_dir")
+                        if project:
+                            mark_model_dead(
+                                Path(project).resolve(), provider.model_id, provider._account_key
+                            )
+                    except Exception:
+                        pass
+                elif status_code == 429 or any(
+                    x in err_str for x in ("rate limit", "ratelimit", "resourceexhausted")
+                ):
+                    retry_after = None
+                    headers = getattr(response, "headers", None) if response is not None else None
+                    if headers:
+                        try:
+                            raw_retry_after = headers.get("retry-after") or headers.get("Retry-After")
+                            retry_after = float(raw_retry_after) if raw_retry_after is not None else None
+                        except (TypeError, ValueError):
+                            retry_after = None
+                    cooldown = retry_after if retry_after is not None else float(
+                        self.config.get("post_429_backoff", 12.0) or 12.0
+                    )
+                    provider.record_failure(cooldown=cooldown, absolute=True)
+                    provider.bucket.penalize(cooldown)
+                    self.pool.propagate_shared_cooldown(provider, cooldown)
+                    self.pool.exclude_account_for_turn(provider._account_key)
                 else:
-                    provider.record_failure()
-                    time.sleep(2.0)
-            except (IndexError, AttributeError, KeyError, RuntimeError) as e:
-                # Malformed-response class of failure (empty choices, missing
-                # message/content on the returned object, etc.) — same
-                # retry/backoff treatment as the generic OPENAI_ERRORS branch
-                # above, just not wrapped in one of those SDK exception types.
-                provider.record_failure()
-                time.sleep(2.0)
-        raise RuntimeError(f"[{self.role}] All NIM attempts exhausted")
+                    semantic_failure = "empty choices" in err_str or "empty content" in err_str
+                    provider.record_failure(
+                        cooldown=(0.5 if semantic_failure else (8.0 if attempt < 2 else 15.0)),
+                        absolute=True,
+                    )
+                    # A malformed response is retryable, but do not make a
+                    # single-account deployment permanently unavailable for
+                    # the rest of this logical turn.
+                    if not semantic_failure or len(getattr(self.pool, "_account_order", [])) > 1:
+                        self.pool.exclude_account_for_turn(provider._account_key)
+
+                if attempt + 1 >= max_attempts:
+                    raise RuntimeError(f"[{self.role}] All provider attempts exhausted: {e}") from e
+                delay = min(base_delay * (2 ** min(attempt, 2)) + random.uniform(0.0, 0.5), 12.0)
+                time.sleep(delay)
+        raise RuntimeError(f"[{self.role}] All provider attempts exhausted")
 
     def _messages(self, user_content: str) -> List[Dict[str, str]]:
         return [
@@ -13799,7 +13925,10 @@ class LivePreviewManager:
         if stack in ("fastapi-react", "flutter-fastapi"):
             # Backend via uvicorn
             py = shutil.which("uvicorn") or "uvicorn"
-            return [py, "backend.main:app", "--host", "0.0.0.0", "--port", str(port), "--reload"]
+            # Preview is a local development surface. Binding all interfaces
+            # exposed generated apps to the LAN without an explicit deploy
+            # action and often without authentication.
+            return [py, "backend.main:app", "--host", "127.0.0.1", "--port", str(port), "--reload"]
         elif stack == "nextjs-postgres":
             npm = shutil.which("npm") or "npm"
             return [npm, "run", "dev", "--", "--port", str(port)]
@@ -14049,27 +14178,62 @@ class DeployTool(Tool):
 
         clone_url = repo_data.get("clone_url", "")
         html_url = repo_data.get("html_url", "")
-        # Embed the token in the push URL for this one push only — never
-        # written to .git/config, so it doesn't persist on disk after
-        # this call returns.
-        auth_url = clone_url.replace("https://", f"https://x-access-token:{token}@") if clone_url else None
-        if not auth_url:
+        # Keep credentials out of argv and .git/config. Git receives them
+        # only through the short-lived askpass environment below.
+        remote_url = clone_url if clone_url else None
+        if not remote_url:
             return ToolResult("", error="GitHub API response missing clone_url.", is_error=True)
 
-        steps = [
-            ["git", "add", "-A"],
-            ["git", "commit", "-m", "Generated by NEON ARCHITECT", "--allow-empty"],
-            ["git", "branch", "-M", "main"],
-            ["git", "push", auth_url, "main", "--force"],
-        ]
-        for step in steps:
-            r = subprocess.run(step, cwd=str(self.cwd), capture_output=True, text=True, timeout=60)
-            if r.returncode != 0 and step[1] != "commit":
-                # commit can legitimately fail with "nothing to commit" —
-                # not fatal. Any other step failing is.
-                return ToolResult(
-                    "", error=f"'{' '.join(step[:2])}' failed: {r.stderr[:500]}", is_error=True
+        with tempfile.TemporaryDirectory(prefix="neon-git-askpass-") as ask_dir:
+            ask_dir_path = Path(ask_dir)
+            askpass_py = ask_dir_path / "askpass.py"
+            askpass_py.write_text(
+                "import os, sys\n"
+                "prompt = ' '.join(sys.argv[1:]).lower()\n"
+                "name = 'NEON_GIT_USERNAME' if 'username' in prompt else 'NEON_GIT_PASSWORD'\n"
+                "print(os.environ.get(name, ''))\n",
+                encoding="utf-8",
+            )
+            if os.name == "nt":
+                askpass = ask_dir_path / "askpass.cmd"
+                askpass.write_text(
+                    f'@echo off\r\n"{sys.executable}" "%~dp0askpass.py" %*\r\n',
+                    encoding="utf-8",
                 )
+            else:
+                askpass = askpass_py
+                try:
+                    askpass.chmod(0o700)
+                except OSError:
+                    pass
+            git_env = os.environ.copy()
+            git_env.update({
+                "GIT_ASKPASS": str(askpass),
+                "GIT_TERMINAL_PROMPT": "0",
+                "NEON_GIT_USERNAME": "x-access-token",
+                "NEON_GIT_PASSWORD": token,
+            })
+            steps = [
+                ["git", "add", "-A"],
+                ["git", "commit", "-m", "Generated by NEON ARCHITECT", "--allow-empty"],
+                ["git", "branch", "-M", "main"],
+                ["git", "push", remote_url, "main"],
+            ]
+            for step in steps:
+                r = subprocess.run(
+                    step,
+                    cwd=str(self.cwd),
+                    env=git_env if step[1] == "push" else None,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                if r.returncode != 0 and step[1] != "commit":
+                    # commit can legitimately fail with "nothing to commit" —
+                    # not fatal. Any other step failing is.
+                    return ToolResult(
+                    "", error=f"'{' '.join(step[:2])}' failed: {r.stderr[:500]}", is_error=True
+                    )
 
         return ToolResult(f"Pushed to GitHub: {html_url}\nClone URL: {clone_url}")
 
@@ -14249,6 +14413,10 @@ class GenerateAppTool(Tool):
             if chosen_stack == "auto":
                 chosen_stack = _v5_detect_stack(spec)
         else:
+            UI.warn(
+                "v5 generation core unavailable; using the legacy generation "
+                f"path ({_V5_CORE_IMPORT_ERROR or 'unknown reason'})."
+            )
             orch = GenerationOrchestrator(self._pool, self._config)
         result = orch.generate(
             description=spec,
@@ -14265,6 +14433,7 @@ class GenerateAppTool(Tool):
 
         summary = (
             f"Generation {'succeeded' if result.success else 'completed with errors'}.\n"
+            f"Generation backend: {'v5' if _HAS_V5_CORE else 'legacy'}\n"
             f"Stack: {chosen_stack}\n"
             f"Template files: {len(result.files_created)}\n"
             f"Agent-generated files: {len(result.files_generated)}\n"
