@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 
-import fitz
+import pymupdf as fitz
 
 PAGE_WIDTH = 612
 PAGE_HEIGHT = 792

@@ -6,7 +6,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from textwrap import wrap
 import zipfile
-import fitz
+import pymupdf as fitz
 
 # KDP Standard trim sizes (in points, 1 inch = 72 points)
 KDP_TRIM_WIDTH = 6 * 72   # 6 inches = 432 points

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import fitz
+import pymupdf as fitz
 
 SOURCE_PDFS = (
     Path("PUBLISHING_DELIVERABLES/PUBLISHING_DELIVERABLES_INDEX.pdf"),

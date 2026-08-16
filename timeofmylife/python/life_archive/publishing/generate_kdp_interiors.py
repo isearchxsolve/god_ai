@@ -19,7 +19,7 @@ import re
 import textwrap
 import zipfile
 
-import fitz
+import pymupdf as fitz
 
 # ── KDP 6x9 trim in points (1 inch = 72 pt) ────────────────────────────────
 PW = 6 * 72    # 432

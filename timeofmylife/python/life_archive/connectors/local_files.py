@@ -618,7 +618,7 @@ class LocalFilesConnector:
         metadata = {}
 
         try:
-            import fitz  # PyMuPDF
+            import pymupdf as fitz
 
             doc = fitz.open(file_path)
             metadata["pdf_page_count"] = doc.page_count

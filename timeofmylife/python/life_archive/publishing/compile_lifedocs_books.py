@@ -7,7 +7,7 @@ from pathlib import Path
 from textwrap import wrap
 import zipfile
 
-import fitz
+import pymupdf as fitz
 
 PAGE_WIDTH = 612
 PAGE_HEIGHT = 792
