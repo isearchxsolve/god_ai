@@ -20,7 +20,7 @@ def make_spec(components=None, colors=None):
 
 @pytest.mark.parametrize("i", range(100), ids=[f"missing-root-{i}" for i in range(100)])
 def test_missing_root_block_is_flagged(i):
-    files = [{"path": f"app{i}.css", "content": f".x{i} {{ margin: {i}px; }} :focus {{}} prefers-reduced-motion"}}]
+    files = [{"path": f"app{i}.css", "content": f".x{i} {{ margin: {i}px; }} :focus {{}} prefers-reduced-motion"}]
     issues = _design_compliance(files, make_spec())
     assert any(issue.code == "DS007" for issue in issues)
 

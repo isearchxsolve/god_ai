@@ -16,3 +16,8 @@ Live, append-only monitoring feed. Newest entries at the bottom.
 - Created new tests/test_zprod_*.py parameterized suites covering design scoring, semantic diff, static design compliance, dependency parsing, journal scoring, failure classifier, interface cache, visual gate, interaction spec generation, design agent parsing, and n8n contract.
 - Added a smoke-marked subset in tests/test_zprod_smoke.py.
 - Next blocker: need existing tests/ directory and core executor files in chat to stabilize baseline, harden sandbox executor, and verify every test status.
+
+### [step 4] Fixed SyntaxError in test_zprod_static_design_compliance.py
+- Line 23 had an extra `}` closing brace (`"}}]` → `"}]`), causing a SyntaxError that blocked test collection.
+- SQL linter warnings on init.sql are false positives (flake8 parsing SQL); no changes needed.
+- Next: run full test suite to verify collection passes.
