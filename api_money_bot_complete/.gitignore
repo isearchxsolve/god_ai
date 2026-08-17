@@ -1,0 +1,21 @@
+# Credentials, harvested keys, and session data — NEVER commit these.
+harvested_keys.json
+harvest_results.json
+moneybot_results.json
+payment_audit.json
+**/sessions/*.json
+**/harvested_keys.json
+**/moneybot_results.json
+
+# Logs and scratch output
+*.log
+temp*.txt
+test_summary_*.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Environment
+.env
