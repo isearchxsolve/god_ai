@@ -26,6 +26,8 @@ from typing import Dict, Any, Optional
 import structlog
 
 from agent_loop import call_model
+from visual_reviewer import _has_frontend
+from vector_memory import retrieve_design_spec_vector
 
 logger = structlog.get_logger()
 
@@ -207,6 +209,19 @@ async def design_agent(
         "from_cache": bool,        # NEW: true if retrieved from vector memory
     }
     """
+    # ------------------------------------------------------------------
+    # Frontend detection - early return if no frontend
+    # ------------------------------------------------------------------
+    if not _has_frontend(tech_stack, []):
+        return {
+            "has_design": False,
+            "spec": {},
+            "css_variables": "",
+            "issues": [],
+            "tokens": 0,
+            "from_cache": False,
+        }
+
     # ------------------------------------------------------------------
     # [v2.6] Vector memory warm-start attempt
     # ------------------------------------------------------------------
