@@ -5,8 +5,6 @@ adapter (Groq, OpenRouter, Cerebras, Cohere, Cloudflare, ...) must implement.
 It also defines the shared Pydantic request/response contracts and the
 `ProviderHealth` / `ProviderStatus` runtime-health models used by the
 `ProviderRegistry`.
-
-NVIDIA NIM is a TOTAL NO-GO (AC-10) and is never referenced here.
 """
 from __future__ import annotations
 
