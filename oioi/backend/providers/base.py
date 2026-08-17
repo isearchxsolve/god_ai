@@ -36,7 +36,9 @@ class ChatCompletionResponse(BaseModel):
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
     choices: List[Dict[str, Any]]
-    usage: Dict[str, int] = Field(default_factory=dict)
+    # Providers return nested usage details (e.g. OpenRouter's
+    # prompt_tokens_details), so keep this permissive.
+    usage: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ChatCompletionChunk(BaseModel):
@@ -81,7 +83,7 @@ class EmbeddingResponse(BaseModel):
     object: str = "list"
     data: List[Dict[str, Any]]
     model: str
-    usage: Dict[str, int] = Field(default_factory=dict)
+    usage: Dict[str, Any] = Field(default_factory=dict)
 
 
 class Model(BaseModel):
