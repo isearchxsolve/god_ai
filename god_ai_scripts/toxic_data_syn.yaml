@@ -1,7 +1,0 @@
-
-path: D:/navaratna/yolo_synthetic_dataset
-train: images/train
-val: images/val
-
-names:
-  0: toxic_region

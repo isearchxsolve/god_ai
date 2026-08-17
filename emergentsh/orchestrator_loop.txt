@@ -1,0 +1,70 @@
+            _prog(agent.role, f"Running {agent.role} agent…")
+            try:
+                files = agent.run(ctx)
+                for rel_path, content in files.items():
+                    if not content.strip():
+                        continue
+                    dest = project_dir / rel_path
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    dest.write_text(content, encoding="utf-8")
+                    result.files_generated.append(rel_path)
+                    # Feed artifact content back into ctx for downstream agents
+                    ctx[rel_path] = content
+                _prog(agent.role, f"✓ {agent.role}: {len(files)} file(s) generated")
+            except Exception as e:
+                err = f"{agent.role} failed: {e}"
+                result.errors.append(err)
+                _prog(agent.role, f"✗ {err}")
+
+        # Phase 2.5: static cross-file consistency check (ast-based) —
+        # catches import mismatches between independently-generated
+        # Python files (e.g. BackendAgent importing a module DatabaseAgent
+        # never wrote) before spending a test-run round-trip to discover
+        # the same thing, and catches ones a generated test might not
+        # exercise at all.
+        import_problems = self._check_python_import_consistency(project_dir, result.files_generated)
+        if import_problems:
+            _prog("consistency", f"✗ {len(import_problems)} cross-file import issue(s) found — folding into repair")
+            for p in import_problems:
+                result.errors.append(f"consistency: {p}")
+        else:
+            _prog("consistency", "✓ no cross-file import mismatches detected")
+
+        # Phase 3: run tests for real, repair on failure, cap at 3 rounds.
+        # This is the loop that was previously absent entirely — TesterAgent
+        # wrote tests/test_api.py and nothing ever executed it. If the
+        # static check above found import problems, seed them as the
+        # opening failure so round 1 fixes those even if the generated
+        # test suite wouldn't itself have caught them.
+        test_result = self._repair_pass(
+            ctx, project_dir, result, on_progress,
+            seed_failure_output=(
+                "Static import-consistency check found the following issues "
+                "(fix these first — a module referenced by import does not "
+                "exist among the generated files):\n" + "\n".join(import_problems)
+            ) if import_problems else None,
+        )
+        result.test_output = test_result
+        ctx["test_output"] = test_result
+
+        # Phase 4: DevOps now runs with real test_output available, so
+        # VERIFICATION.md reflects what actually happened.
+        devops = DevOpsAgent(self.pool, self.config)
+        _prog(devops.role, f"Running {devops.role} agent…")
+        try:
+            files = devops.run(ctx)
+            for rel_path, content in files.items():
+                if not content.strip():
+                    continue
+                dest = project_dir / rel_path
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(content, encoding="utf-8")
+                result.files_generated.append(rel_path)
+                ctx[rel_path] = content
+            _prog(devops.role, f"✓ {devops.role}: {len(files)} file(s) generated")
+        except Exception as e:
+            err = f"{devops.role} failed: {e}"
+            result.errors.append(err)
+            _prog(devops.role, f"✗ {err}")
+
+        # success now requires: no hard agent failures AND tests either

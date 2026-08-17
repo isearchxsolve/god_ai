@@ -13,7 +13,7 @@ services:
 
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-ases}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ases_secure_password_$(openssl rand -hex 8)}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env or your secret manager}
       POSTGRES_DB: ${POSTGRES_DB:-ases_production}
       PGDATA: /var/lib/postgresql/data/pgdata
 
@@ -67,7 +67,7 @@ services:
       --appendonly yes
       --maxmemory 256mb
       --maxmemory-policy allkeys-lru
-      --requirepass ${REDIS_PASSWORD:-ases_redis_$(openssl rand -hex 8)}
+      --requirepass ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env or your secret manager}
 
     volumes:
       - type: volume
@@ -114,8 +114,8 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       GITHUB_TOKEN: ${GITHUB_TOKEN}
       VERCEL_TOKEN: ${VERCEL_TOKEN:-}
-      DATABASE_URL: postgresql://${POSTGRES_USER:-ases}:${POSTGRES_PASSWORD:-ases_secure_password}@postgres:5432/${POSTGRES_DB:-ases_production}
-      REDIS_URL: redis://:${REDIS_PASSWORD:-ases_redis_password}@redis:6379/0
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ases}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ases_production}
+      REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379/0
       SANDBOX_BASE_DIR: /app/sandboxes
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       STRUCTLOG_FORMAT: json
@@ -151,7 +151,7 @@ services:
     restart: unless-stopped
 
     environment:
-      REDIS_URL: redis://:${REDIS_PASSWORD:-ases_redis_password}@redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379/0
       AUTOSCALER_MIN_WORKERS: ${AUTOSCALER_MIN_WORKERS:-1}
       AUTOSCALER_MAX_WORKERS: ${AUTOSCALER_MAX_WORKERS:-8}
       AUTOSCALER_SCALE_UP_THRESHOLD: ${AUTOSCALER_SCALE_UP_THRESHOLD:-3.0}
@@ -211,10 +211,10 @@ services:
       VERCEL_TOKEN: ${VERCEL_TOKEN:-}
 
       # Database
-      DATABASE_URL: postgresql://${POSTGRES_USER:-ases}:${POSTGRES_PASSWORD:-ases_secure_password}@postgres:5432/${POSTGRES_DB:-ases_production}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ases}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ases_production}
 
       # Cache
-      REDIS_URL: redis://:${REDIS_PASSWORD:-ases_redis_password}@redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379/0
 
       # Sandbox
       SANDBOX_BASE_DIR: /app/sandboxes
@@ -231,6 +231,15 @@ services:
       # Logging
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       STRUCTLOG_FORMAT: json
+
+      # V5.0 Monster Engine Extensions
+      ASES_V5_PARALLEL_CODER: ${ASES_V5_PARALLEL_CODER:-1}
+      ASES_V5_MUTATION: ${ASES_V5_MUTATION:-1}
+      ASES_V5_PERF_BUDGET: ${ASES_V5_PERF_BUDGET:-1}
+      ASES_V5_SBOM: ${ASES_V5_SBOM:-1}
+      ASES_V5_SPECULATIVE: ${ASES_V5_SPECULATIVE:-1}
+      ASES_V5_KG: ${ASES_V5_KG:-1}
+      ASES_V5_TELEMETRY: ${ASES_V5_TELEMETRY:-1}
 
     volumes:
       - type: volume
@@ -312,10 +321,10 @@ services:
       # Auth
       N8N_BASIC_AUTH_ACTIVE: "true"
       N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER:-admin}
-      N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD:-admin}
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD:?set N8N_BASIC_AUTH_PASSWORD}
 
       # Security
-      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:-$(openssl rand -hex 32)}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?set N8N_ENCRYPTION_KEY}
 
       # Execution
       EXECUTIONS_MODE: regular
@@ -328,7 +337,7 @@ services:
       DB_POSTGRESDB_PORT: 5432
       DB_POSTGRESDB_DATABASE: ${POSTGRES_DB:-ases_production}
       DB_POSTGRESDB_USER: ${POSTGRES_USER:-ases}
-      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD:-ases_secure_password}
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
 
       # ASES integration
       AGENT_SERVICE_URL: http://agent:8000
@@ -359,12 +368,12 @@ services:
     ports:
       - "127.0.0.1:5678:5678"  # Localhost only, proxied by Nginx
 
-    # healthcheck:
-    #   test: ["CMD", "wget", "--spider", "-q", "http://localhost:5678/healthz"]
-    #   interval: 15s
-    #   timeout: 5s
-    #   retries: 3
-    #   start_period: 60s
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:5678/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
 
     deploy:
       resources:

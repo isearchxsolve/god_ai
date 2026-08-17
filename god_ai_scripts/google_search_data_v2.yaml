@@ -1,6 +1,0 @@
-path: D:\navaratna\google_search_dataset_v2
-train: images/train
-val: images/val
-nc: 1
-names:
-- unsafe_content

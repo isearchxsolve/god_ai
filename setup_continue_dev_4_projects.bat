@@ -49,10 +49,10 @@ echo   EDIT THESE 4 API KEYS BEFORE RUNNING:
 echo ============================================
 
 REM --- EDIT THESE 4 API KEYS ---
-set "NIM_KEY_1=nvapi-account-1-key-here"
-set "NIM_KEY_2=nvapi-account-2-key-here"
-set "NIM_KEY_3=nvapi-account-3-key-here"
-set "NIM_KEY_4=nvapi-account-4-key-here"
+set "NIM_KEY_1=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"
+set "NIM_KEY_2=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"
+set "NIM_KEY_3=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"
+set "NIM_KEY_4=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"
 
 REM Validate keys are set
 if "%NIM_KEY_1%"=="nvapi-account-1-key-here" (
@@ -70,12 +70,12 @@ echo [4/7] Configuring project paths and models...
 REM --- EDIT THESE 4 PROJECT PATHS ---
 set "PROJECT_1=C:\Users\Admin\Downloads\god_ai\OMEGA"
 set "PROJECT_2=C:\dev\antigravity-kandover"
-set "PROJECT_3=C:\dev\project-3"
-set "PROJECT_4=C:\dev\project-4"
+set "PROJECT_3=C:\god_ai\crypto-trader-v1_1"
+set "PROJECT_4=C:\god_ai\ases_v3_1"
 
 REM --- EDIT THESE 4 MODELS ---
-set "MODEL_1=z-ai/glm5"
-set "MODEL_2=nvidia/llama-3.1-nemotron-ultra-253b-v1"
+set "MODEL_1=z-ai/glm-5.2"
+set "MODEL_2=nvidia/nemotron-3-ultra-550b-a55b"
 set "MODEL_3=deepseek-ai/deepseek-v4-flash"
 set "MODEL_4=moonshotai/kimi-k2.6"
 

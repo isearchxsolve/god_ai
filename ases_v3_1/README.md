@@ -262,6 +262,27 @@ curl -H "x-tenant-id: default" -H "x-api-key: YOUR_KEY" \
 
 ---
 
+## Production operation
+
+ASES runs a closed loop: **Planner** turns an untrusted task into a bounded plan; **Coder** returns file blocks; **Executor** writes them into a jailed Docker workspace and runs only an allowlisted test command; **Reviewer** accepts delivery only when all gates pass. The three mandatory gates are Smoke (imports/service construction), Syntax (byte-compilation/static checks), and Integration E2E (Planner → Coder → Executor → Reviewer with external systems mocked).
+
+```bash
+# Full, authoritative production suite (more than 1,000 collected cases)
+python -m pytest tests/ -v
+
+# Fast smoke contract (~50 cases)
+python -m pytest tests/test_zprod_smoke.py -m smoke -v
+
+# Executor security contract: allowlist, timeout, output cap, and workspace jail
+python -m pytest tests/test_executor_security.py -v
+```
+
+For deployment, copy `.env.example` to `.env` and replace every placeholder through your secret manager. `docker compose up -d --build` requires `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `N8N_BASIC_AUTH_PASSWORD`, and `N8N_ENCRYPTION_KEY`; production startup additionally requires `OPENAI_API_KEY`, `DATABASE_URL`, and `REDIS_URL`. Do not use Compose defaults as credentials.
+
+`docker-compose.yml` starts PostgreSQL, Redis, the non-root agent API, RQ workers, autoscaler, n8n, and the frontend proxy. n8n calls the API internally at `http://agent:8000`; import `n8n_orchestrator.json` into n8n once, then route workflow webhooks to the authenticated `/dev-task` API. Service healthchecks gate dependent startup.
+
+Key environment settings: `ENVIRONMENT` (`production` enables required-service validation), `SANDBOX_BASE_DIR` (absolute path), `SANDBOX_COMMAND_TIMEOUT_SECONDS` (1–300), `SANDBOX_MAX_OUTPUT_BYTES` (1,024–1,000,000), `MAX_CONCURRENT_SANDBOXES`, `DATABASE_URL`, `REDIS_URL`, `OPENAI_API_KEY`, `GITHUB_TOKEN`, and optional `VERCEL_TOKEN`. Each run emits its execution ID through structured logs and the sandbox registry is reconciled on startup after a crash.
+
 ## License
 
 MIT — Built for engineers who ship.

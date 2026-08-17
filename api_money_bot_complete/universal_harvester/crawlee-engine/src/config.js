@@ -58,6 +58,19 @@ const PLATFORMS = {
       submit: 'button[type="submit"], button[data-test="signup-button"]',
     },
   },
+  huggingface: {
+    signup: 'https://huggingface.co/join',
+    signin: 'https://huggingface.co/login',
+    api: 'https://huggingface.co/settings/tokens',
+    selectors: {
+      username: 'input[name="username"], input[autocomplete="username"]',
+      email: 'input[name="email"], input[type="email"], input[autocomplete="email"]',
+      password: 'input[name="password"], input[type="password"], input[autocomplete="new-password"]',
+      fullName: 'input[name="fullname"], input[name="fullName"], input[autocomplete="name"]',
+      submit: 'button[type="submit"]',
+      terms: 'input[type="checkbox"]',
+    },
+  },
 
   // ═══════════════════════════════════════════════════════════
   //  FREELANCE / DEV / TECH (7)

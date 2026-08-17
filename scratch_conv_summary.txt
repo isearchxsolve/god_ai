@@ -1,0 +1,28 @@
+Total Conversations Found: 26
+
+2026-08-04 05:13 | ab8cf894-9f94-4366-a8a4-7af7e4c04237 | show the previous conversations
+2026-08-04 05:07 | fea564dd-cdfe-4105-86f6-d07f8fafba89 | run the agent neon_architect.py with argument --fresh on autopilot mode with the following goal constantly monitoring each turn and fixing e
+2026-08-04 05:05 | 1ff2ae82-c15b-421d-9682-3d7c3ebef75b | neon_architect_v4_7_mobile_env.py check thsi file everything was uilt using this..moto engineering excellence can achieved with zero cost...
+2026-08-04 03:47 | d6c59157-82b1-4658-9c83-094715b80442 | # How to set up and run EmergentSH ## 1. Extract the package Use **tar** (not WinRAR / Expand-Archive): ```powershell Remove-Item -Recurse -
+2026-08-03 02:30 | d088d582-5c9e-45ce-8822-af9f74930d76 | I have a Python CLI coding agent (neon_architect.py) that drives an autopilot SDLC loop against NVIDIA NIM models. This file has gone throug
+2026-08-02 23:18 | 804c3cf3-ce8d-4575-9a38-f7802c8494dc | (Empty or system prompt)
+2026-06-29 15:18 | a7999d7f-3f11-4b0e-aa9e-d2e9baa1a812 | ## ROLE & MISSION You are a senior TypeScript/Node engineer taking over an in-progress, test-driven hardening of a Solana memecoin trading b
+2026-06-29 03:37 | 59721bfe-e15e-44f8-abc8-9ef2549fedc8 | You were very fast to go to sleep after finishing your work even you did not check whether it was compiling or not this command. npm run bui
+2026-06-29 02:21 | e5660b92-693e-4a5f-beb8-0b62b7819af5 | this is a well established trade platform for meme coin market built over 6 months i want you to take it from here and enhance it further to
+2026-06-13 22:58 | f17219f5-1ba7-48a8-8d76-2b5d90d056ce | first wait for cookiee to appear accept it set email then and the click continue...wait for captcha to appear and handle captcha...then you 
+2026-06-13 01:02 | 36929003-263c-4ffc-9f1a-4b3466726601 | You are acting as a senior full-stack trading systems engineer, quantitative developer, Solana infrastructure specialist, and autonomous deb
+2026-06-13 00:10 | 158809c8-a676-4080-9308-774e52cac261 | now run the app in paper+moonbag mode and examine the logs...if any issues or losses incurred improvise and fix it by changing the files do 
+2026-06-11 18:45 | 2d324295-a2d5-4755-a8b3-55aa09a5d9dc | See the two screenshots earlier there was constant profit and now constant loss why I want te root cause
+2026-06-11 17:53 | 5cb7ddff-0a9c-4de6-86c8-53fec6435566 | Based on the log file you uploaded, the bot is **mostly functioning correctly**, but there are a few issues worth fixing. ## What's working 
+2026-06-11 13:33 | 096f4435-be53-4bd4-a328-bd112f7fd817 | do you see any issue right now or everything is fine
+2026-06-11 13:13 | efa22121-949a-4beb-851e-ec90579c49bc | (Empty or system prompt)
+2026-06-11 12:14 | de3eb9de-2155-4cd0-9550-a55ad5b84a5b | [LIQ_CO] #9211 $NSDS â€”...why there is a special character like this in the logs...also server shutting down after start
+2026-06-11 01:20 | 5bce09f3-44c3-4bb7-a0a6-cb248a5f4636 | Are the files routes.ts,jupiter.ts and index.ts syntactically correct
+2026-06-11 00:57 | 4821690e-f8c5-4f52-a959-1c5f9dc46f24 | Use **pino** (fast, structured JSON logs) with file transport. Minimal changes to your existing `console.log` calls. ## 1. Install ```bash n
+2026-06-09 14:45 | df241cf3-9985-40e2-9631-6af832b5899c | <truncated 44 lines> E + where <built-in method lower of str object at 0x0000026FB4D15830> = '\U0001f680 OMEGA ORCHESTRATION ENGINE ACTIVATE
+2026-06-06 00:03 | 738526bf-f857-4ee1-ad60-b7cc5ab81c05 | check the zip contents if the solution is actually solving tsp at O(n) time ✓ Wrote 1 file(s) to .\outputs\workspaces\default\solve-the-trav
+2026-06-05 23:07 | 4468cd41-46e9-4b42-bf23-56cf7a1f526b | give an end to end description of what the current codease is and how it functions?
+2026-06-05 22:30 | 6432e04c-495a-4f8a-a89f-d2214f13b9b8 | give an end to end description of what the codease is and how it functions?
+2026-06-04 20:03 | 0b0c2f12-b542-4928-844d-94aec335ccb9 | what will e the configuration for groq api key = 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 $env:OMEGA_LLM_PROVIDER="github" $
+2026-06-03 22:13 | bc7bb092-51f6-4f6d-89ff-185513e0c904 | <USER_REQUEST> C:\Users\Admin\Downloads\OMEGA_SOTA_UI_fixed\OMEGA_SOTA_UI>python -m omega_agent.cli --ui 2026-06-03 10:59:50,466 - omega_age
+2026-06-03 10:36 | c5777b78-7233-43f9-a7db-abf9002dae31 | zip file is not availale on omega ui interface **Processing your workflow** (run #1) Goal: solve the travelling salesman prolem in O(n) time

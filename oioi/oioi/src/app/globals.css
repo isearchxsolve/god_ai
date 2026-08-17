@@ -18,6 +18,7 @@ body {
   color: var(--foreground);
   font-family: Inter, system-ui, -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
+  min-height: 100vh;
 }
 
 /* Infinite canvas backdrop — subtle dot grid */

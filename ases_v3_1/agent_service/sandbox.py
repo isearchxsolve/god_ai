@@ -11,6 +11,8 @@ import os
 import subprocess
 import shutil
 import asyncio
+import re
+from pathlib import Path
 from typing import Dict, Any, Optional
 
 import structlog
@@ -27,6 +29,9 @@ logger = structlog.get_logger()
 
 SANDBOX_BASE_DIR = os.getenv("SANDBOX_BASE_DIR", "/tmp/ases-sandboxes")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+MAX_COMMAND_TIMEOUT_SECONDS = int(os.getenv("SANDBOX_COMMAND_TIMEOUT_SECONDS", "120"))
+MAX_OUTPUT_BYTES = int(os.getenv("SANDBOX_MAX_OUTPUT_BYTES", "12000"))
+_CONTAINER_NAME_RE = re.compile(r"^ases-[a-zA-Z0-9][a-zA-Z0-9_.-]{0,95}$")
 
 # Maximum Docker containers running simultaneously across all workers.
 # Tune this to (host_memory_gb * 1000) / 512 — each container gets 512MB.
@@ -65,6 +70,23 @@ STACK_TEST_COMMANDS = {
     "default":   "npm install --prefer-offline 2>&1 && npm test 2>&1",
 }
 
+# Commands passed to ``docker exec`` are deliberately not user controlled.
+# The allowlist is built from the fixed per-stack test commands and includes
+# short forms used by the public sandbox API.  Rejecting shell metacharacter
+# variations prevents task text or model output from turning the executor into
+# a general-purpose command runner.
+ALLOWED_COMMANDS = frozenset({
+    *STACK_TEST_COMMANDS.values(),
+    "npm test",
+    "npm test -- --watchAll=false",
+    "npm run build",
+    "python -m pytest -q",
+    "python -m pytest",
+    "python manage.py test",
+    "go test ./...",
+    "cargo test",
+})
+
 
 def _resolve_stack(tech_stack: str) -> str:
     return tech_stack.lower().split("+")[0].strip()
@@ -78,6 +100,35 @@ def _get_image(tech_stack: str) -> str:
 def get_test_command(tech_stack: str) -> str:
     key = _resolve_stack(tech_stack)
     return STACK_TEST_COMMANDS.get(key, STACK_TEST_COMMANDS["default"])
+
+
+def validate_command(command: str, timeout: int = MAX_COMMAND_TIMEOUT_SECONDS) -> None:
+    """Validate a fixed sandbox test command before handing it to a shell."""
+    if not isinstance(command, str) or command not in ALLOWED_COMMANDS:
+        raise ValueError("Sandbox command is not on the execution allowlist")
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= MAX_COMMAND_TIMEOUT_SECONDS:
+        raise ValueError(f"Sandbox timeout must be an integer between 1 and {MAX_COMMAND_TIMEOUT_SECONDS}")
+
+
+def _validated_workspace_path(workspace: str, path: str) -> Path:
+    """Return a jailed destination path, rejecting traversal and absolute paths."""
+    if not isinstance(path, str) or not path or "\x00" in path:
+        raise ValueError("Sandbox path must be a non-empty relative path")
+    candidate = Path(path)
+    if candidate.is_absolute() or any(part == ".." for part in candidate.parts):
+        raise ValueError(f"Path traversal detected: {path}")
+    root = Path(workspace).resolve()
+    destination = (root / candidate).resolve()
+    try:
+        destination.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"Path escapes sandbox workspace: {path}") from exc
+    return destination
+
+
+def _truncate_output(value: str, limit: int) -> str:
+    encoded = (value or "").encode("utf-8", errors="replace")
+    return encoded[-limit:].decode("utf-8", errors="replace")
 
 
 # ---------------------------------------------------------------------------
@@ -201,17 +252,17 @@ def _find_workspace(container_name: str) -> str:
 
 def write_file(container_name: str, path: str, content: str):
     workspace = _find_workspace(container_name)
-    safe_path = path.lstrip("/")
-    if ".." in safe_path:
-        raise ValueError(f"Path traversal detected: {path}")
-    full_path = os.path.join(workspace, safe_path)
-    os.makedirs(os.path.dirname(full_path), exist_ok=True)
+    full_path = _validated_workspace_path(workspace, path)
+    os.makedirs(full_path.parent, exist_ok=True)
     with open(full_path, "w", encoding="utf-8") as f:
         f.write(content)
-    logger.debug("sandbox.file_written", container=container_name, path=safe_path)
+    logger.debug("sandbox.file_written", container=container_name, path=str(full_path.relative_to(Path(workspace).resolve())))
 
 
 async def run_command(container_name: str, command: str, timeout: int = 120) -> Dict[str, Any]:
+    if not _CONTAINER_NAME_RE.fullmatch(container_name or ""):
+        raise ValueError("Invalid sandbox container name")
+    validate_command(command, timeout)
     logger.info("sandbox.exec", container=container_name, cmd=command[:120])
     loop = asyncio.get_event_loop()
     try:
@@ -230,8 +281,8 @@ async def run_command(container_name: str, command: str, timeout: int = 120) -> 
     logger.info("sandbox.exec.complete", container=container_name, success=success)
     return {
         "success": success,
-        "stdout": result.stdout[-8000:],
-        "stderr": result.stderr[-4000:],
+        "stdout": _truncate_output(result.stdout, MAX_OUTPUT_BYTES),
+        "stderr": _truncate_output(result.stderr, MAX_OUTPUT_BYTES),
         "returncode": result.returncode,
     }
 

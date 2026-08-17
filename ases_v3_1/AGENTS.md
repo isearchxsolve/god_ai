@@ -1,3 +1,40 @@
+# Repository Guidelines — ASES v3.1 (Autonomous Software Engineering System)
+
+Closed-loop multi-agent system for freelance automation: plans, codes, tests, and
+delivers real code. Python service (`agent_service/`) with an n8n orchestrator and
+3 TDD gates (Smoke + Syntax + Integration E2E).
+
+## Build, Test, and Development Commands
+
+```powershell
+pip install -r requirements.txt     # install dependencies
+python -m pytest tests/ -v          # run the test suite
+python -m pytest tests/test_design_agent.py -v   # run a single test file
+python debug.py                     # local debug entrypoint
+```
+
+Docker dev stack (V5.0 features): `docker compose -f docker-compose.dev.yml up -d`.
+
+## Project Structure
+
+- `agent_service/` — core agents (architect, coder, reviewer, clarifier, debug, autoscaler, billing, canary, chaos)
+- `tests/` — pytest suites, one per agent/capability
+- `apps/` — generated application outputs
+- `database/` — persistence layer
+- `CHANGES_v*.md` — per-version changelogs; add a new one per release
+- `TDD_GATES_DOCUMENTATION.md` — the 3-gate TDD pipeline spec
+
+## Rules for agents
+
+- Run `python -m pytest tests/` before committing; the 3 TDD gates must pass.
+- Name tests after behavior (`test_design_agent.py`), colocated under `tests/`.
+- Keep secrets out of committed files; use `.env` + `.env.example`.
+- No `.tmp`, `.bak`, `.backup`, or `*newplan*` scratch files — delete them, never commit them.
+- Commit messages: action-oriented (`Add mutation testing gate`).
+- Record user-visible behavior changes in a `CHANGES_v*.md` file.
+
+---
+
 ## V5.0 Monster Engine Extension (Optional Features)
 
 ASES v3.1 can be extended with 7 additional SOTA quality gates via feature flags, forming a "monster" configuration that pushes automated software engineering to new frontiers.
@@ -34,7 +71,7 @@ ASES v3.1 can be extended with 7 additional SOTA quality gates via feature flags
 ### Configuration
 All v5.0 features degrade gracefully to v3.1 behavior when disabled:
 - Set any `ASES_V5_*=1` to enable
-- Optional `ASES_V5_CVE_DB` path for SBON CVE enrichment
+- Optional `ASES_V5_CVE_DB` path for SBOM CVE enrichment
 - Optional `ASES_KG_EMBEDDING` model (default: text-embedding-3-small)
 - Optional `ASES_EMBED_ENDPOINT` override (default: OpenAPI)
 

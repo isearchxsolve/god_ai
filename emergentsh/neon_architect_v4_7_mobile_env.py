@@ -371,10 +371,10 @@ DEFAULT_CONFIG = {
     "nim_shared_rpm": 38.0,
     "thinking_effort": "low",
     "allow_medium_high_thinking": False,
-    "first_token_timeout_off": 60.0,
-    "first_token_timeout_low": 150.0,
-    "first_token_timeout_medium": 240.0,
-    "first_token_timeout_high": 360.0,
+    "first_token_timeout_off": 120.0,
+    "first_token_timeout_low": 300.0,
+    "first_token_timeout_medium": 450.0,
+    "first_token_timeout_high": 600.0,
     "stream_content_timeout_off": 200.0,
     "stream_content_timeout_low": 200.0,
     "stream_content_timeout_medium": 220.0,
@@ -1402,6 +1402,23 @@ class ProviderPool:
         for _ in range(len(self.providers)):
             p = self.current()
             if p.available() and p.bucket.try_acquire():
+                # Advance the index now, on hand-out, not only when a
+                # provider is found unavailable. Previously self.index
+                # only ever moved inside the `else: self.rotate()`
+                # branch below — meaning that with every provider
+                # healthy, next_available() always returned
+                # self.providers[self.index] unchanged, since nothing
+                # ever advanced it on a success path. Confirmed via
+                # simulation: 3 healthy providers, 6 consecutive calls,
+                # same provider returned every time. That's not a
+                # resilience bug (failure cooldown/permanent-disable
+                # still route around a broken provider correctly via
+                # this same loop) — it's a load-spreading bug: capacity
+                # on 2 of 3 configured providers went completely unused
+                # under normal healthy operation, concentrating rate
+                # limits and cost on a single account instead of
+                # spreading across the pool as configured.
+                self.rotate()
                 return p
             self.rotate()
         return None
@@ -1623,7 +1640,7 @@ class Tool:
         low = raw.lower()
         if ", content" in low or ", requirements" in low or ", risks" in low:
             raw = raw.split(",", 1)[0]
-        if ":" in raw and not (raw[1] == ":" and sys.platform == "win32"):
+        if ":" in raw and not (len(raw) > 1 and raw[1] == ":" and sys.platform == "win32"):
             # strip hallucinated keys like 'path: PLAN.md'
             raw = raw.split(":", 1)[0] if len(raw.split(":", 1)[0]) > 2 else raw
         if "," in raw:
@@ -1848,11 +1865,44 @@ class WriteTool(Tool):
         re.S,
     )
     # A single "from X import Y[, Z...]" / "import X[, Y...]" line is
-    # always one legitimate statement, no matter how long, and must never
-    # be treated as collapsed source on its own.
+    # normally one legitimate statement, no matter how long — EXCEPT when
+    # the imported names repeat many times, which is the actual signature
+    # RC-2 identified: a model-corrupted write like "from datetime import
+    # datetime, timezone, ..." repeated 80x still matches this regex's
+    # grammar (comma-separated names, arbitrarily long), so it was exiting
+    # _looks_collapsed_source as "exempt" before length/newline checks
+    # ever ran. No real import statement names the same symbol dozens of
+    # times — that repetition is diagnostic of corrupted output, not a
+    # long-but-legitimate import. See _has_repeated_import_names below,
+    # checked alongside this regex rather than folded into it, since a
+    # regex can't count distinct-name repetition on its own.
     _SINGLE_IMPORT_LINE_RE = re.compile(
         r"^\s*(from\s+[\w.]+\s+import\s+[\w., *()\n]+|import\s+[\w., ]+)\s*$"
     )
+
+    @staticmethod
+    def _has_repeated_import_names(stripped_import_line: str) -> bool:
+        """True if the same imported name appears many times in a single
+        import statement — the concrete pattern behind RC-2's garbage
+        write (`from datetime import datetime, timezone, ...` repeated
+        80x). A real import statement lists each name once; >=4 repeats
+        of any single name is well past anything a person or a correct
+        model output would ever write, and comfortably below what a
+        genuinely large-but-legitimate import list would produce for any
+        one name.
+        """
+        # Strip a leading "from X import " prefix if present; either way
+        # what's left is the comma-separated name list to inspect.
+        m = re.match(r"^\s*from\s+[\w.]+\s+import\s+(.*)$", stripped_import_line, re.S)
+        names_part = m.group(1) if m else re.sub(r"^\s*import\s+", "", stripped_import_line)
+        names = [n.strip().split(" as ")[0].strip() for n in names_part.split(",")]
+        names = [n for n in names if n and n != "*"]
+        if not names:
+            return False
+        from collections import Counter
+        counts = Counter(names)
+        return counts.most_common(1)[0][1] >= 4
+
     # Markdown collapse detector: real Markdown headings each start their
     # own line. Three or more '#'-heading markers appearing mid-string
     # (i.e. not just at position 0) with almost no real newlines means the
@@ -1861,6 +1911,59 @@ class WriteTool(Tool):
     # (extract_acceptance_criteria, plan_missing_sections, etc.) is gone,
     # even though the text itself looks superficially complete.
     _COLLAPSED_MD_HEADING_RE = re.compile(r"(?:^|\s)#{1,6}\s+\S")
+
+    @staticmethod
+    @staticmethod
+    def _strip_balanced_code_fence(data: str, path: str) -> str:
+        """Strip a matched ```lang ... ``` wrapper the model sometimes wraps
+        its ENTIRE file output in, despite tool instructions saying not to.
+
+        This is the gap RC-1 identified correctly: the collapsed-source
+        guard below looks for "almost no real newlines" — a well-formed
+        fenced block with normal internal formatting has plenty of
+        newlines, so it sails past that check untouched and gets written
+        to disk as literally invalid syntax (the fence markers themselves
+        aren't valid Python/JS/etc). The existing _ADDITION_MARKERS /
+        odd-fence-count logic only catches an UNBALANCED fence (a bare
+        opening marker with no close) — it warns, it doesn't strip a
+        cleanly matched pair.
+
+        Deliberately narrow, same safety posture as
+        _try_repair_collapsed_imports: only fires when the fence is
+        unambiguous — first non-empty line is exactly ```<optional lang
+        tag>, last non-empty line is exactly ```, and nothing meaningful
+        sits outside those markers. Anything less clear-cut (fence
+        appearing mid-file, multiple fenced blocks, prose before/after) is
+        left alone and falls through to the existing refuse/warn paths
+        rather than risk silently mangling real content — e.g. a file that
+        legitimately needs to contain the string "```" in a docstring or
+        markdown-generation code.
+        """
+        if not data:
+            return data
+        stripped = data.strip()
+        lines = stripped.splitlines()
+        if len(lines) < 3:
+            return data
+        first, last = lines[0].rstrip(), lines[-1].strip()
+        if not first.startswith("```") or last != "```":
+            return data
+        # First line must be JUST the fence marker plus an optional bare
+        # language tag (letters/digits/+/- only) — not "```python code
+        # here" with real content glued onto the same line, which would
+        # mean stripping the marker loses that content.
+        lang_tag = first[3:].strip()
+        if lang_tag and not re.match(r"^[A-Za-z0-9+_-]+$", lang_tag):
+            return data
+        body = "\n".join(lines[1:-1])
+        # A second, unmatched ``` anywhere inside means this isn't a
+        # single clean fence (could be a second fenced block, or fences
+        # discussed as literal text) — bail rather than guess.
+        if "```" in body:
+            return data
+        if not body.strip():
+            return data
+        return body + "\n"
 
     @staticmethod
     def _normalize_content(data: str) -> str:
@@ -1955,7 +2058,16 @@ class WriteTool(Tool):
             return False
         stripped = data.strip()
         if cls._SINGLE_IMPORT_LINE_RE.match(stripped):
-            return False
+            if not cls._has_repeated_import_names(stripped):
+                return False  # a real, non-repeating import line — exempt
+            # Matches import-line grammar but repeats a name >=4 times —
+            # this IS the collapsed-garbage case (RC-2), report it
+            # directly rather than falling through to the generic
+            # multi-statement/double-space checks below, which are
+            # looking for a different shape of corruption (two distinct
+            # statements glued together) and don't reliably catch a
+            # single repeated statement like this one.
+            return True
         if len(stripped) < 40:
             return False
         ext = Path(path or "").suffix.lower()
@@ -1993,6 +2105,9 @@ class WriteTool(Tool):
             fp.parent.mkdir(parents=True, exist_ok=True)
             data = content if isinstance(content, str) else str(content)
             data = self._normalize_content(data)
+            fence_stripped = self._strip_balanced_code_fence(data, path)
+            if fence_stripped != data:
+                data = fence_stripped
             # Try the narrow, provably-safe import-block repair FIRST and
             # unconditionally (not gated behind _looks_collapsed_source):
             # a pure run of collapsed import statements with single spaces
@@ -2137,6 +2252,45 @@ class WriteTool(Tool):
                             ),
                             is_error=True,
                         )
+            # Pre-write AST gate for Python sources. Applies to BOTH overwrite
+            # and append unless force=true. Append previously skipped the gate
+            # so a model could stream pure garbage via append=true and leave
+            # invalid Python on disk with zero refusal (stress T4). The cost
+            # is that mid-stream partial chunks must use force=true; complete
+            # functions/sections appended to a valid file still parse and pass.
+            if not force and Path(path or "").suffix.lower() in {".py", ".pyi"}:
+                if append and fp.is_file() and fp.stat().st_size > 0:
+                    try:
+                        existing = fp.read_text(encoding="utf-8")  # strict — refuse dirty files
+                    except UnicodeDecodeError as e:
+                        return ToolResult(
+                            "",
+                            error=(
+                                f"REFUSED append to {path}: existing file is not valid UTF-8 "
+                                f"({e}). Fix encoding first (or rewrite with force=true)."
+                            ),
+                            is_error=True,
+                        )
+                    if not data.startswith("\n"):
+                        candidate = existing + "\n" + data
+                    else:
+                        candidate = existing + data
+                else:
+                    candidate = data
+                try:
+                    ast.parse(candidate)
+                except SyntaxError as e:
+                    return ToolResult(
+                        "",
+                        error=(
+                            f"REFUSED write to {path}: resulting content is not valid Python "
+                            f"({e.msg} at line {e.lineno}). Re-send a complete, syntactically "
+                            f"valid source payload. For a deliberate partial/incomplete chunk, "
+                            f"pass force=true (the only AST bypass). Do NOT use append to smuggle "
+                            f"invalid fragments — append is validated against the full file."
+                        ),
+                        is_error=True,
+                    )
             mode = "a" if append else "w"
             if append and mode == "a" and fp.is_file() and fp.stat().st_size > 0 and not data.startswith("\n"):
                 data = "\n" + data
@@ -2230,17 +2384,60 @@ class EditTool(Tool):
             fp = self._safe_path(path)
             if not fp.exists():
                 return ToolResult("", error=f"File not found: {path}", is_error=True)
-            with open(fp, "r", encoding="utf-8", errors="replace") as f:
-                original = f.read()
+            try:
+                with open(fp, "r", encoding="utf-8") as f:  # strict — no silent U+FFFD mangling
+                    original = f.read()
+            except UnicodeDecodeError as e:
+                return ToolResult(
+                    "",
+                    error=(
+                        f"REFUSED edit of {path}: file is not valid UTF-8 ({e}). "
+                        f"Fix encoding before editing."
+                    ),
+                    is_error=True,
+                )
             if old_text not in original:
                 hint = self._diagnose_no_match(old_text, original)
                 return ToolResult("", error=f"old_text not found in {path}{hint}", is_error=True)
+            total_occurrences = original.count(old_text)
+            ambiguous_warning = ""
+            # Always strip a balanced ```lang ... ``` wrapper from new_text.
+            # Previously this only ran on the replace_all=True path, so a
+            # single-occurrence edit could inject fenced content (RC-1 gap)
+            # and leave invalid syntax on disk. Same narrow helper WriteTool
+            # uses — only fires on an unambiguous whole-payload fence pair.
+            new_text = WriteTool._strip_balanced_code_fence(new_text, path)
             if replace_all:
-                count = original.count(old_text)
+                count = total_occurrences
                 new_content = original.replace(old_text, new_text)
             else:
                 new_content = original.replace(old_text, new_text, 1)
                 count = 1
+                if total_occurrences > 1:
+                    ambiguous_warning = (
+                        f"\n\n⚠ WARNING: old_text matched {total_occurrences} times in {path}, "
+                        f"but only the FIRST occurrence was replaced (replace_all was not set). "
+                        f"If you intended to edit a different occurrence, include more surrounding "
+                        f"context in old_text to make it unique, or pass replace_all=true if you "
+                        f"meant to replace all of them."
+                    )
+            # Post-splice AST gate for Python: fence-stripping new_text alone is
+            # not enough — splicing a locally-valid fragment can still break the
+            # file (bare `def broken(:`, dedent attacks, etc.). Refuse before
+            # write so EditTool matches WriteTool's "no invalid .py on disk" rule.
+            if Path(path or "").suffix.lower() in {".py", ".pyi"}:
+                try:
+                    ast.parse(new_content)
+                except SyntaxError as e:
+                    return ToolResult(
+                        "",
+                        error=(
+                            f"REFUSED edit of {path}: result would not be valid Python "
+                            f"({e.msg} at line {e.lineno}). Adjust old_text/new_text so the "
+                            f"full file remains syntactically valid."
+                        ),
+                        is_error=True,
+                    )
             with open(fp, "w", encoding="utf-8", newline="\n") as f:
                 f.write(new_content)
             with ReadTool._cache_lock:
@@ -2255,6 +2452,7 @@ class EditTool(Tool):
             msg = (
                 f"Replaced {count} occurrence(s) in {path} ({len(new_content)} chars now)\n"
                 f"--- diff ---\n{diff_txt}"
+                f"{ambiguous_warning}"
             )
             return ToolResult(msg)
         except Exception as e:
@@ -2290,7 +2488,29 @@ class SearchTool(Tool):
                     is_error=True,
                 )
             base = self._safe_path(path)
-            rx = re.compile(pattern, re.IGNORECASE)
+            # ReDoS guard: nested quantifiers on the same group (e.g. (a+)+$)
+            # can hang Python's `re` engine indefinitely on crafted input.
+            # Reject high-risk patterns up front; also cap pattern length.
+            pat = str(pattern)
+            if len(pat) > 500:
+                return ToolResult(
+                    "",
+                    error="pattern too long (max 500 chars) — refuse possible ReDoS / abuse.",
+                    is_error=True,
+                )
+            if re.search(r"\([^)]*[+*][^)]*\)[+*]", pat) or re.search(r"\(\w\+\)\+", pat):
+                return ToolResult(
+                    "",
+                    error=(
+                        "pattern looks like nested quantifiers (ReDoS risk). "
+                        "Simplify the regex (avoid (a+)+ / (a*)* forms)."
+                    ),
+                    is_error=True,
+                )
+            try:
+                rx = re.compile(pattern, re.IGNORECASE)
+            except re.error as e:
+                return ToolResult("", error=f"invalid regex: {e}", is_error=True)
             matches: List[str] = []
             if base.is_file():
                 try:
@@ -2326,6 +2546,8 @@ class SearchTool(Tool):
                         pass
                     if len(matches) >= 100:
                         break
+                if len(matches) >= 100:
+                    break
             if not matches:
                 return ToolResult(f"No matches for pattern: {pattern}")
             return ToolResult("\n".join(matches))
@@ -2706,8 +2928,17 @@ class RunTool(Tool):
             return "git push --force (or -f/--force-with-lease) can overwrite remote history."
         if subcmd == "reset" and "--hard" in rest:
             return "git reset --hard discards uncommitted local changes irreversibly."
-        if subcmd == "clean" and ({"-f", "-fd", "-fdx", "--force"} & rest):
-            return "git clean -f deletes untracked files irreversibly."
+        if subcmd == "clean":
+            # Exact forms plus any bundled short-flag token that includes
+            # force (-f), e.g. -xfd / -dfx / -fxd — exact-string sets miss
+            # alternate orderings of the same letters.
+            if ({"-f", "-fd", "-fdx", "--force"} & rest):
+                return "git clean -f deletes untracked files irreversibly."
+            for tok in rest:
+                if tok.startswith("--"):
+                    continue
+                if tok.startswith("-") and "f" in tok[1:] and tok[1:].isalpha():
+                    return "git clean -f deletes untracked files irreversibly."
         if subcmd == "branch" and ({"-d", "-D", "--delete"} & rest):
             return "git branch -D force-deletes a branch, discarding unmerged commits."
         if subcmd == "checkout" and "-f" in rest:
@@ -2802,6 +3033,92 @@ class RunTool(Tool):
             if looks_path_like and not candidate.exists():
                 missing.append(path_part)
         return missing
+
+    # ── Optional Docker isolation ────────────────────────────────────────
+    # Everything above this point already closes the injection/traversal
+    # surface (no shell, argv-only, program allowlist, cwd containment).
+    # What it does NOT do is give the executed program its own filesystem/
+    # network/process boundary — a legitimate `pytest` run (or a test file
+    # the generation agents wrote) still executes with the real OS user's
+    # full privileges: real network access, ability to touch anything that
+    # user can touch outside project_dir via absolute paths embedded in
+    # code, resource exhaustion, etc. This wraps execution in `docker run`
+    # when available and opted into; when it isn't, behavior is unchanged
+    # from before — this is additive, not a replacement for the argv-only
+    # design above.
+    _SANDBOX_IMAGE = os.environ.get("NEON_SANDBOX_IMAGE", "neon-sandbox:latest")
+
+    @classmethod
+    def _docker_available(cls) -> bool:
+        if os.environ.get("NEON_SANDBOX_DOCKER", "").strip().lower() not in ("1", "true", "yes"):
+            return False
+        return shutil.which("docker") is not None
+
+    @classmethod
+    def _wrap_argv_for_docker(cls, argv: List[str], cwd: Path, project_root: Path) -> Optional[List[str]]:
+        """Wrap a resolved argv in `docker run` against the project root,
+        network-disabled, filesystem-scoped to the project via a bind
+        mount, non-root, with hard resource limits. Returns None if the
+        program isn't one we know how to translate inside the container
+        (host-path-resolved binaries like a venv interpreter or a
+        gradlew wrapper don't make sense to run inside an image that
+        wasn't built with that exact venv/SDK) — callers fall back to
+        direct execution in that case.
+        """
+        if not argv:
+            return None
+        host_bin = Path(argv[0])
+        # Only programs resolvable by bare name inside the container image
+        # (not a host-specific absolute path like a project .venv's
+        # python, or a project-local gradlew script) get containerized.
+        # Those two cases still run directly — they depend on host-only
+        # state a generic image wouldn't have anyway.
+        if host_bin.is_absolute():
+            return None
+        try:
+            rel_cwd = cwd.resolve().relative_to(project_root.resolve())
+        except ValueError:
+            return None
+        container_cwd = "/work" if str(rel_cwd) == "." else f"/work/{rel_cwd.as_posix()}"
+        return [
+            "docker", "run", "--rm",
+            "--network", "none",
+            "--memory", "1g",
+            "--cpus", "2",
+            "--pids-limit", "256",
+            "--user", "1000:1000",
+            "--security-opt", "no-new-privileges",
+            "--cap-drop", "ALL",
+            "-v", f"{project_root.resolve()}:/work",
+            "-w", container_cwd,
+            cls._SANDBOX_IMAGE,
+            *argv,
+        ]
+
+    def _run_argv(self, argv: List[str], cwd: Path, timeout: int) -> "subprocess.CompletedProcess":
+        """Single execution path used by both the primary run and the
+        Windows-shim fallback below — tries Docker first when opted in
+        and applicable, falls back to direct subprocess.run otherwise.
+        """
+        if self._docker_available():
+            wrapped = self._wrap_argv_for_docker(argv, cwd, self.cwd)
+            if wrapped is not None:
+                try:
+                    return subprocess.run(
+                        wrapped, shell=False, cwd=str(self.cwd),
+                        capture_output=True, text=True, encoding="utf-8", errors="replace",
+                        timeout=timeout,
+                    )
+                except FileNotFoundError:
+                    # docker itself vanished mid-session or image is
+                    # missing — fall through to direct execution rather
+                    # than hard-failing the whole tool call.
+                    pass
+        return subprocess.run(
+            argv, shell=False, cwd=str(cwd),
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=timeout,
+        )
 
     def execute(self, program: str = "", args: Optional[List[str]] = None,
                 cwd_subpath: Optional[str] = None, timeout: int = 120,
@@ -2920,21 +3237,13 @@ class RunTool(Tool):
             argv = [resolved, *args]
 
             try:
-                result = subprocess.run(
-                    argv, shell=False, cwd=str(cwd),
-                    capture_output=True, text=True, encoding="utf-8", errors="replace",
-                    timeout=timeout,
-                )
+                result = self._run_argv(argv, cwd, timeout)
             except FileNotFoundError:
                 result = None
                 last_err = None
                 for candidate in self._windows_shim_variants(resolved):
                     try:
-                        result = subprocess.run(
-                            [candidate, *args], shell=False, cwd=str(cwd),
-                            capture_output=True, text=True, encoding="utf-8", errors="replace",
-                            timeout=timeout,
-                        )
+                        result = self._run_argv([candidate, *args], cwd, timeout)
                         break
                     except FileNotFoundError as e:
                         last_err = e
@@ -4432,7 +4741,15 @@ class ContextManager:
         total = 0
         for m in self.messages:
             content = str(m.get("content") or "")
-            for tc in m.get("tool_calls", []):
+            # m.get("tool_calls", []) only falls back to [] when the key is
+            # MISSING — a message with the key present but explicitly set to
+            # None (valid JSON `"tool_calls": null`, e.g. from a hand-edited
+            # or differently-serialized session file) makes .get() return
+            # None itself, and `for tc in None` throws TypeError. Internally
+            # constructed messages never do this (add_assistant only sets
+            # the key when tool_calls is truthy), but restored session data
+            # is external input and isn't guaranteed to keep that shape.
+            for tc in (m.get("tool_calls") or []):
                 fn = tc.get("function", {})
                 content += str(fn.get("name", "")) + str(fn.get("arguments", ""))
             total += max(1, len(content) // 4)
@@ -4445,6 +4762,16 @@ class ContextManager:
         return self.estimate_tokens() > self.compact_threshold
 
     def compact(self, keep_recent: int = 8) -> bool:
+        # keep_recent must stay >= 1: Python's rest[-0:] means "from index
+        # 0", i.e. the WHOLE list, not "the last 0 items" — so
+        # keep_recent=0 would silently make `recent` the entire message
+        # list and `old` empty, meaning nothing gets folded even though
+        # this still returns True and overwrites compaction_summary. Every
+        # current call site passes a hardcoded positive value (4/6/8), so
+        # this hasn't fired in practice, but the guard belongs on the
+        # function itself since a future caller passing a computed value
+        # could hit 0 silently.
+        keep_recent = max(1, keep_recent)
         sys_msgs = [m for m in self.messages if m.get("role") == "system"]
         rest = [m for m in self.messages if m.get("role") != "system"]
         if len(rest) <= keep_recent + 2:
@@ -5184,6 +5511,8 @@ class NeonArchitect:
             if _GENERATION_LAYER_READY:
                 _gen_tool = GenerateAppTool(self.project_dir, self.pool, self.config)
                 self.tools[_gen_tool.name] = _gen_tool
+                _deploy_tool = DeployTool(self.project_dir, self.config)
+                self.tools[_deploy_tool.name] = _deploy_tool
         except Exception:
             pass  # generation layer not yet loaded (e.g. early import)
 
@@ -6173,6 +6502,10 @@ class NeonArchitect:
                 if delta is None:
                     continue
 
+                # Any valid delta indicates the backend is actively streaming (e.g. heartbeats
+                # or reasoning content hidden in model_extra).
+                saw_any_token = True
+                last_content_time = time.monotonic()
                 has_content = False
 
                 if hasattr(delta, "reasoning_content") and delta.reasoning_content:
@@ -6264,12 +6597,30 @@ class NeonArchitect:
                 orphans.append(t)
 
         print()
+        raw_tool_call_count = len(tool_calls)
         for tc in tool_calls:
             if isinstance(tc, dict):
                 tc["arguments"] = sanitize_tool_arguments(tc.get("arguments"))
                 if not tc.get("name"):
                     tc["name"] = "unknown"
         tool_calls = [tc for tc in tool_calls if isinstance(tc, dict) and tc.get("name") and tc.get("name") != "unknown"]
+        if raw_tool_call_count and not tool_calls:
+            # The backend streamed one or more tool_calls deltas (so the
+            # model clearly intended to call something — we saw an index
+            # slot get created for it), but not one of them ever received a
+            # function.name fragment, so every entry got filtered out above
+            # as nameless. If we returned this as-is, the caller would see
+            # a non-None finish_reason and treat the turn as a normal
+            # successful no-tool-call response — the model's actual intent
+            # silently vanishes with no retry, no warning, and no signal to
+            # the model that its call didn't go through. This happens in
+            # practice with non-conformant OpenAI-compatible backends
+            # (local vLLM/SGLang servers, etc.) that don't reliably stream
+            # function.name. Route it into the same retry path as a
+            # dropped stream by clearing finish_reason, since it's the same
+            # underlying failure: the backend claimed completion without
+            # delivering a usable result.
+            finish_reason = None
         return content, reasoning, tool_calls, finish_reason
 
     def _is_template_error(self, e: Exception) -> bool:
@@ -6612,15 +6963,37 @@ class NeonArchitect:
                 f"explicitly in a future turn; do not assume they happened."
             )
 
-        formatted = sanitize_tool_calls([
+        formatted_input = [
             {
                 "id": tc.get("id") or "",
                 "name": tc.get("name") or "",
                 "arguments": tc.get("arguments") or "{}",
             }
             for tc in tool_calls
-        ])
-        formatted = [f for f in formatted if f.get("function", {}).get("name")]
+        ]
+        formatted = sanitize_tool_calls(formatted_input)
+        # sanitize_tool_calls() fills a missing/empty name with the literal
+        # placeholder "unknown" (so downstream formatting always has a
+        # non-empty string to show), which means checking
+        # f["function"]["name"] here can never be falsy and this filter
+        # could never actually drop anything — a genuinely nameless tool
+        # call would still be added to context as a call to a tool
+        # literally named "unknown", confusing the model on later turns
+        # even though execute_tool() separately handles an empty name
+        # safely at call time. Filter on the pre-sanitization names
+        # instead. Correlating by id doesn't work here: providers that
+        # omit tool-call ids leave every real entry's id as "" too, so an
+        # id-based filter drops legitimate calls right along with the
+        # malformed one (worse than the bug being fixed). formatted_input
+        # is built 1:1 from tool_calls immediately above with no
+        # intervening filtering, and every element is a dict literal, so
+        # sanitize_tool_calls's own "isinstance(tc, dict): continue" skip
+        # can never fire on it — output stays positionally aligned with
+        # formatted_input/tool_calls, so a straight zip is safe here.
+        formatted = [
+            f for f, orig in zip(formatted, formatted_input)
+            if str(orig.get("name") or "").strip()
+        ]
         self.ctx.add_assistant(content="", tool_calls=formatted)
 
         spam_blocks = 0
@@ -6771,9 +7144,21 @@ class NeonArchitect:
                         ]
                         low = rel.lower()
                         if any(low.startswith(p.lower()) or f"/{p.lower()}" in f"/{low}" for p in prefixes):
-                            if rel not in self._src_write_paths:
-                                self._src_write_paths.append(rel)
-                            self._phase_tool_counts["src_write"] = self._phase_tool_counts.get("src_write", 0) + 1
+                            is_valid_py = True
+                            if rel.endswith(".py"):
+                                try:
+                                    ast.parse((self.project_dir / rel).read_text(encoding="utf-8", errors="replace"))
+                                except Exception:
+                                    is_valid_py = False
+                            if is_valid_py:
+                                # Count toward src_write once per unique path, not
+                                # once per call — otherwise editing the same file
+                                # N times satisfies a min_src_writes gate exactly
+                                # like N genuinely different files would, letting
+                                # the gate pass without real implementation breadth.
+                                if rel not in self._src_write_paths:
+                                    self._src_write_paths.append(rel)
+                                    self._phase_tool_counts["src_write"] = self._phase_tool_counts.get("src_write", 0) + 1
                     elif name == "todo" and args.get("action") == "add":
                         self._update_working_memory(f"todo: {str(args.get('content',''))[:120]}", section="Next action")
                     elif name == "run":
@@ -7298,10 +7683,8 @@ class NeonArchitect:
                 )
                 time.sleep(0.5)
                 continue
-            self._malformed_tool_streak = 0
-
+            self.nudges = 0
             if tool_calls:
-                self.nudges = 0
                 self._execute_tools(tool_calls)
                 self._consecutive_no_tool_turns = 0
                 tool_names = {tc.get("name", "") for tc in tool_calls}
@@ -7328,6 +7711,21 @@ class NeonArchitect:
                         or "full implementation" in stated_intent
                     ):
                         is_degenerate_write = True
+                if not is_degenerate_write:
+                    # Reset only on a genuinely healthy turn. A prior version
+                    # reset this streak unconditionally (before this
+                    # degenerate-write check even ran), which wiped out any
+                    # malformed-tool-call streak accumulated on earlier turns
+                    # the instant a degenerate-write turn followed it — so a
+                    # mixed sequence (e.g. 2 malformed-syntax turns then 1
+                    # degenerate write) could never reach the streak-of-3
+                    # rotation threshold, directly contradicting the
+                    # "continuation, not a reset" intent below.
+                    self._malformed_tool_streak = 0
+            else:
+                self._malformed_tool_streak = 0
+
+            if tool_calls:
                 if is_degenerate_write:
                     self._malformed_tool_streak += 1
                     UI.warn(
@@ -7348,8 +7746,6 @@ class NeonArchitect:
                         except Exception:
                             pass
                         self._malformed_tool_streak = 0
-                else:
-                    self._malformed_tool_streak = 0
                 if tool_names & {"todo", "write", "edit"}:
                     self.persist(force=True)
                 delay = self._effective_inter_turn_delay()
@@ -8298,10 +8694,27 @@ class NeonArchitect:
             else:
                 UI.info("No goal set. Use /goal <description> to set one, then /autopilot to start.")
             return
-        self.goal = goal_text.strip()
+        new_goal = goal_text.strip()
+        if self.goal == new_goal and self.sdlc_phase_idx > 0:
+            UI.info(
+                f"[SDLC SAFEGUARD] Goal re-asserted without changes. "
+                f"Retaining active SDLC phase: {SDLC_PHASES[self.sdlc_phase_idx].upper()} "
+                f"(completed: {', '.join(sorted(self.sdlc_completed)) or 'none'})."
+            )
+            self._rebuild_system()
+            self.persist(force=True)
+            return
+        self.goal = new_goal
         self.autopilot = False
-        self.sdlc_phase_idx = 0
-        self.sdlc_completed.clear()
+        if not self.sdlc_completed and self.sdlc_phase_idx == 0:
+            self.sdlc_phase_idx = 0
+            self.sdlc_completed.clear()
+        else:
+            UI.info(
+                f"[SDLC SAFEGUARD] Preserving active SDLC phase: {SDLC_PHASES[self.sdlc_phase_idx].upper()} "
+                f"(completed: {', '.join(sorted(self.sdlc_completed)) or 'none'}) for updated goal. "
+                "Use /reset to restart SDLC from planning."
+            )
         self._rebuild_system()
         self.persist(force=True)
         UI.ok(f"Goal set: {self.goal}")
@@ -8828,9 +9241,12 @@ def apply_session(agent: "NeonArchitect", data: Dict[str, Any]) -> None:
         UI.warn(f"Session restore (persona): {e}")
 
     try:
-        agent.goal = _safe_get(data, "goal")
-        agent.sdlc_phase_idx = int(_safe_get(data, "sdlc_phase_idx") or 0)
-        agent.sdlc_completed = set(_safe_get(data, "sdlc_completed") or [])
+        agent.goal = _safe_get(data, "goal") or agent.goal
+        loaded_idx = int(_safe_get(data, "sdlc_phase_idx") or 0)
+        # MONOTONIC PHASE LOCK SAFEGUARD: Ensure loading session data never demotes a higher reached phase
+        agent.sdlc_phase_idx = max(getattr(agent, "sdlc_phase_idx", 0), loaded_idx)
+        loaded_completed = set(_safe_get(data, "sdlc_completed") or [])
+        agent.sdlc_completed.update(loaded_completed)
         agent.autopilot_rounds = int(_safe_get(data, "autopilot_rounds") or 0)
         agent.autopilot = False 
         agent._session_wants_resume = bool(
@@ -9026,11 +9442,21 @@ if HAS_TEXTUAL:
             if self._busy:
                 self.write_log("[yellow]busy — wait for the current turn to finish[/]")
                 return
+            # Set _busy here, synchronously, on the main/event thread —
+            # not inside run_agent_turn. @work(thread=True) schedules the
+            # worker and returns immediately without waiting for the
+            # thread body to start, so if the flag were set on the worker
+            # thread instead, two Enter presses close enough together
+            # could both observe self._busy == False above and both spawn
+            # a worker, racing on the global sys.stdout/stderr swap below
+            # and on concurrent self.agent.run_turn() calls (which mutates
+            # shared agent/context state and isn't safe to run twice at
+            # once). Setting it here closes that window.
+            self._busy = True
             self.run_agent_turn(text)
 
         @work(thread=True)
         def run_agent_turn(self, user_text: str) -> None:
-            self._busy = True
             self.call_from_thread(self.set_status, "thinking…")
             self.call_from_thread(self.write_log, f"[bold cyan]you[/]  {user_text}")
 
@@ -9542,6 +9968,7 @@ if __name__ == "__main__":
 """,
         "backend/__init__.py": "",
         "backend/routers/__init__.py": "",
+        "tests/__init__.py": "",
         "backend/routers/health.py": """\
 from fastapi import APIRouter
 router = APIRouter()
@@ -10365,6 +10792,7 @@ app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 """,
         "backend/__init__.py": "",
         "backend/routers/__init__.py": "",
+        "tests/__init__.py": "",
         "backend/routers/health.py": """\
 from fastapi import APIRouter
 router = APIRouter()
@@ -10659,6 +11087,68 @@ def _scaffold_project(template_key: str, project_dir: Path, ctx: dict) -> List[s
 
 # ── Section B+C: Specialized Agents ──────────────────────────────────────────
 
+
+# Shared cross-agent surface contract — the endpoint/domain antibody parallel
+# to ArchitectAgent._BACKEND_ROOT_BY_STACK (which already solved the *file-path*
+# version of cross-agent drift). Every generation agent that mentions routes,
+# domain entities, or verification criteria MUST read from here (or from ctx
+# keys seeded from here) — never hardcode a resource that another agent may
+# or may not build.
+#
+#   endpoints          — REST/API surface after scaffold + BackendAgent
+#   domain             — named capabilities present on this stack
+#   frontend_entities  — domain objects frontend may safely assume (empty =>
+#                        do not build CRUD/entity UI components)
+STACK_SURFACE: Dict[str, Dict[str, Any]] = {
+    "fastapi-react": {
+        # projects router ships in the scaffold template, not BackendAgent
+        "endpoints": (
+            "GET /api/health, "
+            "POST /api/auth/register, POST /api/auth/login, "
+            "GET /api/projects/, POST /api/projects/, "
+            "POST /api/generate/code"
+        ),
+        "domain": ["auth", "projects", "generate", "health"],
+        "frontend_entities": ["project"],
+    },
+    "flutter-fastapi": {
+        # scaffold is auth+health only; BackendAgent adds generate — NO projects REST
+        "endpoints": (
+            "GET /api/health, "
+            "POST /api/auth/register, POST /api/auth/login, "
+            "POST /api/generate/code"
+        ),
+        "domain": ["auth", "generate", "health"],
+        "frontend_entities": [],
+    },
+    "nextjs-postgres": {
+        # BackendAgent only builds app/api/generate/route.ts for this stack
+        "endpoints": "POST /api/generate",
+        "domain": ["generate"],
+        "frontend_entities": [],
+    },
+    "expo-node": {
+        # scaffold ships health/auth/projects; BackendAgent adds generate
+        "endpoints": (
+            "GET /api/health, "
+            "POST /api/auth/register, POST /api/auth/login, "
+            "GET /api/projects, POST /api/projects, "
+            "POST /api/generate/code"
+        ),
+        "domain": ["auth", "projects", "generate", "health"],
+        "frontend_entities": ["project"],
+    },
+}
+
+
+def stack_surface(stack: str) -> Dict[str, Any]:
+    """Return the shared surface contract for a stack (safe empty defaults)."""
+    return STACK_SURFACE.get(
+        stack,
+        {"endpoints": "", "domain": [], "frontend_entities": []},
+    )
+
+
 class SpecializedAgent:
     """Base class for all generation-layer agents.
 
@@ -10673,8 +11163,8 @@ class SpecializedAgent:
         self.pool = pool
         self.config = config
 
-    def _call_nim(self, messages: List[Dict[str, str]], max_tokens: int = 8192, target_file: Optional[Path] = None) -> str:
-        """NIM call with real-time direct-to-disk streaming file I/O."""
+    def _call_nim(self, messages: List[Dict[str, str]], max_tokens: int = 8192) -> str:
+        """Synchronous NIM call through the existing provider pool."""
         if not HAS_OPENAI:
             return f"# {self.role} output\n# openai package not available\n"
 
@@ -10690,12 +11180,11 @@ class SpecializedAgent:
                 raise RuntimeError(f"[{self.role}] No NIM provider available after 60 s")
 
             model_cfg = provider.model_cfg
-            req_max_tokens = min(max_tokens, model_cfg.get("max_tokens", 4096))
             payload: Dict[str, Any] = {
                 "model": model_cfg["id"],
                 "messages": messages,
-                "max_tokens": req_max_tokens,
-                "stream": True,
+                "max_tokens": max_tokens,
+                "stream": False,
             }
             if model_cfg.get("temperature") is not None:
                 payload["temperature"] = model_cfg["temperature"]
@@ -10703,29 +11192,21 @@ class SpecializedAgent:
                 payload["top_p"] = model_cfg["top_p"]
 
             try:
-                stream_resp = provider.client.chat.completions.create(**payload)
-                chunks: List[str] = []
-                f = None
-                if target_file:
-                    target_file.parent.mkdir(parents=True, exist_ok=True)
-                    f = open(target_file, "w", encoding="utf-8")
-                try:
-                    for chunk in stream_resp:
-                        if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
-                            c = chunk.choices[0].delta.content
-                            chunks.append(c)
-                            if f:
-                                f.write(c)
-                                f.flush()
-                            sys.stdout.write(".")
-                            sys.stdout.flush()
-                finally:
-                    if f:
-                        f.close()
-                sys.stdout.write("\n")
-                sys.stdout.flush()
+                resp = provider.client.chat.completions.create(**payload)
+                # A malformed/empty response — e.g. resp.choices == [] under
+                # a content-filter block or certain backend error conditions
+                # that don't raise — throws IndexError/AttributeError here,
+                # neither of which is in OPENAI_ERRORS below. Without this
+                # check that exception escapes the except clause entirely,
+                # skipping every retry/rotation/backoff this loop provides
+                # for every other failure mode and crashing straight out of
+                # _call_nim on the very first bad response from any
+                # provider, permanent or not. Treat it as just another
+                # provider-side failure so it gets the same retry treatment.
+                if not getattr(resp, "choices", None):
+                    raise RuntimeError(f"Empty choices in response from {provider.name}")
                 provider.record_success()
-                return "".join(chunks).strip()
+                return (resp.choices[0].message.content or "").strip()
             except OPENAI_ERRORS as e:
                 err_str = str(e).lower()
                 if "429" in err_str or "rate" in err_str:
@@ -10737,6 +11218,13 @@ class SpecializedAgent:
                 else:
                     provider.record_failure()
                     time.sleep(2.0)
+            except (IndexError, AttributeError, KeyError, RuntimeError) as e:
+                # Malformed-response class of failure (empty choices, missing
+                # message/content on the returned object, etc.) — same
+                # retry/backoff treatment as the generic OPENAI_ERRORS branch
+                # above, just not wrapped in one of those SDK exception types.
+                provider.record_failure()
+                time.sleep(2.0)
         raise RuntimeError(f"[{self.role}] All NIM attempts exhausted")
 
     def _messages(self, user_content: str) -> List[Dict[str, str]]:
@@ -10745,7 +11233,7 @@ class SpecializedAgent:
             {"role": "user", "content": user_content},
         ]
 
-    def run(self, ctx: Dict[str, Any], project_dir: Optional[Path] = None) -> Dict[str, str]:
+    def run(self, ctx: Dict[str, Any]) -> Dict[str, str]:
         """Run the agent. Returns {rel_path: content} of files to write."""
         raise NotImplementedError
 
@@ -10756,40 +11244,61 @@ class PlannerAgent(SpecializedAgent):
         "You are a senior software architect writing a project plan.\n"
         "Output ONLY the content of PLAN.md — a markdown document with exactly these sections:\n"
         "## Requirements\n## Risks\n## Acceptance Criteria\n\n"
-        "Be specific, actionable, and technical. No preamble, no code blocks wrapping the markdown."
+        "Be specific, actionable, and technical. No preamble, no code blocks wrapping the markdown. "
+        "Never wrap your output in ``` fences of any kind — output raw markdown text only, starting directly with the first heading."
     )
 
-    def run(self, ctx: Dict[str, Any], project_dir: Optional[Path] = None) -> Dict[str, str]:
+    def run(self, ctx: Dict[str, Any]) -> Dict[str, str]:
         prompt = (
             f"Project: {ctx['project_name']}\n"
             f"Stack: {ctx['stack']}\n"
             f"Description: {ctx['description']}\n\n"
             "Write PLAN.md with sections: Requirements, Risks, Acceptance Criteria."
         )
-        target = (project_dir / "PLAN.md") if project_dir else None
-        content = self._call_nim(self._messages(prompt), max_tokens=4096, target_file=target)
+        content = self._call_nim(self._messages(prompt), max_tokens=4096)
         return {"PLAN.md": content}
 
 
 class ArchitectAgent(SpecializedAgent):
     role = "architect"
+    # Backend package root is stack-dependent and MUST match what BackendAgent,
+    # DatabaseAgent, and TesterAgent hardcode downstream — otherwise generated
+    # tests fail with ModuleNotFoundError (e.g. Tester writes
+    # "from backend.main import app" but the architecture says app/main.py).
+    _BACKEND_ROOT_BY_STACK = {
+        "fastapi-react": "backend/ (module path: backend.main, backend.routers, backend.models)",
+        "flutter-fastapi": "backend/ (module path: backend.main, backend.routers, backend.models)",
+        "nextjs-postgres": "app/ (Next.js 14 App Router — app/api/.../route.ts)",
+        "expo-node": "server/ (Express — server/routes/*.js)",
+    }
+
     _system_prompt = (
         "You are a senior software architect writing ARCHITECTURE.md.\n"
         "Output ONLY the markdown document with these sections:\n"
         "## Components\n## Data Flow\n## Tech Stack\n## API Surface\n\n"
-        "Be specific about module names, file paths, and data schemas."
+        "Be specific about module names, file paths, and data schemas. "
+        "CRITICAL: the backend package root and its exact path/module convention will be given to you "
+        "in the prompt — you MUST use that exact root for every backend file path and import example "
+        "you write. Do not invent or default to any other root (never use app/main.py unless told to). "
+        "Every other agent in this pipeline (backend, database, tests, deployment) hardcodes this same "
+        "root, so any deviation here breaks the entire generated project. "
+        "Never wrap your output in ``` fences of any kind — output raw markdown text only, starting directly with the first heading."
     )
 
-    def run(self, ctx: Dict[str, Any], project_dir: Optional[Path] = None) -> Dict[str, str]:
+    def run(self, ctx: Dict[str, Any]) -> Dict[str, str]:
         plan = ctx.get("PLAN.md", "No plan yet.")
+        stack = ctx["stack"]
+        backend_root = self._BACKEND_ROOT_BY_STACK.get(stack, "backend/ (module path: backend.main)")
         prompt = (
-            f"Project: {ctx['project_name']} ({ctx['stack']})\n"
+            f"Project: {ctx['project_name']} ({stack})\n"
             f"Description: {ctx['description']}\n\n"
             f"PLAN.md:\n{plan[:3000]}\n\n"
+            f"MANDATORY backend package root for this stack: {backend_root}\n"
+            "Use this exact root for every backend file path, import statement, and module reference "
+            "in the document. Do not use any other backend root.\n\n"
             "Write ARCHITECTURE.md with sections: Components, Data Flow, Tech Stack, API Surface."
         )
-        target = (project_dir / "ARCHITECTURE.md") if project_dir else None
-        content = self._call_nim(self._messages(prompt), max_tokens=4096, target_file=target)
+        content = self._call_nim(self._messages(prompt), max_tokens=4096)
         return {"ARCHITECTURE.md": content}
 
 
@@ -10801,9 +11310,9 @@ class DesignerAgent(SpecializedAgent):
         "Design a clean, modern dark-mode color theme and component system for the given project."
     )
 
-    def run(self, ctx: Dict[str, Any], project_dir: Optional[Path] = None) -> Dict[str, str]:
+    def run(self, ctx: Dict[str, Any]) -> Dict[str, str]:
         stack = ctx["stack"]
-        if stack in ("fastapi-react", "nextjs-postgres"):
+        if stack == "fastapi-react":
             prompt = (
                 f"Project: {ctx['project_name']}\nDescription: {ctx['description']}\n\n"
                 "Write frontend/src/theme.ts — a TypeScript module exporting a COLORS object and a TYPOGRAPHY object. "
@@ -10811,20 +11320,44 @@ class DesignerAgent(SpecializedAgent):
                 "text=#e2e8f0, muted=#94a3b8, danger=#fb7185, success=#4ade80. "
                 "No imports needed. Export as: export const COLORS = {{...}}; export const TYPOGRAPHY = {{...}};"
             )
-            target = (project_dir / "frontend/src/theme.ts") if project_dir else None
-            out = self._call_nim(self._messages(prompt), max_tokens=2048, target_file=target)
+            out = self._call_nim(self._messages(prompt), max_tokens=2048)
             return {"frontend/src/theme.ts": out}
+        elif stack == "nextjs-postgres":
+            # Same root as FrontendAgent/BackendAgent/ArchitectAgent for this
+            # stack — no frontend/ tree in a Next.js App Router project.
+            prompt = (
+                f"Project: {ctx['project_name']}\nDescription: {ctx['description']}\n\n"
+                "Write lib/theme.ts — a TypeScript module exporting a COLORS object and a TYPOGRAPHY object. "
+                "Use a professional dark-mode palette with primary=#38bdf8, background=#0f172a, surface=#1e293b, "
+                "text=#e2e8f0, muted=#94a3b8, danger=#fb7185, success=#4ade80. "
+                "No imports needed. Export as: export const COLORS = {{...}}; export const TYPOGRAPHY = {{...}};"
+            )
+            out = self._call_nim(self._messages(prompt), max_tokens=2048)
+            return {"lib/theme.ts": out}
         elif stack == "flutter-fastapi":
             prompt = (
                 f"Project: {ctx['project_name']}\n\n"
                 "Write lib/theme.dart — a Flutter file that defines AppTheme with a dark ThemeData. "
                 "Primary color #38bdf8, background #0f172a. Export: class AppTheme {{ static ThemeData dark() {{...}} }}"
             )
-            target = (project_dir / "lib/theme.dart") if project_dir else None
-            out = self._call_nim(self._messages(prompt), max_tokens=2048, target_file=target)
+            out = self._call_nim(self._messages(prompt), max_tokens=2048)
             return {"lib/theme.dart": out}
+        elif stack == "expo-node":
+            # Explicit branch — do not fall through to silent {}. Expo apps
+            # still benefit from a shared color/typography module under app/.
+            prompt = (
+                f"Project: {ctx['project_name']}\nDescription: {ctx['description']}\n\n"
+                "Write app/theme.ts — a TypeScript module exporting COLORS and TYPOGRAPHY "
+                "for a React Native / Expo dark-mode UI. Primary #38bdf8, background #0f172a, "
+                "surface #1e293b, text #e2e8f0. Export: export const COLORS = {{...}}; export const TYPOGRAPHY = {{...}};"
+            )
+            out = self._call_nim(self._messages(prompt), max_tokens=2048)
+            return {"app/theme.ts": out}
         else:
-            return {}  # expo-node: minimal theme
+            raise ValueError(
+                f"DesignerAgent: unsupported stack {stack!r}. "
+                f"Expected one of: fastapi-react, nextjs-postgres, flutter-fastapi, expo-node."
+            )
 
 
 class FrontendAgent(SpecializedAgent):
@@ -10835,94 +11368,175 @@ class FrontendAgent(SpecializedAgent):
         "Use the dark color system: primary=#38bdf8, bg=#0f172a, surface=#1e293b."
     )
 
-    def run(self, ctx: Dict[str, Any], project_dir: Optional[Path] = None) -> Dict[str, str]:
+    def run(self, ctx: Dict[str, Any]) -> Dict[str, str]:
         stack = ctx["stack"]
         arch = ctx.get("ARCHITECTURE.md", "")[:2000]
         results: Dict[str, str] = {}
+        # Contract-driven: never assume a domain entity exists unless the shared
+        # surface (or ctx override) declares it. Frontend runs before BackendAgent,
+        # so we read STACK_SURFACE (seeded into ctx by the orchestrator).
+        surface = stack_surface(stack)
+        entities = ctx.get("_frontend_entities")
+        if entities is None:
+            entities = list(surface.get("frontend_entities") or [])
+        elif isinstance(entities, str):
+            entities = [e.strip() for e in entities.split(",") if e.strip()]
+        domain = ctx.get("_domain")
+        if domain is None:
+            domain = list(surface.get("domain") or [])
+        elif isinstance(domain, str):
+            domain = [d.strip() for d in domain.split(",") if d.strip()]
 
-        if stack in ("fastapi-react", "nextjs-postgres"):
-            prompt = (
-                f"Project: {ctx['project_name']}\nDescription: {ctx['description']}\n"
-                f"Architecture:\n{arch}\n\n"
-                "Write frontend/src/components/ProjectCard.tsx — a React component that accepts "
-                "a project object {{id, name, description, status, created_at}} as props "
-                "and renders a polished dark-mode card. Include hover effects via inline style state. "
-                "Export as: export default function ProjectCard({{ project }}: {{ project: any }}) {{...}}"
-            )
-            t1 = (project_dir / "frontend/src/components/ProjectCard.tsx") if project_dir else None
-            results["frontend/src/components/ProjectCard.tsx"] = self._call_nim(self._messages(prompt), max_tokens=3000, target_file=t1)
-
-            prompt2 = (
+        def _chat_prompt(path_hint: str, extra: str = "") -> str:
+            return (
                 f"Project: {ctx['project_name']}\n\n"
-                "Write frontend/src/components/ChatPanel.tsx — a React component for an AI chat interface. "
+                f"Write {path_hint} — a component for an AI chat interface. {extra}"
                 "It should have a messages list area (scrollable), a text input at the bottom, and a Send button. "
                 "State: messages array, input string. Each message has {{role: 'user'|'assistant', content: string}}. "
                 "Assistant messages render in #1e293b bubbles, user messages in #38bdf8 bubbles. "
                 "Export as: export default function ChatPanel() {{...}}"
             )
-            t2 = (project_dir / "frontend/src/components/ChatPanel.tsx") if project_dir else None
-            results["frontend/src/components/ChatPanel.tsx"] = self._call_nim(self._messages(prompt2), max_tokens=3000, target_file=t2)
 
-        elif stack == "flutter-fastapi":
-            prompt = (
-                f"Project: {ctx['project_name']}\n\n"
-                "Write lib/widgets/project_card.dart — a Flutter StatelessWidget that renders "
-                "a dark-mode project card given name, description, and status strings. "
-                "Use Card, ListTile, and Chip widgets. Export: class ProjectCard extends StatelessWidget {{...}}"
-            )
-            t = (project_dir / "lib/widgets/project_card.dart") if project_dir else None
-            results["lib/widgets/project_card.dart"] = self._call_nim(self._messages(prompt), max_tokens=2000, target_file=t)
-
-        elif stack == "expo-node":
-            prompt = (
-                f"Project: {ctx['project_name']}\n\n"
-                "Write app/components/ProjectCard.tsx — a React Native component that renders "
-                "a project card (name, description, status) using View, Text, and StyleSheet. "
-                "Dark background #1e293b, primary #38bdf8. "
+        def _project_prompt(path_hint: str, extra: str = "") -> str:
+            return (
+                f"Project: {ctx['project_name']}\nDescription: {ctx['description']}\n"
+                f"Architecture:\n{arch}\n\n"
+                f"Write {path_hint} — a component that accepts "
+                "a project object {{id, name, description, status, created_at}} as props "
+                "and renders a polished dark-mode card. Include hover effects via inline style state. "
+                f"{extra}"
                 "Export as: export default function ProjectCard({{ project }}: {{ project: any }}) {{...}}"
             )
-            t = (project_dir / "app/components/ProjectCard.tsx") if project_dir else None
-            results["app/components/ProjectCard.tsx"] = self._call_nim(self._messages(prompt), max_tokens=2000, target_file=t)
+
+        if stack == "fastapi-react":
+            if "generate" in domain:
+                results["frontend/src/components/ChatPanel.tsx"] = self._call_nim(
+                    self._messages(_chat_prompt("frontend/src/components/ChatPanel.tsx")),
+                    max_tokens=3000,
+                )
+            if "project" in entities:
+                results["frontend/src/components/ProjectCard.tsx"] = self._call_nim(
+                    self._messages(_project_prompt("frontend/src/components/ProjectCard.tsx")),
+                    max_tokens=3000,
+                )
+
+        elif stack == "nextjs-postgres":
+            if "generate" in domain:
+                results["components/ChatPanel.tsx"] = self._call_nim(
+                    self._messages(_chat_prompt("components/ChatPanel.tsx", "Start with 'use client'. ")),
+                    max_tokens=3000,
+                )
+            if "project" in entities:
+                results["components/ProjectCard.tsx"] = self._call_nim(
+                    self._messages(_project_prompt(
+                        "components/ProjectCard.tsx",
+                        "Add 'use client' at the top if it uses hooks/state. ",
+                    )),
+                    max_tokens=3000,
+                )
+
+        elif stack == "flutter-fastapi":
+            if "project" in entities:
+                prompt = (
+                    f"Project: {ctx['project_name']}\n\n"
+                    "Write lib/widgets/project_card.dart — a Flutter StatelessWidget that renders "
+                    "a dark-mode project card given name, description, and status strings. "
+                    "Use Card, ListTile, and Chip widgets. Export: class ProjectCard extends StatelessWidget {{...}}"
+                )
+                results["lib/widgets/project_card.dart"] = self._call_nim(
+                    self._messages(prompt), max_tokens=2000
+                )
+            if "generate" in domain:
+                prompt = (
+                    f"Project: {ctx['project_name']}\n\n"
+                    "Write lib/widgets/chat_panel.dart — a Flutter StatefulWidget for an AI prompt UI. "
+                    "TextField + Send button, a ListView of message bubbles (user vs assistant). "
+                    "Dark theme: background #0f172a, primary #38bdf8. "
+                    "Export: class ChatPanel extends StatefulWidget {{...}}"
+                )
+                results["lib/widgets/chat_panel.dart"] = self._call_nim(
+                    self._messages(prompt), max_tokens=2000
+                )
+
+        elif stack == "expo-node":
+            if "project" in entities:
+                prompt = (
+                    f"Project: {ctx['project_name']}\n\n"
+                    "Write app/components/ProjectCard.tsx — a React Native component that renders "
+                    "a project card (name, description, status) using View, Text, and StyleSheet. "
+                    "Dark background #1e293b, primary #38bdf8. "
+                    "Export as: export default function ProjectCard({{ project }}: {{ project: any }}) {{...}}"
+                )
+                results["app/components/ProjectCard.tsx"] = self._call_nim(
+                    self._messages(prompt), max_tokens=2000
+                )
+            if "generate" in domain:
+                prompt = (
+                    f"Project: {ctx['project_name']}\n\n"
+                    "Write app/components/ChatPanel.tsx — a React Native chat/prompt panel. "
+                    "FlatList of messages, TextInput, Send button. Dark theme #0f172a / #38bdf8. "
+                    "Export as: export default function ChatPanel() {{...}}"
+                )
+                results["app/components/ChatPanel.tsx"] = self._call_nim(
+                    self._messages(prompt), max_tokens=2000
+                )
+
+        else:
+            raise ValueError(
+                f"FrontendAgent: unsupported stack {stack!r}. "
+                f"Expected one of: fastapi-react, nextjs-postgres, flutter-fastapi, expo-node."
+            )
 
         return results
+
 
 
 class BackendAgent(SpecializedAgent):
     role = "backend"
     _system_prompt = (
-        "You are a senior backend engineer. Output ONLY valid Python or JavaScript source code.\n"
+        "You are a senior backend engineer. Output ONLY valid Python or JavaScript source code — no markdown fences.\n"
         "Write complete, working implementations — never placeholder functions or TODO stubs.\n"
         "Follow REST conventions. Include proper error handling and input validation."
     )
 
-    def run(self, ctx: Dict[str, Any], project_dir: Optional[Path] = None) -> Dict[str, str]:
+    def run(self, ctx: Dict[str, Any]) -> Dict[str, str]:
         stack = ctx["stack"]
         arch = ctx.get("ARCHITECTURE.md", "")[:2000]
         results: Dict[str, str] = {}
+        mods = ctx.get("_module_map") or {}
+        mods_hint = (
+            f"Modules already generated (import these by name if needed): "
+            f"{', '.join(sorted(mods.keys()))}\n\n"
+            if mods else ""
+        )
 
         if stack in ("fastapi-react", "flutter-fastapi"):
             prompt = (
                 f"Project: {ctx['project_name']}\nDescription: {ctx['description']}\n"
                 f"Architecture:\n{arch}\n\n"
+                f"{mods_hint}"
                 "Write backend/nim_service.py — a Python module that wraps NVIDIA NIM API calls. "
                 "It should have a function: async def generate_code(prompt: str, api_key: str, model: str = 'z-ai/glm-5.2') -> str "
                 "that calls https://integrate.api.nvidia.com/v1/chat/completions using the openai Python package "
                 "with OpenAI(base_url='https://integrate.api.nvidia.com/v1', api_key=api_key). "
                 "Return the assistant message content as a string. Include proper error handling."
             )
-            t1 = (project_dir / "backend/nim_service.py") if project_dir else None
-            results["backend/nim_service.py"] = self._call_nim(self._messages(prompt), max_tokens=3000, target_file=t1)
+            results["backend/nim_service.py"] = self._call_nim(self._messages(prompt), max_tokens=3000)
 
             prompt2 = (
                 f"Project: {ctx['project_name']}\n\n"
                 "Write backend/routers/generate.py — a FastAPI router at prefix /api/generate. "
                 "POST /api/generate/code accepts {{prompt: str, stack: str}} JSON body and auth header. "
-                "It calls nim_service.generate_code() and returns {{code: str, files: list}}. "
-                "Include streaming via StreamingResponse for large outputs. "
-                "Import: from backend.routers.auth import current_user, from backend.nim_service import generate_code"
+                "CRITICAL call signature: generate_code is defined as "
+                "async def generate_code(prompt: str, api_key: str, model: str = 'z-ai/glm-5.2') -> str "
+                "in backend/nim_service.py. Call it ONLY with those keyword args — never pass stack= or user=. "
+                "Read the API key from os.environ.get('NVIDIA_API_KEY') or os.environ.get('NIM_API_KEY'); "
+                "if missing, raise HTTPException(503, 'NIM API key not configured'). "
+                "Return {{code: str, files: list}} where code is the returned string and files is []. "
+                "Include a non-streaming path only (skip StreamingResponse unless you implement a real async generator). "
+                "Import: from backend.routers.auth import current_user, from backend.nim_service import generate_code, import os"
             )
-            t2 = (project_dir / "backend/routers/generate.py") if project_dir else None
-            results["backend/routers/generate.py"] = self._call_nim(self._messages(prompt2), max_tokens=3000, target_file=t2)
+            results["backend/routers/generate.py"] = self._call_nim(self._messages(prompt2), max_tokens=3000)
 
         elif stack == "nextjs-postgres":
             prompt = (
@@ -10932,8 +11546,7 @@ class BackendAgent(SpecializedAgent):
                 "(https://integrate.api.nvidia.com/v1/chat/completions) using fetch with streaming. "
                 "Return a ReadableStream of text chunks. Use process.env.NIM_API_KEY."
             )
-            t = (project_dir / "app/api/generate/route.ts") if project_dir else None
-            results["app/api/generate/route.ts"] = self._call_nim(self._messages(prompt), max_tokens=3000, target_file=t)
+            results["app/api/generate/route.ts"] = self._call_nim(self._messages(prompt), max_tokens=3000)
 
         elif stack == "expo-node":
             prompt = (
@@ -10942,8 +11555,20 @@ class BackendAgent(SpecializedAgent):
                 "POST /api/generate/code accepts {{prompt, stack}} and calls NVIDIA NIM using node-fetch. "
                 "Auth middleware: require Bearer JWT. Return {{code: string}}."
             )
-            t = (project_dir / "server/routes/generate.js") if project_dir else None
-            results["server/routes/generate.js"] = self._call_nim(self._messages(prompt), max_tokens=3000, target_file=t)
+            results["server/routes/generate.js"] = self._call_nim(self._messages(prompt), max_tokens=3000)
+
+        else:
+            raise ValueError(
+                f"BackendAgent: unsupported stack {stack!r}. "
+                f"Expected one of: fastapi-react, nextjs-postgres, flutter-fastapi, expo-node."
+            )
+
+        # Dynamic Metadata Contract — single source is STACK_SURFACE so
+        # Frontend/Tester/DevOps cannot drift from what this agent + scaffold expose.
+        surface = stack_surface(stack)
+        results["_endpoints"] = surface.get("endpoints") or ""
+        results["_domain"] = ",".join(surface.get("domain") or [])
+        results["_frontend_entities"] = ",".join(surface.get("frontend_entities") or [])
 
         return results
 
@@ -10951,11 +11576,11 @@ class BackendAgent(SpecializedAgent):
 class DatabaseAgent(SpecializedAgent):
     role = "database"
     _system_prompt = (
-        "You are a senior database engineer. Output ONLY valid Python or SQL source code.\n"
+        "You are a senior database engineer. Output ONLY valid Python or SQL source code — no markdown fences.\n"
         "Write complete SQLAlchemy models or Prisma schemas. No placeholder fields."
     )
 
-    def run(self, ctx: Dict[str, Any], project_dir: Optional[Path] = None) -> Dict[str, str]:
+    def run(self, ctx: Dict[str, Any]) -> Dict[str, str]:
         stack = ctx["stack"]
         arch = ctx.get("ARCHITECTURE.md", "")[:2000]
         results: Dict[str, str] = {}
@@ -10969,8 +11594,7 @@ class DatabaseAgent(SpecializedAgent):
                 "Project model (id UUID pk, owner_id FK→users, name, description, status, stack, created_at, updated_at). "
                 "Use proper types: String, DateTime, ForeignKey. Add __repr__ methods."
             )
-            t1 = (project_dir / "backend/models.py") if project_dir else None
-            results["backend/models.py"] = self._call_nim(self._messages(prompt), max_tokens=3000, target_file=t1)
+            results["backend/models.py"] = self._call_nim(self._messages(prompt), max_tokens=3000)
 
             prompt2 = (
                 "Write backend/database.py — SQLAlchemy 2.x database setup. "
@@ -10978,8 +11602,42 @@ class DatabaseAgent(SpecializedAgent):
                 "Include: engine, SessionLocal = sessionmaker(...), get_db() FastAPI dependency, init_db() that calls Base.metadata.create_all. "
                 "Import Base from backend.models."
             )
-            t2 = (project_dir / "backend/database.py") if project_dir else None
-            results["backend/database.py"] = self._call_nim(self._messages(prompt2), max_tokens=2000, target_file=t2)
+            results["backend/database.py"] = self._call_nim(self._messages(prompt2), max_tokens=2000)
+
+        elif stack == "nextjs-postgres":
+            prompt = (
+                f"Project: {ctx['project_name']}\nDescription: {ctx['description']}\n"
+                f"Architecture:\n{arch}\n\n"
+                "Write prisma/schema.prisma — a Prisma schema for PostgreSQL. "
+                "Include: generator client { provider = \"prisma-client-js\" }, "
+                "datasource db { provider = \"postgresql\", url = env(\"DATABASE_URL\") }, "
+                "model User (id String @id @default(uuid()), email String @unique, passwordHash String, "
+                "createdAt DateTime @default(now())), "
+                "model Project (id String @id @default(uuid()), ownerId String, owner User @relation(fields: [ownerId], references: [id]), "
+                "name String, description String, status String, stack String, "
+                "createdAt DateTime @default(now()), updatedAt DateTime @updatedAt). "
+                "No placeholder fields."
+            )
+            results["prisma/schema.prisma"] = self._call_nim(self._messages(prompt), max_tokens=2000)
+
+        elif stack == "expo-node":
+            prompt = (
+                f"Project: {ctx['project_name']}\nDescription: {ctx['description']}\n\n"
+                "Write server/db.js — a Node.js module setting up a local SQLite database via better-sqlite3. "
+                "Export: const db = new Database(process.env.DB_PATH || './app.db'); "
+                "and a function initDb() that runs CREATE TABLE IF NOT EXISTS for a users table "
+                "(id TEXT PRIMARY KEY, email TEXT UNIQUE, password_hash TEXT, created_at TEXT) "
+                "and a projects table (id TEXT PRIMARY KEY, owner_id TEXT, name TEXT, description TEXT, "
+                "status TEXT, stack TEXT, created_at TEXT, updated_at TEXT). "
+                "Export: module.exports = { db, initDb };"
+            )
+            results["server/db.js"] = self._call_nim(self._messages(prompt), max_tokens=2000)
+
+        else:
+            raise ValueError(
+                f"DatabaseAgent: unsupported stack {stack!r}. "
+                f"Expected one of: fastapi-react, nextjs-postgres, flutter-fastapi, expo-node."
+            )
 
         return results
 
@@ -10987,31 +11645,44 @@ class DatabaseAgent(SpecializedAgent):
 class TesterAgent(SpecializedAgent):
     role = "tester"
     _system_prompt = (
-        "You are a QA engineer. Output ONLY valid Python pytest test code.\n"
+        "You are a QA engineer. Output ONLY valid Python pytest test code — no markdown fences.\n"
         "Write real tests with meaningful assertions — never trivial assert True.\n"
         "Use httpx.TestClient or fastapi.testclient.TestClient for API tests."
     )
 
-    def run(self, ctx: Dict[str, Any], project_dir: Optional[Path] = None) -> Dict[str, str]:
+    def run(self, ctx: Dict[str, Any]) -> Dict[str, str]:
         stack = ctx["stack"]
         results: Dict[str, str] = {}
 
         if stack in ("fastapi-react", "flutter-fastapi"):
+            # Dynamic Metadata Contract: only test endpoints BackendAgent (and
+            # the stack scaffold) actually declared. Never assume /api/projects/
+            # exists — flutter-fastapi scaffold has auth+health only.
+            endpoints = (
+                ctx.get("_endpoints")
+                or stack_surface(stack).get("endpoints")
+                or "GET /api/health, POST /api/auth/register, POST /api/auth/login"
+            )
             prompt = (
                 f"Project: {ctx['project_name']}\n\n"
                 "Write tests/test_api.py — pytest integration tests for the FastAPI backend.\n"
-                "Include:\n"
+                f"AVAILABLE ENDPOINTS (authoritative — from the backend surface contract):\n{endpoints}\n\n"
+                "ONLY write tests for these specific endpoints. "
+                "Do NOT assume any other endpoints (like /api/projects/) exist "
+                "unless they appear in the list above.\n"
+                "Include at least:\n"
                 "1. test_health() — GET /api/health returns 200 with status=ok\n"
                 "2. test_register() — POST /api/auth/register with email/password returns token\n"
                 "3. test_login() — POST /api/auth/login with correct credentials returns token\n"
                 "4. test_login_wrong_password() — returns 401\n"
+                "If and only if /api/projects is listed above, also include:\n"
                 "5. test_create_project() — POST /api/projects/ with auth header creates project\n"
-                "6. test_list_projects() — GET /api/projects/ returns list\n\n"
+                "6. test_list_projects() — GET /api/projects/ returns list\n"
+                "Skip generate/code tests that require a live NIM API key (use pytest.mark.skip).\n\n"
                 "Use: from fastapi.testclient import TestClient; from backend.main import app\n"
                 "client = TestClient(app)"
             )
-            t1 = (project_dir / "tests/test_api.py") if project_dir else None
-            results["tests/test_api.py"] = self._call_nim(self._messages(prompt), max_tokens=4000, target_file=t1)
+            results["tests/test_api.py"] = self._call_nim(self._messages(prompt), max_tokens=4000)
 
             results["tests/__init__.py"] = ""
             results["tests/conftest.py"] = (
@@ -11025,14 +11696,49 @@ class TesterAgent(SpecializedAgent):
             )
 
         elif stack == "nextjs-postgres":
+            endpoints = (
+                ctx.get("_endpoints")
+                or stack_surface(stack).get("endpoints")
+                or "POST /api/generate"
+            )
             prompt = (
                 f"Project: {ctx['project_name']}\n\n"
                 "Write tests/api.test.ts — Jest tests for Next.js API routes using node-fetch.\n"
-                "Test: health endpoint, register, login, create project endpoints.\n"
+                f"AVAILABLE ENDPOINTS (authoritative):\n{endpoints}\n\n"
+                "ONLY write tests for endpoints listed above. Do NOT assume register/login/projects "
+                "routes exist unless listed.\n"
                 "Use: const BASE = 'http://localhost:3000'"
             )
-            t = (project_dir / "tests/api.test.ts") if project_dir else None
-            results["tests/api.test.ts"] = self._call_nim(self._messages(prompt), max_tokens=3000, target_file=t)
+            results["tests/api.test.ts"] = self._call_nim(self._messages(prompt), max_tokens=3000)
+
+        elif stack == "expo-node":
+            # No agent in this pipeline writes a standalone server/app.js
+            # entrypoint for expo-node (only server/routes/*.js routers) — so
+            # unlike the other stacks, the test file must build its own
+            # minimal Express app inline and mount the generated router,
+            # rather than importing an entrypoint module that doesn't exist.
+            prompt = (
+                f"Project: {ctx['project_name']}\n\n"
+                "Write server/tests/api.test.js — Jest + supertest integration tests for the Express backend.\n"
+                "IMPORTANT: there is no server/app.js entrypoint in this project. Build the test app inline:\n"
+                "  const express = require('express');\n"
+                "  const app = express();\n"
+                "  app.use(express.json());\n"
+                "  app.get('/api/health', (req, res) => res.json({ status: 'ok' }));\n"
+                "  // mount any other generated routers under server/routes/ here if present\n"
+                "Include:\n"
+                "1. test for GET /api/health returns 200 with status='ok'\n"
+                "2. a second test exercising one route from server/routes/generate.js if it can be "
+                "required without a live NIM API key, otherwise skip it with test.skip and a comment why\n\n"
+                "Use: const request = require('supertest');"
+            )
+            results["server/tests/api.test.js"] = self._call_nim(self._messages(prompt), max_tokens=3000)
+
+        else:
+            raise ValueError(
+                f"TesterAgent: unsupported stack {stack!r}. "
+                f"Expected one of: fastapi-react, nextjs-postgres, flutter-fastapi, expo-node."
+            )
 
         return results
 
@@ -11044,7 +11750,7 @@ class DevOpsAgent(SpecializedAgent):
         "Never output markdown fences or explanations in your files."
     )
 
-    def run(self, ctx: Dict[str, Any], project_dir: Optional[Path] = None) -> Dict[str, str]:
+    def run(self, ctx: Dict[str, Any]) -> Dict[str, str]:
         results: Dict[str, str] = {}
 
         # GitHub Actions CI
@@ -11057,25 +11763,81 @@ class DevOpsAgent(SpecializedAgent):
             "4. Runs tests (pytest for Python, npm test for Node)\n"
             "Use ubuntu-latest runner."
         )
-        t1 = (project_dir / ".github/workflows/ci.yml") if project_dir else None
-        results[".github/workflows/ci.yml"] = self._call_nim(self._messages(prompt), max_tokens=2000, target_file=t1)
+        results[".github/workflows/ci.yml"] = self._call_nim(self._messages(prompt), max_tokens=2000)
 
-        # VERIFICATION.md
+        # VERIFICATION.md — grounded in actual test output, not asserted.
+        # DevOpsAgent runs before tests exist on the very first pass (no
+        # test_output in ctx yet), so this has to degrade honestly instead
+        # of assuming success either way.
+        test_output = ctx.get("test_output")  # TestRunResult | None, set by orchestrator after repair pass
+        if test_output is None:
+            test_section = "Tests have not been executed yet for this generation."
+        elif not test_output.ran:
+            test_section = f"Test runner did not run (no test files or unsupported stack).\n{test_output.output[:1500]}"
+        else:
+            test_section = (
+                f"Test run {'PASSED' if test_output.passed else 'FAILED'}.\n"
+                f"Raw output:\n{test_output.output[:3000]}"
+            )
+        # Criteria come from the shared surface contract — never invent
+        # "projects CRUD" (or any other domain) that this stack does not expose.
+        endpoints = ctx.get("_endpoints") or stack_surface(ctx["stack"]).get("endpoints") or ""
+        domain_raw = ctx.get("_domain")
+        if domain_raw is None:
+            domain_list = list(stack_surface(ctx["stack"]).get("domain") or [])
+        elif isinstance(domain_raw, str):
+            domain_list = [d.strip() for d in domain_raw.split(",") if d.strip()]
+        else:
+            domain_list = list(domain_raw)
+
+        criteria = ["Docker builds", "CI passes", "preview loads"]
+        if "health" in domain_list:
+            criteria.insert(0, "health endpoint works")
+        if "auth" in domain_list:
+            criteria.insert(0, "auth works (register/login)")
+        if "projects" in domain_list:
+            criteria.insert(0, "projects CRUD works")
+        if "generate" in domain_list:
+            criteria.insert(0, "generate/code path exists")
+
+        criteria_line = ", ".join(criteria)
         prompt2 = (
             f"Project: {ctx['project_name']}\nStack: {ctx['stack']}\n"
             f"Description: {ctx['description']}\n\n"
-            "Write VERIFICATION.md — a checklist document that verifies all acceptance criteria are met.\n"
+            f"Declared API surface (authoritative):\n{endpoints}\n"
+            f"Declared domain capabilities: {', '.join(domain_list) or '(none)'}\n\n"
+            f"Actual test results:\n{test_section}\n\n"
+            "Write VERIFICATION.md — a checklist verifying acceptance criteria.\n"
             "Format each item as: | Criterion | Test | Status |\n"
-            "Include checks for: auth works, projects CRUD works, Docker builds, CI passes, preview loads.\n"
-            "Mark all as: ✅ Implemented"
+            f"Include checks ONLY for: {criteria_line}.\n"
+            "Do NOT add criteria for resources absent from the declared domain "
+            "(e.g. do not require projects CRUD unless 'projects' is listed above).\n"
+            "Mark a criterion ✅ Pass ONLY if the actual test results above confirm it. "
+            "If tests did not run, or failed, or don't cover a criterion, mark it "
+            "⚠️ Unverified or ❌ Fail as appropriate — do not mark anything Pass on the "
+            "assumption that it probably works."
         )
-        t2 = (project_dir / "VERIFICATION.md") if project_dir else None
-        results["VERIFICATION.md"] = self._call_nim(self._messages(prompt2), max_tokens=2000, target_file=t2)
+        results["VERIFICATION.md"] = self._call_nim(self._messages(prompt2), max_tokens=2000)
 
         return results
 
 
 # ── Section D: GenerationOrchestrator ────────────────────────────────────────
+
+@dataclass
+class TestRunResult:
+    """Outcome of actually invoking the test runner as a subprocess.
+
+    `ran` distinguishes "we invoked pytest/npm test and it told us
+    something" from "there was nothing to run" (no test files, no
+    runner for this stack, timeout) — the two must not collapse into
+    the same falsy state or a missing test suite silently reads as a
+    passing one.
+    """
+    ran: bool
+    passed: bool
+    output: str = ""
+
 
 @dataclass
 class GenerationResult:
@@ -11086,6 +11848,8 @@ class GenerationResult:
     files_generated: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
     stack: str = "fastapi-react"
+    test_output: Optional[TestRunResult] = None
+    repair_rounds: int = 0
 
 
 class GenerationOrchestrator:
@@ -11095,9 +11859,14 @@ class GenerationOrchestrator:
         PlannerAgent,
         ArchitectAgent,
         DesignerAgent,
-        FrontendAgent,
-        BackendAgent,
+        # Database before Backend so models/modules exist before any
+        # backend code imports them — cuts the bulk of cross-file
+        # ModuleNotFoundError repair loops observed live.
         DatabaseAgent,
+        BackendAgent,
+        # Frontend after Backend so a frontend NIM exhaustion cannot
+        # block API/data generation; isolated retry runs later if needed.
+        FrontendAgent,
         TesterAgent,
         DevOpsAgent,
     ]
@@ -11105,6 +11874,283 @@ class GenerationOrchestrator:
     def __init__(self, pool: "ProviderPool", config: Dict[str, Any]) -> None:
         self.pool = pool
         self.config = config
+
+    def _run_tests(self, project_dir: Path, stack: str) -> TestRunResult:
+        """Actually invoke the test runner. This is the piece that was
+        missing entirely — TesterAgent previously only wrote a file to
+        disk; nothing executed it. `ran=False` means we have no verdict
+        (no runner for this stack, no test files, or the process itself
+        failed to start/timed out) — callers must not treat that as pass.
+        """
+        if stack in ("fastapi-react", "flutter-fastapi"):
+            if not (project_dir / "tests").exists():
+                return TestRunResult(ran=False, passed=False, output="No tests/ directory found.")
+            runner = shutil.which("pytest") or (shutil.which("python") and "python")
+            cmd = (
+                [runner, "-m", "pytest", "tests/", "-x", "--tb=short", "-q"]
+                if runner == "python"
+                else [runner, "tests/", "-x", "--tb=short", "-q"]
+            )
+        elif stack in ("nextjs-postgres", "expo-node"):
+            if not (project_dir / "package.json").exists():
+                return TestRunResult(ran=False, passed=False, output="No package.json found.")
+            npm = shutil.which("npm")
+            if not npm:
+                return TestRunResult(ran=False, passed=False, output="npm not found on PATH.")
+            cmd = [npm, "test", "--", "--ci"]
+        else:
+            return TestRunResult(ran=False, passed=False, output=f"No test runner defined for stack={stack!r}.")
+
+        try:
+            wrapped = None
+            if RunTool._docker_available():
+                wrapped = RunTool._wrap_argv_for_docker(cmd, project_dir, project_dir)
+            proc = subprocess.run(
+                wrapped if wrapped is not None else cmd,
+                cwd=str(project_dir) if wrapped is None else str(project_dir),
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            output = (proc.stdout or "") + (proc.stderr or "")
+            return TestRunResult(ran=True, passed=proc.returncode == 0, output=output[-6000:])
+        except FileNotFoundError as e:
+            return TestRunResult(ran=False, passed=False, output=f"Test runner not found: {e}")
+        except subprocess.TimeoutExpired:
+            return TestRunResult(ran=False, passed=False, output="Test run timed out after 120s.")
+        except Exception as e:
+            return TestRunResult(ran=False, passed=False, output=f"Test run failed to execute: {e}")
+
+    def _repair_pass(
+        self,
+        ctx: Dict[str, Any],
+        project_dir: Path,
+        result: GenerationResult,
+        on_progress: Optional[Any],
+        max_rounds: int = 3,
+        seed_failure_output: Optional[str] = None,
+    ) -> TestRunResult:
+        """Run tests; on failure, ask the model for targeted file fixes and
+        retry, up to max_rounds. Returns the final TestRunResult (which may
+        still be failing or unrun after exhausting rounds — that's a real
+        outcome, not swallowed into success).
+
+        seed_failure_output, when given, is treated as an opening-round
+        failure even before any test executes — used to fold static
+        cross-file consistency problems into the same repair mechanism
+        instead of needing a separate one.
+        """
+        def _prog(phase: str, msg: str) -> None:
+            if on_progress:
+                on_progress(phase, msg)
+            else:
+                UI.info(f"[{phase}] {msg}")
+
+        repair_agent = SpecializedAgent(self.pool, self.config)
+        repair_agent.role = "repair"
+        repair_agent._system_prompt = (
+            "You are a senior engineer fixing failing tests and cross-file import "
+            "errors. Given failing test/consistency output and current file "
+            "contents, return ONLY a JSON object mapping relative file paths to "
+            "their full corrected content. No markdown fences, no explanation, "
+            "no partial diffs — full file content for every file you change.\n"
+            "When the failure is ModuleNotFoundError or 'imports X but no generated "
+            "file provides that module': CREATE the missing module file (with a "
+            "minimal correct implementation) rather than only editing the importer. "
+            "Prefer adding backend/__init__.py / backend/routers/__init__.py package "
+            "markers when packages are incomplete. Do not invent REST routes that "
+            "are absent from the project's declared API surface.\n"
+            'Example: {"backend/database.py": "<full file>", "backend/__init__.py": ""}'
+        )
+
+        if seed_failure_output:
+            test_result = TestRunResult(ran=True, passed=False, output=seed_failure_output)
+        else:
+            test_result = self._run_tests(project_dir, ctx["stack"])
+            if not test_result.ran:
+                _prog("test", f"⚠ tests did not run: {test_result.output[:200]}")
+                return test_result
+            if test_result.passed:
+                _prog("test", "✓ tests passed on first run")
+                return test_result
+
+        for round_n in range(1, max_rounds + 1):
+            _prog("repair", f"round {round_n}/{max_rounds}: tests failing, requesting fix…")
+
+            # Only the files this orchestrator actually generated are fair
+            # game to patch, and we send real current content — not the
+            # truncated docs the generation agents got — since a repair
+            # needs the actual broken code, not a summary of it.
+            candidate_paths = [
+                p for p in result.files_generated
+                if p.endswith((".py", ".ts", ".tsx", ".js", ".dart"))
+            ]
+            file_blob = ""
+            for rel_path in candidate_paths[:12]:
+                fp = project_dir / rel_path
+                if fp.exists():
+                    file_blob += f"\n--- {rel_path} ---\n{fp.read_text(encoding='utf-8', errors='replace')[:3000]}\n"
+
+            module_map = ctx.get("_module_map") or {}
+            modules_line = ", ".join(sorted(module_map.keys())) if module_map else "(none yet)"
+            prompt = (
+                f"Stack: {ctx['stack']}\n\n"
+                f"Modules already on disk (importable names → paths): {modules_line}\n\n"
+                f"Failing test / consistency output:\n{test_result.output[:4000]}\n\n"
+                f"Current file contents:\n{file_blob[:12000]}\n\n"
+                "Return corrected file contents as a JSON object: "
+                '{"path/to/file": "full corrected content", ...}. '
+                "Only include files that actually need to change. "
+                "If a module is imported but missing from the map above, add that file."
+            )
+
+            try:
+                raw = repair_agent._call_nim(repair_agent._messages(prompt), max_tokens=8000)
+                fixes = json.loads(raw)
+            except (json.JSONDecodeError, RuntimeError) as e:
+                result.errors.append(f"repair round {round_n}: could not parse/obtain fix — {e}")
+                _prog("repair", f"✗ round {round_n}: {e}")
+                continue
+
+            if not isinstance(fixes, dict) or not fixes:
+                result.errors.append(f"repair round {round_n}: model returned no usable fixes")
+                continue
+
+            for rel_path, content in fixes.items():
+                if not isinstance(content, str) or not content.strip():
+                    continue
+                # Same containment discipline as the rest of the pipeline —
+                # a repair fix is still model-controlled path input.
+                safe_rel = rel_path.strip().lstrip("/\\")
+                dest = (project_dir / safe_rel).resolve()
+                try:
+                    dest.relative_to(project_dir.resolve())
+                except ValueError:
+                    result.errors.append(f"repair round {round_n}: rejected out-of-tree path {rel_path!r}")
+                    continue
+                # Repair writes bypass WriteTool, so apply the same fence-strip
+                # and (for .py) AST gate the normal write path enforces —
+                # otherwise a fenced or syntactically invalid "fix" lands on
+                # disk and the next pytest round fails for a reason the
+                # repair loop itself just introduced.
+                content = WriteTool._strip_balanced_code_fence(content, safe_rel)
+                if safe_rel.endswith((".py", ".pyi")):
+                    try:
+                        ast.parse(content)
+                    except SyntaxError as e:
+                        result.errors.append(
+                            f"repair round {round_n}: refused invalid Python for "
+                            f"{safe_rel!r} — {e.msg} (line {e.lineno})"
+                        )
+                        continue
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(content, encoding="utf-8")
+                ctx[safe_rel] = content
+                if safe_rel not in result.files_generated:
+                    result.files_generated.append(safe_rel)
+
+            test_result = self._run_tests(project_dir, ctx["stack"])
+            if not test_result.ran:
+                # No test runner/files for this stack after the repair
+                # write — nothing more the repair loop can validate
+                # against. Stop here rather than burning remaining rounds
+                # re-requesting fixes with no way to confirm they helped.
+                _prog("repair", f"⚠ round {round_n}: tests still don't run — {test_result.output[:150]}")
+                return test_result
+            if test_result.passed:
+                _prog("repair", f"✓ tests passed after round {round_n}")
+                result.repair_rounds = round_n
+                return test_result
+
+        result.repair_rounds = max_rounds
+        _prog("repair", f"✗ tests still failing after {max_rounds} repair round(s)")
+        return test_result
+
+    def _check_python_import_consistency(
+        self, project_dir: Path, generated_paths: List[str]
+    ) -> List[str]:
+        """Static cross-file check for the specific failure mode described
+        in the review: BackendAgent and DatabaseAgent (and others) each
+        write Python files in separate, independent LLM calls, seeing only
+        truncated ARCHITECTURE.md text — not each other's actual code — so
+        an import like `from backend.database import Base` can reference a
+        module DatabaseAgent never actually created, or named differently.
+
+        This does NOT execute anything — it's ast.parse plus a name-exists
+        check against the project's own generated Python files, so it also
+        catches problems a test suite might never exercise (an import at
+        module load time that isn't covered by any generated test). Returns
+        a list of human-readable problem descriptions; empty means clean.
+        """
+        py_files = [p for p in generated_paths if p.endswith(".py")]
+        if not py_files:
+            return []
+
+        # Map "backend.database" -> "backend/database.py" (and package
+        # __init__ forms) so we can check `from backend.database import X`
+        # style imports against what was actually written to disk.
+        module_map: Dict[str, str] = {}
+        for rel_path in py_files:
+            mod = rel_path[:-3].replace("/", ".").replace("\\", ".")
+            module_map[mod] = rel_path
+            if mod.endswith(".__init__"):
+                module_map[mod[: -len(".__init__")]] = rel_path
+
+        problems: List[str] = []
+        for rel_path in py_files:
+            fp = project_dir / rel_path
+            if not fp.exists():
+                continue
+            try:
+                source = fp.read_text(encoding="utf-8", errors="replace")
+                tree = ast.parse(source, filename=rel_path)
+            except SyntaxError as e:
+                problems.append(f"{rel_path}: syntax error — {e.msg} (line {e.lineno})")
+                continue
+
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom):
+                    if node.level and node.level > 0:
+                        continue  # relative import — out of scope for this pass
+                    if not node.module or not node.module.startswith(
+                        tuple(m.split(".")[0] for m in module_map) or ("__nomatch__",)
+                    ):
+                        continue  # third-party import (fastapi, sqlalchemy, ...) — not ours to check
+                    if node.module in module_map:
+                        continue
+                    # No escape clause here on purpose. An earlier version
+                    # tried to excuse an import when its *ancestor* package
+                    # was generated (e.g. "backend.database" excused by the
+                    # presence of "backend" itself from backend/__init__.py)
+                    # — but a package's own __init__.py existing says
+                    # nothing about whether a specific submodule under it
+                    # was ever written. Verified via harness: that escape
+                    # let `from backend.database import Base` pass clean
+                    # even though backend/database.py was never generated —
+                    # exactly the failure this check exists to catch. The
+                    # only real escape is an exact match in module_map
+                    # (handled by the `if node.module in module_map` check
+                    # above); anything else sharing our top-level package
+                    # name but without its own generated file is reported.
+                    problems.append(
+                        f"{rel_path}: imports '{node.module}' but no generated file "
+                        f"provides that module (generated: {sorted(module_map)})"
+                    )
+                elif isinstance(node, ast.Import):
+                    for alias in node.names:
+                        top = alias.name.split(".")[0]
+                        if any(m.split(".")[0] == top for m in module_map) and alias.name not in module_map:
+                            # Same fix as the ImportFrom branch above: no
+                            # ancestor-package escape — module_map already
+                            # contains an exact-match check (`alias.name
+                            # not in module_map`); a shared top-level
+                            # package name without its own generated file
+                            # is reported, not excused.
+                            problems.append(
+                                f"{rel_path}: imports '{alias.name}' but no generated file "
+                                f"provides that module"
+                            )
+        return problems
 
     def generate(
         self,
@@ -11130,12 +12176,19 @@ class GenerationOrchestrator:
         project_name = project_dir.name
         project_name_slug = re.sub(r"[^a-z0-9-]", "-", project_name.lower()).strip("-") or "my-app"
 
+        surface = stack_surface(stack)
         ctx: Dict[str, Any] = {
             "project_name": project_name,
             "project_name_slug": project_name_slug,
             "description": description,
             "stack": stack,
             "year": datetime.now().year,
+            # Seed the cross-agent contract BEFORE any agent runs so agents that
+            # execute before BackendAgent (FrontendAgent, DesignerAgent) still
+            # see a consistent surface. BackendAgent may refine these later.
+            "_endpoints": surface.get("endpoints") or "",
+            "_domain": list(surface.get("domain") or []),
+            "_frontend_entities": list(surface.get("frontend_entities") or []),
         }
 
         result = GenerationResult(success=False, project_dir=project_dir, stack=stack)
@@ -11150,29 +12203,189 @@ class GenerationOrchestrator:
             result.errors.append(f"Scaffold failed: {e}")
             _prog("scaffold", f"✗ Scaffold error: {e}")
 
-        # Phase 2: Run agents
-        agents = [cls(self.pool, self.config) for cls in self.AGENTS]
-        for agent in agents:
+        # Phase 2: Run agents (Planner..Tester), then repair, then DevOps —
+        # DevOpsAgent is pulled out of the fixed sequence so its
+        # VERIFICATION.md prompt can see the real test_output in ctx
+        # instead of running blind before any test has been executed.
+        pre_devops = [cls for cls in self.AGENTS if cls is not DevOpsAgent]
+        agents = [cls(self.pool, self.config) for cls in pre_devops]
+        ctx.setdefault("_module_map", {})
+        ui_deferred: List["SpecializedAgent"] = []
+        soft_errors: List[str] = []
+
+        def _ingest_agent_files(agent: "SpecializedAgent", files: Dict[str, str]) -> int:
+            written = 0
+            for rel_path, content in files.items():
+                if not content.strip() and not str(rel_path).startswith("_"):
+                    continue
+                if str(rel_path).startswith("_"):
+                    if rel_path in ("_domain", "_frontend_entities") and isinstance(content, str):
+                        ctx[rel_path] = [p.strip() for p in content.split(",") if p.strip()]
+                    else:
+                        ctx[rel_path] = content
+                    continue
+                content = WriteTool._strip_balanced_code_fence(content, rel_path)
+                if rel_path.endswith((".py", ".pyi")):
+                    try:
+                        ast.parse(content)
+                    except SyntaxError as e:
+                        result.errors.append(
+                            f"{agent.role}: refused invalid Python for "
+                            f"{rel_path!r} — {e.msg} (line {e.lineno})"
+                        )
+                        _prog(agent.role, f"✗ refused {rel_path}: SyntaxError line {e.lineno}")
+                        continue
+                dest = project_dir / rel_path
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(content, encoding="utf-8")
+                result.files_generated.append(rel_path)
+                ctx[rel_path] = content
+                if rel_path.endswith(".py"):
+                    mod = rel_path[:-3].replace("/", ".").replace("\\", ".")
+                    ctx["_module_map"][mod] = rel_path
+                    if mod.endswith(".__init__"):
+                        ctx["_module_map"][mod[: -len(".__init__")]] = rel_path
+                written += 1
+            return written
+
+        def _run_one_agent(agent: "SpecializedAgent") -> bool:
+            """Returns True on success. UI-layer NIM exhaustion is soft-failed."""
             _prog(agent.role, f"Running {agent.role} agent…")
             try:
-                files = agent.run(ctx, project_dir=project_dir)
-                for rel_path, content in files.items():
-                    if not content.strip():
-                        continue
-                    dest = project_dir / rel_path
-                    if not dest.exists():
-                        dest.parent.mkdir(parents=True, exist_ok=True)
-                        dest.write_text(content, encoding="utf-8")
-                    result.files_generated.append(rel_path)
-                    # Feed artifact content back into ctx for downstream agents
-                    ctx[rel_path] = content
-                _prog(agent.role, f"✓ {agent.role}: {len(files)} file(s) generated")
+                files = agent.run(ctx)
+                written = _ingest_agent_files(agent, files)
+                _prog(agent.role, f"✓ {agent.role}: {written} file(s) generated")
+                return True
             except Exception as e:
                 err = f"{agent.role} failed: {e}"
+                err_l = str(e).lower()
+                is_ui_agent = agent.role in ("frontend", "designer")
+                is_nim_exhaust = (
+                    "all nim attempts exhausted" in err_l
+                    or "no nim provider available" in err_l
+                    or "429" in err_l
+                    or "rate" in err_l
+                )
+                if is_ui_agent and is_nim_exhaust:
+                    # Soft isolation: do not poison the cascade success bit;
+                    # schedule one deferred retry after API-critical agents.
+                    soft_errors.append(err)
+                    _prog(agent.role, f"⚠ {err} (soft — will retry once after backend path)")
+                    return False
                 result.errors.append(err)
                 _prog(agent.role, f"✗ {err}")
+                return False
 
-        result.success = len(result.errors) == 0 or len(result.files_generated) > 0
+        for agent in agents:
+            ok = _run_one_agent(agent)
+            if agent.role in ("frontend", "designer") and not ok:
+                ui_deferred.append(agent)
+
+        # Deferred UI retry — backend/db/tester already had their shot;
+        # a second attempt after the heavy API agents reduces the
+        # chance that a transient 429 during UI gen defines the whole run.
+        if ui_deferred:
+            _prog("ui", "Deferred UI retry after API agents…")
+            time.sleep(float(self.config.get("post_429_backoff", 25.0)))
+            for ui_agent in ui_deferred:
+                if _run_one_agent(ui_agent):
+                    # Not wiping soft_errors completely, just marking it successful in output
+                    pass
+                else:
+                    _prog(ui_agent.role, f"⚠ {ui_agent.role} still unavailable — continuing without UI polish")
+
+        if soft_errors:
+            # Record as warnings, not hard errors, so test-pass can still succeed.
+            for se in soft_errors:
+                if se not in result.errors:
+                    result.errors.append(f"[soft] {se}")
+
+        # Phase 2.5: static cross-file consistency check (ast-based) —
+        # catches import mismatches between independently-generated
+        # Python files (e.g. BackendAgent importing a module DatabaseAgent
+        # never wrote) before spending a test-run round-trip to discover
+        # the same thing, and catches ones a generated test might not
+        # exercise at all.
+        import_problems = self._check_python_import_consistency(project_dir, result.files_generated)
+        if import_problems:
+            _prog("consistency", f"✗ {len(import_problems)} cross-file import issue(s) found — folding into repair")
+            for p in import_problems:
+                result.errors.append(f"consistency: {p}")
+        else:
+            _prog("consistency", "✓ no cross-file import mismatches detected")
+
+        # Phase 3: run tests for real, repair on failure, cap at 3 rounds.
+        # This is the loop that was previously absent entirely — TesterAgent
+        # wrote tests/test_api.py and nothing ever executed it. If the
+        # static check above found import problems, seed them as the
+        # opening failure so round 1 fixes those even if the generated
+        # test suite wouldn't itself have caught them.
+        test_result = self._repair_pass(
+            ctx, project_dir, result, on_progress,
+            seed_failure_output=(
+                "Static import-consistency check found the following issues "
+                "(fix these first — a module referenced by import does not "
+                "exist among the generated files):\n" + "\n".join(import_problems)
+            ) if import_problems else None,
+        )
+        result.test_output = test_result
+        ctx["test_output"] = test_result
+
+        # Phase 4: DevOps now runs with real test_output available, so
+        # VERIFICATION.md reflects what actually happened.
+        devops = DevOpsAgent(self.pool, self.config)
+        _prog(devops.role, f"Running {devops.role} agent…")
+        try:
+            files = devops.run(ctx)
+            written = 0
+            for rel_path, content in files.items():
+                if not content.strip() and not str(rel_path).startswith("_"):
+                    continue
+                if str(rel_path).startswith("_"):
+                    ctx[rel_path] = content
+                    continue
+                content = WriteTool._strip_balanced_code_fence(content, rel_path)
+                if rel_path.endswith((".py", ".pyi")):
+                    try:
+                        ast.parse(content)
+                    except SyntaxError as e:
+                        result.errors.append(
+                            f"{devops.role}: refused invalid Python for "
+                            f"{rel_path!r} — {e.msg} (line {e.lineno})"
+                        )
+                        _prog(devops.role, f"✗ refused {rel_path}: SyntaxError line {e.lineno}")
+                        continue
+                dest = project_dir / rel_path
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(content, encoding="utf-8")
+                result.files_generated.append(rel_path)
+                ctx[rel_path] = content
+                written += 1
+            _prog(devops.role, f"✓ {devops.role}: {written} file(s) generated")
+        except Exception as e:
+            err = f"{devops.role} failed: {e}"
+            result.errors.append(err)
+            _prog(devops.role, f"✗ {err}")
+
+        # success now requires: no hard agent failures AND tests either
+        # passed or genuinely couldn't be run (missing runner is a
+        # separate, visible failure mode, not silently "successful").
+        # A test run that executed and failed is never success, regardless
+        # of how many files got written — this replaces the previous
+        # `len(errors) == 0 or len(files_generated) > 0`, which reported
+        # success on a single stray file with seven agents having thrown.
+        hard_errors = [e for e in result.errors if not str(e).startswith("[soft]")]
+        if not test_result.ran:
+            result.success = len(hard_errors) == 0
+            if test_result.ran is False:
+                _prog("verdict", f"⚠ success={result.success} but tests never ran — verify manually")
+        else:
+            # Soft frontend NIM exhaustion must not veto a green test run.
+            result.success = len(hard_errors) == 0 and test_result.passed
+
+        if soft_errors:
+            _prog("verdict", f"soft warnings: {len(soft_errors)} (frontend isolation)")
+
         return result
 
 
@@ -11228,26 +12441,59 @@ class LivePreviewManager:
             except RuntimeError:
                 return None
 
-            cmd = cls._server_cmd(stack, project_dir, port)
-            if not cmd:
-                return None
-
-            try:
-                env = {**os.environ, "PORT": str(port)}
-                proc = subprocess.Popen(
-                    cmd,
-                    cwd=str(project_dir),
-                    env=env,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                )
-                cls._servers[key] = proc
-                cls._ports[key] = port
-                return f"http://localhost:{port}"
-            except Exception as e:
-                UI.warn(f"Preview server failed to start: {e}")
-                return None
+            # _find_free_port proves a port is free by binding then
+            # immediately releasing it (it has to — the port needs to be
+            # free for the *subprocess* to bind, not held by us). That
+            # leaves a real gap between "port confirmed free" and "the
+            # child process has actually called bind()" — Popen() returning
+            # only means the OS has forked/exec'd the child, not that
+            # uvicorn/npm/node has finished importing and reached its own
+            # listen() call, which is easily hundreds of ms to a couple of
+            # seconds away. cls._lock serializes assignment across start()
+            # calls, but it's released right after Popen() returns — before
+            # that gap closes — so a second start() call for a *different*
+            # project, arriving in that window, can call _find_free_port
+            # again, see the same port as free, and be handed the same
+            # port. Retry with a fresh port if the child looks like it
+            # died immediately (the classic signature of "address already
+            # in use" for a CLI dev server that exits on bind failure
+            # rather than retrying itself).
+            port_attempts_left = 3
+            proc = None
+            while port_attempts_left > 0:
+                port_attempts_left -= 1
+                cmd = cls._server_cmd(stack, project_dir, port)
+                if not cmd:
+                    return None
+                try:
+                    env = {**os.environ, "PORT": str(port)}
+                    proc = subprocess.Popen(
+                        cmd,
+                        cwd=str(project_dir),
+                        env=env,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                    )
+                except Exception as e:
+                    UI.warn(f"Preview server failed to start: {e}")
+                    return None
+                time.sleep(0.3)
+                if proc.poll() is None:
+                    # Still alive after a brief settle — treat as bound.
+                    cls._servers[key] = proc
+                    cls._ports[key] = port
+                    return f"http://localhost:{port}"
+                # Died immediately — most likely lost the port race.
+                # Pick a new port (skipping the one that just failed) and
+                # retry, rather than silently returning a URL nothing is
+                # listening on.
+                try:
+                    port = _find_free_port(port + 1, 3999)
+                except RuntimeError:
+                    return None
+            UI.warn("Preview server exited immediately on every port attempt.")
+            return None
 
     @classmethod
     def stop(cls, project_dir: Path) -> None:
@@ -11286,6 +12532,212 @@ class LivePreviewManager:
                     pass
 
 atexit.register(LivePreviewManager.stop_all)
+
+
+# ── Section G-pre: DeployTool ─────────────────────────────────────────────────
+
+class DeployTool(Tool):
+    """Closes the "LivePreviewManager isn't deployment" gap: LivePreviewManager
+    only ever gives you localhost. This tool does the two cheapest REAL
+    deploy actions rather than another local process:
+
+    1. git_push_github — creates a GitHub repo via the REST API (api.github.com
+       is already an allowed egress domain in this environment) and pushes the
+       project's current commit to it. This is the "own your code" story
+       Emergent/Lovable market, and it's genuinely a few dozen lines, not a
+       platform integration.
+    2. cli_deploy — shells out to whichever of vercel/netlify/flyctl/railway
+       CLI is actually installed and authenticated on this machine, against
+       the real project directory. This does NOT vendor API clients for each
+       platform — it uses argv-only subprocess the same way RunTool does
+       (no shell) and requires the person to have already run that CLI's own
+       login flow; this tool never touches or stores a deploy credential.
+
+    Neither of these is optional-feeling scaffolding — both produce a real,
+    externally reachable artifact (a GitHub repo URL, or a live deployment
+    URL) rather than another localhost process.
+    """
+
+    name = "deploy"
+    description = (
+        "Deploy the project to a real, externally reachable target — a GitHub "
+        "repository (git_push_github) or a hosting provider via its official "
+        "CLI (cli_deploy: vercel/netlify/flyctl/railway, whichever is installed "
+        "and already authenticated on this machine). This is NOT the local "
+        "preview server — use generate_app's preview for local dev, use this "
+        "when the person wants something they can actually share a URL to."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["git_push_github", "cli_deploy"],
+            },
+            "repo_name": {
+                "type": "string",
+                "description": "For git_push_github: repository name to create under the authenticated account.",
+            },
+            "private": {
+                "type": "boolean",
+                "description": "For git_push_github: create as a private repo.",
+                "default": True,
+            },
+            "provider": {
+                "type": "string",
+                "enum": ["vercel", "netlify", "flyctl", "railway"],
+                "description": "For cli_deploy: which CLI to invoke. Must already be installed and logged in.",
+            },
+        },
+        "required": ["action"],
+    }
+
+    def __init__(self, cwd: Path, config: Dict[str, Any]) -> None:
+        super().__init__(cwd)
+        self._config = config
+
+    def _github_token(self) -> Optional[str]:
+        # Never accept a token as a tool-call argument — that would put a
+        # credential in model-visible conversation history/logs. Only read
+        # it from the environment, same trust boundary as any other secret
+        # this process already has access to.
+        return os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+
+    def _git_push_github(self, repo_name: Optional[str], private: bool) -> "ToolResult":
+        if not HAS_HTTPX:
+            return ToolResult("", error="httpx not available — cannot call GitHub API.", is_error=True)
+        token = self._github_token()
+        if not token:
+            return ToolResult(
+                "",
+                error=(
+                    "No GITHUB_TOKEN (or GH_TOKEN) found in the environment. Set one "
+                    "with 'repo' scope and re-run — this tool will not accept a token "
+                    "as a tool-call argument, only from the environment."
+                ),
+                is_error=True,
+            )
+        if not (self.cwd / ".git").exists():
+            init = subprocess.run(["git", "init"], cwd=str(self.cwd), capture_output=True, text=True)
+            if init.returncode != 0:
+                return ToolResult("", error=f"git init failed: {init.stderr}", is_error=True)
+
+        name = repo_name or self.cwd.name
+        name = re.sub(r"[^a-zA-Z0-9._-]", "-", name).strip("-") or "generated-app"
+
+        try:
+            resp = httpx.post(
+                "https://api.github.com/user/repos",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/vnd.github+json",
+                },
+                json={"name": name, "private": bool(private)},
+                timeout=20,
+            )
+        except Exception as e:
+            return ToolResult("", error=f"GitHub API request failed: {e}", is_error=True)
+
+        if resp.status_code == 422:
+            # Repo likely already exists under this account — fetch it
+            # rather than treating "already exists" as a hard failure.
+            try:
+                who = httpx.get(
+                    "https://api.github.com/user",
+                    headers={"Authorization": f"Bearer {token}"}, timeout=20,
+                ).json()
+                login = who.get("login")
+                get_resp = httpx.get(
+                    f"https://api.github.com/repos/{login}/{name}",
+                    headers={"Authorization": f"Bearer {token}"}, timeout=20,
+                )
+                if get_resp.status_code != 200:
+                    return ToolResult("", error=f"Repo create returned 422 and lookup failed: {get_resp.text[:300]}", is_error=True)
+                repo_data = get_resp.json()
+            except Exception as e:
+                return ToolResult("", error=f"Repo may already exist but lookup failed: {e}", is_error=True)
+        elif resp.status_code not in (200, 201):
+            return ToolResult("", error=f"GitHub repo creation failed ({resp.status_code}): {resp.text[:300]}", is_error=True)
+        else:
+            repo_data = resp.json()
+
+        clone_url = repo_data.get("clone_url", "")
+        html_url = repo_data.get("html_url", "")
+        # Embed the token in the push URL for this one push only — never
+        # written to .git/config, so it doesn't persist on disk after
+        # this call returns.
+        auth_url = clone_url.replace("https://", f"https://x-access-token:{token}@") if clone_url else None
+        if not auth_url:
+            return ToolResult("", error="GitHub API response missing clone_url.", is_error=True)
+
+        steps = [
+            ["git", "add", "-A"],
+            ["git", "commit", "-m", "Generated by NEON ARCHITECT", "--allow-empty"],
+            ["git", "branch", "-M", "main"],
+            ["git", "push", auth_url, "main", "--force"],
+        ]
+        for step in steps:
+            r = subprocess.run(step, cwd=str(self.cwd), capture_output=True, text=True, timeout=60)
+            if r.returncode != 0 and step[1] != "commit":
+                # commit can legitimately fail with "nothing to commit" —
+                # not fatal. Any other step failing is.
+                return ToolResult(
+                    "", error=f"'{' '.join(step[:2])}' failed: {r.stderr[:500]}", is_error=True
+                )
+
+        return ToolResult(f"Pushed to GitHub: {html_url}\nClone URL: {clone_url}")
+
+    def _cli_deploy(self, provider: Optional[str]) -> "ToolResult":
+        if not provider:
+            return ToolResult("", error="provider is required for cli_deploy.", is_error=True)
+        binaries = {
+            "vercel": (["vercel"], ["--prod", "--yes"]),
+            "netlify": (["netlify"], ["deploy", "--prod"]),
+            "flyctl": (["flyctl"], ["deploy"]),
+            "railway": (["railway"], ["up"]),
+        }
+        if provider not in binaries:
+            return ToolResult("", error=f"Unknown provider {provider!r}.", is_error=True)
+        names, argv_tail = binaries[provider]
+        resolved = None
+        for name in names:
+            resolved = shutil.which(name)
+            if resolved:
+                break
+        if not resolved:
+            return ToolResult(
+                "",
+                error=(
+                    f"'{provider}' CLI not found on PATH. Install and log in with "
+                    f"the provider's own CLI first — this tool deliberately does "
+                    f"not vendor an API client or store a deploy credential itself."
+                ),
+                is_error=True,
+            )
+        try:
+            r = subprocess.run(
+                [resolved, *argv_tail], cwd=str(self.cwd), shell=False,
+                capture_output=True, text=True, timeout=300,
+            )
+        except subprocess.TimeoutExpired:
+            return ToolResult("", error=f"{provider} deploy timed out after 300s.", is_error=True)
+        output = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0:
+            return ToolResult(output[-4000:], error=f"{provider} deploy exited {r.returncode}.", is_error=True)
+        return ToolResult(output[-4000:])
+
+    def execute(
+        self,
+        action: str = "",
+        repo_name: Optional[str] = None,
+        private: bool = True,
+        provider: Optional[str] = None,
+    ) -> "ToolResult":
+        if action == "git_push_github":
+            return self._git_push_github(repo_name, private)
+        elif action == "cli_deploy":
+            return self._cli_deploy(provider)
+        return ToolResult("", error=f"Unknown action {action!r}.", is_error=True)
 
 
 # ── Section G: generate_app Tool ─────────────────────────────────────────────
@@ -11341,10 +12793,51 @@ class GenerateAppTool(Tool):
         project_name: Optional[str] = None,
         start_preview: bool = True,
     ) -> "ToolResult":
-        chosen_stack = _detect_stack(spec) if stack == "auto" else stack
+        _KNOWN_STACKS = ("fastapi-react", "nextjs-postgres", "flutter-fastapi", "expo-node")
+        if stack == "auto":
+            chosen_stack = _detect_stack(spec)
+        elif stack in _KNOWN_STACKS:
+            chosen_stack = stack
+        else:
+            return ToolResult(
+                "",
+                error=(
+                    f"Unsupported stack {stack!r}. "
+                    f"Use one of: {', '.join(_KNOWN_STACKS)} or 'auto'."
+                ),
+                is_error=True,
+            )
         project_dir = self.cwd
         if project_name:
-            project_dir = self.cwd / project_name
+            # project_name is model-controlled tool-call input, same as any
+            # path argument to read/write/edit — but unlike those tools,
+            # this one built the path with a plain self.cwd / project_name
+            # join and no resolution check, so a value like
+            # "../../../../tmp/evil" resolved straight through to a
+            # directory outside the project sandbox, and everything this
+            # tool goes on to write (scaffold files, every agent's
+            # generated files) would land there instead of under cwd.
+            # Route it through the same _sanitize_rel_path +
+            # relative_to(cwd) check every other tool in this file already
+            # trusts, instead of trusting it as a bare path segment.
+            safe_name = self._sanitize_rel_path(project_name)
+            if not safe_name:
+                return ToolResult(
+                    f"Rejected project_name {project_name!r}: must be a plain "
+                    "folder name, not empty or a reserved word.",
+                    is_error=True,
+                )
+            candidate = (self.cwd / safe_name).resolve()
+            try:
+                candidate.relative_to(self.cwd.resolve())
+            except ValueError:
+                return ToolResult(
+                    f"Rejected project_name {project_name!r}: resolves outside "
+                    f"the project folder ({self.cwd}). Use a plain subfolder "
+                    "name, not a path with '..' segments.",
+                    is_error=True,
+                )
+            project_dir = candidate
             project_dir.mkdir(parents=True, exist_ok=True)
 
         progress_lines: List[str] = []

@@ -1,66 +1,9 @@
-# Git
-.git
-.gitignore
-
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-env/
-venv/
-ENV/
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-
-# Node
-node_modules/
-npm-debug.log*
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Logs
-*.log
-logs/
-
-# Environment
-.env
-.env.local
-
-# Docker
-Dockerfile*
-docker-compose*
-.docker/
-
-# Archives
-*.zip
-*.tar.gz
-
-# SSL (mount separately)
-ssl/
-*.pem
-*.key
-*.crt
+__pycache__
+agent_service
+__pycache__
+tests
+tests_to_create.txt
+docker-compose.dev.yml
+docker-compose.prod.yml
+docker-compose.test.yml
+retry.txt

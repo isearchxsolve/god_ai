@@ -208,4 +208,10 @@ PLATFORMS = {
         "api": "https://console.cloud.google.com/apis/credentials",
         "email_platform": "google",
     },
+    "huggingface": {
+        "signup": "https://huggingface.co/join",
+        "signin": "https://huggingface.co/login",
+        "api": "https://huggingface.co/settings/tokens",
+        "email_platform": "huggingface",
+    },
 }

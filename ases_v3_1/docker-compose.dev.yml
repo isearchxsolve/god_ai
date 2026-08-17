@@ -44,6 +44,13 @@ services:
       - DATABASE_URL=postgresql://ases:ases_dev@postgres:5432/ases_development
       - REDIS_URL=redis://redis:6379/0
       - SANDBOX_BASE_DIR=/tmp/ases-sandboxes
+      - ASES_V5_PARALLEL_CODER=${ASES_V5_PARALLEL_CODER:-1}
+      - ASES_V5_MUTATION=${ASES_V5_MUTATION:-1}
+      - ASES_V5_PERF_BUDGET=${ASES_V5_PERF_BUDGET:-1}
+      - ASES_V5_SBOM=${ASES_V5_SBOM:-1}
+      - ASES_V5_SPECULATIVE=${ASES_V5_SPECULATIVE:-1}
+      - ASES_V5_KG=${ASES_V5_KG:-1}
+      - ASES_V5_TELEMETRY=${ASES_V5_TELEMETRY:-1}
     volumes:
       - ./agent_service:/app:ro
       - /var/run/docker.sock:/var/run/docker.sock

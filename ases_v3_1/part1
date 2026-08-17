@@ -1,0 +1,76 @@
+"""
+ASES - Interaction Reviewer (v2.9)
+====================================
+End-to-end interaction validation using Playwright in the sandbox.
+
+Runs a suite of interaction tests generated from the design spec's
+'interaction_rules' and 'states' fields. Executes real browser actions
+(clicks, typing, keyboard navigation) and validates DOM + accessibility
+state changes.
+
+Key features:
+- Zero LLM tokens (pure Playwright execution)
+- Hydration-aware (waits for React/Vue/Angular hydration)
+- Shadow DOM penetration support
+- Mobile viewport emulation (touch events)
+- Accessibility state validation (aria-expanded, aria-hidden, etc.)
+- Screenshot-on-failure for debugging
+
+Integration: agent_loop.py, after visual_reviewer() approval, gated by
+_has_frontend() and presence of interaction_rules in design spec.
+"""
+
+import json
+import asyncio
+from typing import Dict, Any, List, Optional
+from dataclasses import dataclass, asdict
+
+import random
+# Playwright imports for the interaction reviewer
+from playwright.async_api import TimeoutError as PWTimeout, Error as PWError
+
+import structlog
+
+logger = structlog.get_logger()
+
+
+@dataclass
+class InteractionTest:
+    name: str
+    selector: str                    # CSS selector, aria-label, or data-testid
+    action: str                      # "click" | "type" | "keyboard" | "hover" | "focus" | "touch"
+    pre_condition: Optional[str]     # selector that must exist before action
+    post_condition: str              # selector/state that must exist after
+    accessibility_check: bool        # verify aria-expanded, aria-hidden, etc.
+    viewport: Optional[str]          # "desktop" | "tablet" | "mobile" | None
+    timeout_ms: int = 5000           # max wait for conditions
+
+
+# v2.9: tests run in parallel via asyncio.gather (one browser, N concurrent contexts)
+# v2.10: return_exceptions=True so one test crash doesn't abort the whole suite;
+#         _run_single_test retries up to MAX_RETRIES times with jitter on transient failures.
+# v3.1: __ASES_READY__ sentinel replaces wait_for_selector hydration gate;
+#       retry classification uses Playwright exception types, not string matching.
+INTERACTION_RUNNER_SCRIPT = r'''
+import asyncio
+import sys
+import json
+import random
+import traceback
+import base64
+from playwright.async_api import (
+    async_playwright, expect,
+    TimeoutError as PWTimeout,
+    Error as PWError,
+)
+
+# Max concurrent browser contexts. Keep <=8 to avoid sandbox OOM.
+MAX_CONCURRENCY = 8
+MAX_RETRIES = 2        # attempts per test before giving up
+BASE_JITTER_MS = 200   # random delay ceiling between retries (ms)
+
+# Playwright exception types that indicate a transient browser/DOM state
+# rather than a permanent test logic error. Used for retry classification.
+# Matching on exception types is stable across Playwright versions;
+# string-matching on error messages is not.
+_TRANSIENT_PW_TYPES = (PWTimeout,)

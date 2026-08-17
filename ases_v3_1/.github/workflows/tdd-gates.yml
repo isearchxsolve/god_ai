@@ -2,7 +2,6 @@ name: ASES TDD Gates CI
 
 on:
   push:
-    branches: [ main, develop ]
   pull_request:
     branches: [ main, develop ]
 
@@ -31,17 +30,11 @@ jobs:
         pip install -r agent_service/requirements.txt
         pip install pytest-mock
 
-    - name: Make gate runner executable
-      run: chmod +x run_tdd_gates.sh
+    - name: Lint
+      run: ruff check agent_service tests
 
-    - name: Run Smoke Gate
-      run: ./run_tdd_gates.sh smoke
-
-    - name: Run Syntax Gate
-      run: ./run_tdd_gates.sh syntax
-
-    - name: Run Integration Gate
-      run: ./run_tdd_gates.sh integration
+    - name: Run full production suite
+      run: python -m pytest tests/ -v
 
     - name: Coverage Summary
       run: |

@@ -1,9 +1,0 @@
-﻿tensorflow>=2.15.0
-onnx>=1.15.0
-onnx-tf
-paddle2onnx>=1.1.0
-paddlepaddle>=2.6.0
-opencv-python
-numpy<2.0.0
-pillow
-ml_dtypes>=0.4.0
