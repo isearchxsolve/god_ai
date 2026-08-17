@@ -22,16 +22,22 @@ _has_frontend() and presence of interaction_rules in design spec.
 
 import json
 import asyncio
+import base64
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, asdict
 
 import random
 # Playwright imports for the interaction reviewer
-from playwright.async_api import TimeoutError as PWTimeout, Error as PWError
+from playwright.async_api import TimeoutError as PWTimeout, Error as PWError, expect
 
 import structlog
 
 logger = structlog.get_logger()
+
+# Constants shared by the in-process fallback helpers and the sandbox runner script.
+MAX_RETRIES = 2
+BASE_JITTER_MS = 200
+_TRANSIENT_PW_TYPES = (PWTimeout,)
 
 
 @dataclass

@@ -450,7 +450,7 @@ async def run_static_review(
 
     try:
         # Run all layers (sync in thread pool to not block event loop)
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         ast_issues = await loop.run_in_executor(
             None,

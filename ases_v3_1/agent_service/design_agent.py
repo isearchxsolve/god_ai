@@ -19,6 +19,7 @@ v2.6 additions:
 - Journal integration: design decisions tracked for penalization
 """
 
+import hashlib
 import json
 import re
 from typing import Dict, Any, Optional
@@ -487,11 +488,14 @@ async def store_design_spec_vector(
         embedding = await _embed(embed_input)
 
         if embedding is not None:
+            context_hash = hashlib.sha256(
+                f"{tech_stack}:{task[:200]}".encode("utf-8")
+            ).hexdigest()
             await pool.execute(
                 """
                 INSERT INTO design_specs
-                    (tenant_id, task_context, tech_stack, spec_json, embedding, hit_count)
-                VALUES ($1, $2, $3, $4, $5::vector, 1)
+                    (tenant_id, task_context, task_context_hash, tech_stack, spec_json, embedding, hit_count)
+                VALUES ($1, $2, $3, $4, $5, $6::vector, 1)
                 ON CONFLICT (tenant_id, task_context_hash)
                 DO UPDATE SET
                     spec_json = EXCLUDED.spec_json,
@@ -501,6 +505,7 @@ async def store_design_spec_vector(
                 """,
                 tenant_uuid,
                 task[:200],
+                context_hash,
                 tech_stack,
                 json.dumps(design_spec),
                 json.dumps(embedding),

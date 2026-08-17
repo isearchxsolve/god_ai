@@ -31,6 +31,7 @@ Requirements added to requirements.txt:
     openai>=1.30.0     (already present — used for embeddings)
 """
 
+import hashlib
 import json
 import os
 from typing import Optional, List
@@ -94,6 +95,7 @@ async def store_memory_pattern_vector(
     embed_input = f"{context_text}\n\nSolution:\n{solution_text}"
 
     embedding = await _embed(embed_input)
+    pattern_hash = hashlib.sha256(context_text.encode("utf-8")).hexdigest()
 
     try:
         if embedding is not None:
@@ -101,15 +103,16 @@ async def store_memory_pattern_vector(
             await pool.execute(
                 """
                 INSERT INTO code_patterns
-                    (tenant_id, context, solution, pattern_type, tech_stack, embedding, success_count)
-                VALUES ($1, $2, $3, 'success', $4, $5::vector, 1)
-                ON CONFLICT (tenant_id, context_hash)
+                    (tenant_id, pattern_hash, context, solution, pattern_type, tech_stack, embedding, success_count)
+                VALUES ($1, $2, $3, $4, 'success', $5, $6::vector, 1)
+                ON CONFLICT (tenant_id, pattern_hash)
                 DO UPDATE SET
                     success_count = code_patterns.success_count + 1,
                     embedding     = EXCLUDED.embedding,
                     updated_at    = NOW()
                 """,
                 tenant_uuid,
+                pattern_hash,
                 context_text,
                 solution_text[:1000],
                 tech_stack,
@@ -120,12 +123,13 @@ async def store_memory_pattern_vector(
             await pool.execute(
                 """
                 INSERT INTO code_patterns
-                    (tenant_id, context, solution, pattern_type, tech_stack, success_count)
-                VALUES ($1, $2, $3, 'success', $4, 1)
-                ON CONFLICT (tenant_id, context_hash)
+                    (tenant_id, pattern_hash, context, solution, pattern_type, tech_stack, success_count)
+                VALUES ($1, $2, $3, $4, 'success', $5, 1)
+                ON CONFLICT (tenant_id, pattern_hash)
                 DO UPDATE SET success_count = code_patterns.success_count + 1
                 """,
                 tenant_uuid,
+                pattern_hash,
                 context_text,
                 solution_text[:1000],
                 tech_stack,
@@ -252,11 +256,14 @@ async def store_design_spec_vector(
         embedding = await _embed(embed_input)
 
         if embedding is not None:
+            context_hash = hashlib.sha256(
+                f"{tech_stack}:{task[:200]}".encode("utf-8")
+            ).hexdigest()
             await pool.execute(
                 """
                 INSERT INTO design_specs
-                    (tenant_id, task_context, tech_stack, spec_json, embedding, hit_count)
-                VALUES ($1, $2, $3, $4, $5::vector, 1)
+                    (tenant_id, task_context, task_context_hash, tech_stack, spec_json, embedding, hit_count)
+                VALUES ($1, $2, $3, $4, $5, $6::vector, 1)
                 ON CONFLICT (tenant_id, task_context_hash)
                 DO UPDATE SET
                     spec_json = EXCLUDED.spec_json,
@@ -266,6 +273,7 @@ async def store_design_spec_vector(
                 """,
                 tenant_uuid,
                 task[:200],
+                context_hash,
                 tech_stack,
                 json.dumps(design_spec),
                 json.dumps(embedding),

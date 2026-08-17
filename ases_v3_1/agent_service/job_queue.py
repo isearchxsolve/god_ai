@@ -9,7 +9,7 @@ import os
 from typing import Any, Dict
 import structlog
 from redis import Redis
-from rq import Queue
+from rq import Queue, Retry
 from rq.job import Job
 
 logger = structlog.get_logger()
@@ -109,8 +109,4 @@ def get_job_status(execution_id: str) -> Dict[str, Any]:
     return result
 
 
-# ---------------------------------------------------------------------------
-# Retry helper (imported at top-level call site)
-# ---------------------------------------------------------------------------
-
-from rq import Retry  # noqa: E402 — after Redis import to avoid circular
+# Retry is imported at the top of the module.

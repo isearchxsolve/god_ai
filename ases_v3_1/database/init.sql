@@ -5,6 +5,7 @@
 -- Enable required extensions
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+CREATE EXTENSION IF NOT EXISTS vector;
 
 -- ---------------------------------------------------------------------------
 -- TENANTS
@@ -190,6 +191,8 @@ CREATE TABLE code_patterns (
     pattern_type VARCHAR(50) NOT NULL,
     context TEXT NOT NULL,
     solution TEXT NOT NULL,
+    tech_stack VARCHAR(100) NOT NULL DEFAULT '',
+    embedding vector(1536),
     success_count INTEGER NOT NULL DEFAULT 1,
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -335,3 +338,66 @@ CREATE TABLE IF NOT EXISTS prompt_cache_stats (
 
 CREATE INDEX IF NOT EXISTS idx_cache_stats_tenant_date
     ON prompt_cache_stats(tenant_id, date DESC);
+
+-- ---------------------------------------------------------------------------
+-- DESIGN SPECS (v2.6/v3.1 vector memory for design warm-start and A/B testing)
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS design_specs (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    task_context TEXT NOT NULL,
+    task_context_hash VARCHAR(64) NOT NULL,
+    tech_stack VARCHAR(100) NOT NULL,
+    spec_json JSONB NOT NULL,
+    embedding vector(1536),
+    hit_count INTEGER NOT NULL DEFAULT 1,
+    pass_count INTEGER NOT NULL DEFAULT 0,
+    fail_count INTEGER NOT NULL DEFAULT 0,
+    last_used TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(tenant_id, task_context_hash)
+);
+
+CREATE INDEX IF NOT EXISTS idx_design_specs_tenant_stack
+    ON design_specs(tenant_id, tech_stack);
+
+CREATE TRIGGER trigger_design_specs_updated_at
+    BEFORE UPDATE ON design_specs
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+-- ---------------------------------------------------------------------------
+-- INTERFACE SIGNATURES (cross-job semantic differ warm cache)
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS interface_signatures (
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tech_stack VARCHAR(100) NOT NULL,
+    file_pattern TEXT NOT NULL,
+    exports JSONB NOT NULL DEFAULT '[]',
+    imports_from JSONB NOT NULL DEFAULT '{}',
+    hit_count INTEGER NOT NULL DEFAULT 1,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (tenant_id, tech_stack, file_pattern)
+);
+
+-- ---------------------------------------------------------------------------
+-- LEARNED FAILURE CLASSIFIER (v3.0)
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS tenant_classifiers (
+    tenant_id TEXT NOT NULL,
+    classifier JSONB NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (tenant_id)
+);
+
+CREATE TABLE IF NOT EXISTS classifier_training_data (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    description TEXT NOT NULL,
+    label SMALLINT NOT NULL,
+    source TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_classifier_training_tenant
+    ON classifier_training_data(tenant_id, created_at DESC);
