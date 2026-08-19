@@ -1,0 +1,8 @@
+
+---
+
+## 2. Environment Schema Validation (`src/env.mjs` or `lib/env.ts`)
+
+### Objective
+Guarantee environment variables are validated at build time and startup time to prevent silent hydration/runtime failures.
+

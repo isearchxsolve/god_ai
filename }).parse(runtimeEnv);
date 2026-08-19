@@ -1,0 +1,8 @@
+
+---
+
+## 3. Hydration Safe Rendering Hook (`src/hooks/use-is-mounted.ts`)
+
+### Objective
+Prevent server-side vs client-side DOM tree mismatch by guaranteeing client-only code executes strictly after mounting.
+
