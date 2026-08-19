@@ -1,0 +1,8 @@
+
+---
+
+## 3. Hydration Safety Boundary Hook (`src/hooks/use-is-mounted.ts`)
+
+### Objective
+Provide a unified mounting state hook to eradicate React hydration mismatch issues caused by dynamic client logic.
+

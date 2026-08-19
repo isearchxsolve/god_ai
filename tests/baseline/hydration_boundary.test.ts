@@ -1,10 +1,10 @@
 import { describe, it, expect } from 'vitest';
 
 /**
- * Hydration Boundary Contracts
+ * Hydration Safety & Environmental Contract Tests
  * 
- * Verifies that server-to-client hydration abstractions operate deterministically
- * without depending on global state or internal DOM line numbers.
+ * Verifies hydration contracts and runtime environment schema contracts
+ * without depending on internal component implementation details or DOM line numbers.
  */
 
 interface HydrationStateContract {

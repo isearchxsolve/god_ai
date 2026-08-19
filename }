@@ -1,2 +1,8 @@
 
-### Usage Pattern in Client Components
+---
+
+## 4. Production Multi-Stage Dockerfile (`Dockerfile`)
+
+### Objective
+Construct an optimized 3-stage non-root Docker build target enforcing optimal layer caching, minimal footprint, and process safety.
+

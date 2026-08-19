@@ -1,6 +1,6 @@
 # Production Architectural Master Blueprint
 
-This document provides exact, line-by-line implementation instructions for execution engineers to refactor the Next.js build pipeline, server/client component hydration contracts, and Docker container architecture.
+This document provides exact, line-by-line implementation instructions for execution engineers to refactor the Next.js build pipeline, server/client component hydration contracts, runtime environment validation, and Docker container architecture.
 
 ---
 
