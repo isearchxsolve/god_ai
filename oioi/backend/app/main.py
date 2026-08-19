@@ -1,16 +1,22 @@
+import os
 from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
+from app.core import db
 from app.services.provider_service import init_registry, shutdown_registry, get_provider_registry
 from app.api.v1.api import api_router
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
+    # Startup: ensure schema exists and providers are registered.
+    await db.init_db()
+    os.makedirs(settings.STORAGE_PATH, exist_ok=True)
     await init_registry()
     yield
     # Shutdown
@@ -38,6 +44,11 @@ app.add_middleware(
 
 # Include API router
 app.include_router(api_router, prefix=settings.API_V1_PREFIX)
+
+# Serve generated media (images, clips, audio) from local storage.
+_media_root = os.path.join(settings.STORAGE_PATH, "media")
+os.makedirs(_media_root, exist_ok=True)
+app.mount("/media", StaticFiles(directory=_media_root), name="media")
 
 
 @app.get("/health")
