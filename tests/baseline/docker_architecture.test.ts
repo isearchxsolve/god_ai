@@ -17,7 +17,7 @@ interface DockerfileAnalysisContract {
 
 function parseDockerConfig(dockerfileContent: string, dockerIgnoreContent: string): DockerfileAnalysisContract {
   const stages = Array.from(dockerfileContent.matchAll(/FROM\s+\S+\s+AS\s+(\w+)/gi)).map(m => m[1]);
-  const userMatch = dockerfileContent.match(/USER\s+([^\s\n]+)/i);
+  const userMatch = dockerfileContent.match(/(^|\n)\s*USER\s+([^\s\n]+)/i);
   const healthcheckMatch = dockerfileContent.includes('HEALTHCHECK');
   const standaloneMatch = dockerfileContent.includes('.next/standalone');
 
@@ -28,7 +28,7 @@ function parseDockerConfig(dockerfileContent: string, dockerIgnoreContent: strin
 
   return {
     hasStage: (stageName: string) => stages.includes(stageName),
-    getExecutionUser: () => (userMatch ? userMatch[1] : 'root'),
+    getExecutionUser: () => (userMatch ? userMatch[2] : 'root'),
     isStandaloneOutputEnabled: () => standaloneMatch,
     hasHealthcheck: () => healthcheckMatch,
     hasDockerIgnorePattern: (pattern: string) => dockerIgnoreLines.includes(pattern),
