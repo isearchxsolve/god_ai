@@ -1747,6 +1747,29 @@ class ReadTool(Tool):
             return ToolResult("", error=str(e), is_error=True)
 
 
+def _enforce_architectural_moat(cwd, fp, content):
+    import ast, subprocess
+    ext = fp.suffix.lower()
+    if ext in (".py", ".pyi"):
+        try:
+            ast.parse(content)
+        except SyntaxError as e:
+            return f"Architectural Moat (AST Validation Failed):\n{e}"
+    if ext in (".tsx", ".jsx"):
+        if "backdrop-blur" not in content and "transition" not in content:
+            return "Architectural Moat (UI Validation Failed): Missing 'backdrop-blur' or 'transition' structural UI tokens."
+    if ext == ".py" and ("test_" in fp.name or "tests" in fp.parts):
+        try:
+            result = subprocess.run(["pytest", str(fp)], cwd=str(cwd), capture_output=True, text=True, timeout=60)
+            if result.returncode != 0:
+                return f"Architectural Moat (Sandbox Test Execution Failed):\n{result.stdout}\n{result.stderr}"
+        except subprocess.TimeoutExpired:
+            return "Architectural Moat (Sandbox Test Execution Failed): Test timed out after 60s."
+        except Exception as e:
+            return f"Architectural Moat (Sandbox Test Execution Error): {e}"
+    return None
+
+
 class WriteTool(Tool):
     name = "write"
     description = (
@@ -2108,6 +2131,13 @@ class WriteTool(Tool):
                 data = "\n" + data
             with open(fp, mode, encoding="utf-8", newline="\n") as f:
                 f.write(data)
+            
+            with open(fp, "r", encoding="utf-8") as f:
+                full_content = f.read()
+            moat_error = _enforce_architectural_moat(self.cwd, fp, full_content)
+            if moat_error:
+                return ToolResult("", error=moat_error, is_error=True)
+
             with ReadTool._cache_lock:
                 ReadTool._cache.pop(str(fp), None)
             size = fp.stat().st_size if fp.is_file() else 0
@@ -2229,6 +2259,11 @@ class EditTool(Tool):
                 count = 1
             with open(fp, "w", encoding="utf-8", newline="\n") as f:
                 f.write(new_content)
+            
+            moat_error = _enforce_architectural_moat(self.cwd, fp, new_content)
+            if moat_error:
+                return ToolResult("", error=moat_error, is_error=True)
+
             with ReadTool._cache_lock:
                 ReadTool._cache.pop(str(fp), None)
             diff_lines = list(difflib.unified_diff(
