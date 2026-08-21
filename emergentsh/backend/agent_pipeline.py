@@ -451,11 +451,13 @@ class SeleniumQAAgent(BaseAgent):
         )
         ctx.set_artifact("tests/test_e2e.py", tests)
         
-        # In a real environment, we would spin up the frontend docker container here and run the tests.
+        # Execute the Selenium E2E test script in the Sandbox
         if ctx.project_dir:
             executor = SandboxExecutor(ctx.project_dir)
-            # success, output = executor.run_pytest("tests/test_e2e.py")
-            # For safety in this environment, we just log that the Selenium tests were prepared and validated structurally.
+            success, output = executor.run_pytest("tests/test_e2e.py")
+            if not success:
+                raise ValueError(f"Selenium execution failed:\n{output}")
+                
             if "playwright" not in tests and "selenium" not in tests.lower():
                 raise ValueError("Selenium execution failed: Missing webdriver or playwright imports.")
                 
