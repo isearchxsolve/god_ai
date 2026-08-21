@@ -117,7 +117,7 @@ async def _probes_stream(url: str) -> List[Probe]:
         if len(probes) >= 5:
             recent = probes[-5:]
             ok_count = sum(1 for p in recent if p.ok)
-            if ok_count / 5 < SLI_FAILURE_THRESHOLD:
+            if ok_count / 5 < (1 - SLI_FAILURE_THRESHOLD):
                 return probes
         await asyncio.sleep(SLI_PROBE_INTERVAL_S)
     return probes

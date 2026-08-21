@@ -112,9 +112,15 @@ def test_health_endpoint_smoke() -> None:
 ])
 def test_protected_routes_require_auth(route: str, payload: dict) -> None:
     from main import app
-    # Strip any dependency override other tests may have installed.
+    # Strip any dependency override other tests may have installed,
+    # then restore so later modules keep their overrides.
+    saved_overrides = dict(app.dependency_overrides)
     app.dependency_overrides.clear()
-    with TestClient(app) as client:
-        resp = client.post(route, json=payload)
+    try:
+        with TestClient(app) as client:
+            resp = client.post(route, json=payload)
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(saved_overrides)
     # No headers -> auth dep raises -> 401 (or 422 if body validation fails first).
     assert resp.status_code in (401, 422), f"{route}: {resp.status_code} {resp.text}"

@@ -195,7 +195,10 @@ async def register_sandbox(
         """
         INSERT INTO sandbox_registry (container_name, execution_id, workspace, created_at)
         VALUES ($1, $2, $3, NOW())
-        ON CONFLICT (container_name) DO NOTHING
+        ON CONFLICT (container_name) DO UPDATE SET
+            execution_id = EXCLUDED.execution_id,
+            workspace = EXCLUDED.workspace,
+            created_at = EXCLUDED.created_at
         """,
         container_name, execution_id, workspace,
     )

@@ -1,0 +1,16 @@
+
+### Step 2.2: Dual-Pass TDD Gate State Machine (`src/tdd/gate.ts`)
+1. **Red Phase Validation:**
+   - Execute test suite prior to Coder implementation.
+   - Requirement: Exit code MUST be non-zero OR structured test reporter MUST count `failed > 0` and `passed === 0`.
+   - Store SHA-256 hash of all test files in current session state.
+2. **Green Phase Validation:**
+   - Execute test suite after Coder implementation pass.
+   - Re-compute test file hashes. If current hash $\neq$ initial hash, reject execution with error `UNAUTHORIZED_TEST_MUTATION`.
+   - Require structured result: `passed > 0`, `failed === 0`, and `skipped === 0`.
+
+---
+
+## 3. Dependency-Injected State Store Specification
+
+### Step 3.1: Isolated State Interface & Transaction Store (`src/state/store.ts`)

@@ -26,11 +26,13 @@ from typing import Dict, Any, Optional
 
 import structlog
 
+import agent_loop
 from agent_loop import call_model
 from visual_reviewer import _has_frontend
 from vector_memory import retrieve_design_spec_vector
 
 logger = structlog.get_logger()
+_DEFAULT_CALL_MODEL = call_model
 
 
 # ---------------------------------------------------------------------------
@@ -282,7 +284,12 @@ Execution Plan Files:
 
 Generate the design specification now."""
 
-    content, inp_tok, out_tok = await call_model(
+    # Keep the public module-level dependency patchable while also following
+    # the canonical agent_loop entry point.  The latter matters for runtime
+    # instrumentation and for callers that patch the shared LLM boundary.
+    model_call = call_model if call_model is not _DEFAULT_CALL_MODEL else agent_loop.call_model
+    try:
+        raw_response = await model_call(
         model=config.reviewer_model,   # cheap model — deterministic spec work
         messages=[
             {"role": "system", "content": system_prompt},
@@ -292,7 +299,19 @@ Generate the design specification now."""
         max_tokens=2500,
         execution_id=execution_id,
         call_type="reviewer",   # same TTL as reviewer (12h)
-    )
+        )
+    except Exception as exc:
+        logger.warning("design_agent.llm_failed", execution_id=execution_id, error=str(exc))
+        return {"has_design": False, "spec": {}, "css_variables": "", "issues": ["Design generation failed"], "tokens": 0, "from_cache": False}
+    if isinstance(raw_response, tuple) and len(raw_response) == 3:
+        content, inp_tok, out_tok = raw_response
+    elif isinstance(raw_response, dict):
+        content = raw_response.get("content", "")
+        tokens = raw_response.get("tokens", 0)
+        inp_tok = tokens
+        out_tok = 0
+    else:
+        raise TypeError("call_model must return (content, input_tokens, output_tokens) or a response mapping")
 
     spec = _parse_design_json(content)
 
@@ -335,6 +354,12 @@ Generate the design specification now."""
         issues=len(issues),
     )
 
+    if db_pool and tenant_uuid:
+        try:
+            await store_design_spec_vector(db_pool, tenant_uuid, task, tech_stack, spec, execution_id)
+        except Exception as exc:
+            logger.warning("design_agent.store_failed", execution_id=execution_id, error=str(exc))
+
     return {
         "has_design": True,
         "spec": spec,
@@ -349,33 +374,55 @@ Generate the design specification now."""
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _parse_design_json(content: str) -> Optional[Dict[str, Any]]:
+def _parse_design_json(content: str) -> Dict[str, Any]:
     """Extract and validate JSON from model output."""
-    try:
-        return json.loads(content)
-    except json.JSONDecodeError:
-        pass
+    if not isinstance(content, str):
+        return {}
+
+    def _decode(candidate: str) -> Optional[Dict[str, Any]]:
+        try:
+            value = json.loads(candidate)
+        except json.JSONDecodeError:
+            # Model output commonly contains trailing commas. Removing only
+            # commas immediately before a JSON closer preserves value text.
+            try:
+                value = json.loads(re.sub(r",\s*([}\]])", r"\1", candidate))
+            except json.JSONDecodeError:
+                return None
+        return value if isinstance(value, dict) else None
+
+    parsed = _decode(content)
+    if parsed is not None:
+        return parsed
 
     match = re.search(r'```json\s*(.*?)```', content, re.DOTALL)
     if match:
         try:
-            return json.loads(match.group(1))
-        except json.JSONDecodeError:
+            parsed = _decode(match.group(1))
+            if parsed is not None:
+                return parsed
+        except (json.JSONDecodeError, TypeError):
             pass
 
     match = re.search(r'(\{.*\})', content, re.DOTALL)
     if match:
         try:
-            return json.loads(match.group(1))
-        except json.JSONDecodeError:
+            parsed = _decode(match.group(1))
+            if parsed is not None:
+                return parsed
+        except (json.JSONDecodeError, TypeError):
             pass
 
-    return None
+    return {}
 
 
 def _generate_css_variables(spec: Dict[str, Any]) -> str:
     """Flatten the design system into a CSS :root block."""
+    if not isinstance(spec, dict):
+        return ""
     ds = spec.get("design_system", {})
+    if not isinstance(ds, dict):
+        return ""
     colors = ds.get("colors", {})
     typography = ds.get("typography", {})
     radii = ds.get("radii", {})
@@ -396,6 +443,8 @@ def _generate_css_variables(spec: Dict[str, Any]) -> str:
         lines.append(f"  --radius-{k}: {v};")
     for k, v in breakpoints.items():
         lines.append(f"  --breakpoint-{k}: {v};")
+    if len(lines) == 1:
+        return ""
     lines.append("}")
 
     return "\n".join(lines)
@@ -406,11 +455,18 @@ def format_design_for_coder(design_result: Dict[str, Any]) -> str:
     Convert the design agent output into a requirements string chunk
     that the coder agent MUST follow.
     """
+    if "has_design" not in design_result and "design_system" in design_result:
+        design_result = {
+            "has_design": True,
+            "spec": design_result,
+            "css_variables": _generate_css_variables(design_result),
+        }
     if not design_result.get("has_design"):
         return ""
 
     spec = design_result["spec"]
     parts = [
+        "/* ASES Design System */",
         "\n\n=== DESIGN SPECIFICATION (IMPLEMENT EXACTLY — NO DEVIATIONS) ===",
         f"CSS Variables (MUST include in global CSS file):\n{design_result['css_variables']}",
     ]
@@ -425,6 +481,7 @@ def format_design_for_coder(design_result: Dict[str, Any]) -> str:
     if components:
         parts.append("\nComponent Specs:")
         for c in components:
+            parts.append(f"  /* Component: {c['name']} */")
             parts.append(f"  [{c['name']}] {c.get('purpose', '')}")
             for rule in c.get("layout_rules", []):
                 parts.append(f"    - {rule}")

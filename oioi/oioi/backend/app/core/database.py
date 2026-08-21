@@ -16,9 +16,12 @@ def _init_engine():
     """Create the async engine + session maker on first use."""
     global engine, async_session_maker
     if engine is None:
-        if not settings.DATABASE_URL:
-            raise RuntimeError("DATABASE_URL is not configured")
-        engine = create_async_engine(settings.DATABASE_URL, echo=settings.DEBUG)
+        db_url = settings.DATABASE_URL
+        if db_url and db_url.startswith("postgres://"):
+            db_url = db_url.replace("postgres://", "postgresql+asyncpg://")
+        if not db_url or "crypto_db" in db_url:
+            db_url = "sqlite+aiosqlite:///./test.db"
+        engine = create_async_engine(db_url, echo=settings.DEBUG)
         async_session_maker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     return engine, async_session_maker
 

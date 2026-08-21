@@ -221,13 +221,14 @@ def _store_on_disk(execution_id: Optional[str], result: DiffResult) -> Optional[
     if not execution_id:
         return None
     try:
+        safe_id = re.sub(r'[^\w\-]', '_', execution_id)
         os.makedirs(base, exist_ok=True)
-        path = os.path.join(base, f"{execution_id}.json")
+        path = os.path.join(base, f"{safe_id}.json")
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(result.as_dict(), fh, default=str, indent=2)
         return path
     except Exception as e:
-        logger.info("diff.store.failed", error=str(e))
+        logger.warning("diff.store.failed", error=str(e))
         return None
 
 
@@ -266,8 +267,10 @@ async def run_differential(
         invariant_violations=violations,
         elapsed_s=time.time() - started,
     )
-    if persist:
+    if persist and execution_id:
         result.stored_path = _store_on_disk(execution_id, result)
+        if result.stored_path is None:
+            logger.warning("diff.storage_failed", execution_id=execution_id)
     return result
 
 

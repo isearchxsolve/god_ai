@@ -164,12 +164,11 @@ class BillingFence:
         row = await self.pool.fetchrow(
             """
             SELECT
-                COALESCE(SUM(CASE WHEN DATE(e.completed_at) = $2 THEN e.cost_usd ELSE 0 END), 0) AS daily,
-                COALESCE(SUM(CASE WHEN DATE_TRUNC('month', e.completed_at) = DATE_TRUNC('month', CURRENT_TIMESTAMP) THEN e.cost_usd ELSE 0 END), 0) AS monthly
+                COALESCE(SUM(CASE WHEN DATE(e.completed_at AT TIME ZONE 'UTC') = DATE($2) THEN e.cost_usd ELSE 0 END), 0) AS daily,
+                COALESCE(SUM(CASE WHEN DATE_TRUNC('month', e.completed_at AT TIME ZONE 'UTC') = DATE_TRUNC('month', CURRENT_TIMESTAMP AT TIME ZONE 'UTC') THEN e.cost_usd ELSE 0 END), 0) AS monthly
             FROM executions e
             JOIN tenants t ON t.id = e.tenant_id
             WHERE t.slug = $1
-              AND e.success = true
             """,
             self.tenant_id, today,
         )
@@ -219,7 +218,7 @@ class BillingFence:
             )
 
         # Cost limit
-        if cost_usd >= self.job_cost_limit:
+        if cost_usd > self.job_cost_limit:
             raise BillingLimitError(
                 f"Job cost limit reached (${cost_usd:.4f} / ${self.job_cost_limit:.4f}).",
                 limit_type="job_cost_usd",

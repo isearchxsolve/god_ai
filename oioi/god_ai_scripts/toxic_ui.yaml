@@ -1,0 +1,5 @@
+path: D:/navaratna/yolo_ui_dataset
+train: images/train
+val: images/val
+names:
+  0: toxic_card

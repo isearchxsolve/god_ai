@@ -305,8 +305,13 @@ export class JupiterService {
         lastError = err;
         // Mark the current node unhealthy so the next retry rotates to a different endpoint.
         this.rpc.markCurrentUnhealthy();
-        const backoff = Math.min(500 * Math.pow(2, i), 2000);
-        await new Promise(r => setTimeout(r, backoff));
+        // Never sleep after the final configured-RPC attempt. A balance check is
+        // safety-critical: bounded failure is preferable to blocking the engine
+        // while the watchdog has less time to react.
+        if (i < 2) {
+          const backoff = Math.min(500 * Math.pow(2, i), 2000);
+          await new Promise(r => setTimeout(r, backoff));
+        }
       }
     }
     // Fallback: public mainnet endpoints (dead projectserum node removed).
@@ -319,7 +324,7 @@ export class JupiterService {
         const conn = new Connection(endpoint, { commitment: "confirmed", disableRetryOnRateLimit: true });
         const lamports = await Promise.race([
           conn.getBalance(publicKey, "confirmed"),
-          new Promise<never>((_, r) => setTimeout(() => r(new Error("TIMEOUT")), 8_000))
+          new Promise<never>((_, r) => setTimeout(() => r(new Error("TIMEOUT")), 1_000))
         ]) as number;
         return lamports / LAMPORTS_PER_SOL;
       } catch (err: any) { lastError = err; /* try next public endpoint */ }
@@ -726,7 +731,10 @@ export class JupiterService {
       log.warn(`[FAILSAFE] Buy blocked -- .HALT flag is set (${tokenMint})`);
       return { success: false, txSignature: null, actualSolSpent: 0, tokenAmountRaw: 0n, priceImpactPct: 0, feesSol: 0, error: "HALTED" };
     }
-    const lamports = Math.floor(amountSol * LAMPORTS_PER_SOL);
+    // FIX F-1: Math.floor on IEEE-754 floats causes systematic 1-lamport under-funding.
+    // e.g. 0.009 * 1e9 = 8999999.999999998 → Math.floor gives 8999999 (1 short).
+    // Math.round corrects the float drift: 8999999.998 → 9000000.
+    const lamports = Math.round(amountSol * 1e9);
     try {
       const latestSolBal = await this.getWalletBalance();
       if (latestSolBal < amountSol + MIN_FEE_BUFFER_SOL) {

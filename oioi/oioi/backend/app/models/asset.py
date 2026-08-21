@@ -13,9 +13,8 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
 
-
 class Asset(Base):
-    """Generated or uploaded media asset."""
+    """Generated or uploaded media asset with support for cinematic streaming metadata."""
 
     __tablename__ = "assets"
 
@@ -25,6 +24,12 @@ class Asset(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     url: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
     thumbnail_url: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+    hls_manifest_url: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+    dash_manifest_url: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+    poster_webp_url: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+    aspect_ratio: Mapped[Optional[str]] = mapped_column(String(20), default="16:9", nullable=True)
+    max_resolution: Mapped[Optional[str]] = mapped_column(String(20), default="1080p", nullable=True)
+    cache_control_policy: Mapped[Optional[str]] = mapped_column(String(255), default="public, max-age=31536000, immutable", nullable=True)
     prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     negative_prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     model_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)

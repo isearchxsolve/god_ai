@@ -1,5 +1,9 @@
 import type { Metadata } from 'next';
+import { Inter, Outfit } from 'next/font/google';
 import './globals.css';
+
+const inter = Inter({ subsets: ['latin'], variable: '--font-inter' });
+const outfit = Outfit({ subsets: ['latin'], variable: '--font-outfit' });
 
 export const metadata: Metadata = {
   title: 'OiiOii — AI Animation Agent Team',
@@ -13,9 +17,9 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en">
-      <body className="bg-bg-base text-fg-primary antialiased">
-        <div className="min-h-screen flex flex-col">{children}</div>
+    <html lang="en" suppressHydrationWarning className={`${inter.variable} ${outfit.variable}`}>
+      <body className="font-sans bg-bg-base text-fg-primary antialiased canvas-grid min-h-screen" suppressHydrationWarning>
+        {children}
       </body>
     </html>
   );

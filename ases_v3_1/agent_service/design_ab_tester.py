@@ -206,6 +206,11 @@ class DesignABTester:
 
     def _get_current_epsilon(self, variants: List[DesignVariant]) -> float:
         """Calculate decayed epsilon based on total trials."""
+        # An explicit zero is an operator control to disable exploration.
+        # Do not let the default minimum silently re-enable randomness: callers
+        # use this mode for deterministic replay and incident investigation.
+        if self.epsilon == 0:
+            return 0.0
         total_trials = sum(v.pass_count + v.fail_count for v in variants)
 
         # Decay epsilon based on total trials

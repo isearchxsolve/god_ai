@@ -1,0 +1,7 @@
+{
+  "total_images": 0,
+  "class_weights": {
+    "safe": 0.0,
+    "unsafe": 0.0
+  }
+}

@@ -206,6 +206,7 @@ class RevenueTracker:
 
     def __init__(self):
         self._records: List[Dict] = []
+        self._lock = threading.Lock()
         self._load()
 
     def _load(self):
@@ -229,8 +230,11 @@ class RevenueTracker:
             "live_mode": SafetyConfig.LIVE_MODE,
             "meta": meta or {},
         }
-        self._records.append(entry)
-        self._save()
+        
+        with self._lock:
+            self._records.append(entry)
+            self._save()
+            
         audit_log.info(json.dumps(entry, default=str))
         if amount_usd:
             log.info(f"[Revenue] {platform} | {event} | ${amount_usd:.4f}")
@@ -238,13 +242,18 @@ class RevenueTracker:
     def daily_summary(self) -> Dict[str, float]:
         today = datetime.now().date().isoformat()
         totals: Dict[str, float] = defaultdict(float)
-        for r in self._records:
+        
+        with self._lock:
+            records_copy = list(self._records)
+            
+        for r in records_copy:
             if r["ts"].startswith(today):
                 totals[r["platform"]] += r["amount_usd"]
         return dict(totals)
 
     def total_earned(self) -> float:
-        return round(sum(r["amount_usd"] for r in self._records), 4)
+        with self._lock:
+            return round(sum(r["amount_usd"] for r in self._records), 4)
 
 
 tracker = RevenueTracker()

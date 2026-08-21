@@ -1,0 +1,1 @@
+/** @type {import('next').NextConfig} */const nextConfig = { reactStrictMode: true, images: { domains: ['localhost', 'api.nvidia.com', 'integrate.api.nvidia.com'] }}module.exports = nextConfig

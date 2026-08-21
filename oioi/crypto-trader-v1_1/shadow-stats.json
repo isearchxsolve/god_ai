@@ -1,0 +1,13 @@
+{
+  "totalTrades": 200,
+  "wins": 68,
+  "losses": 132,
+  "sumShadowPnl": -736.5901838892985,
+  "sumPaperPnl": -546.1411566185518,
+  "sumInflation": 190.4490272707468,
+  "compoundedMult": 0.000011274900306081057,
+  "bestPct": 102.91799666724296,
+  "worstPct": -85.8417522006032,
+  "firstAt": 1782451484170,
+  "lastAt": 1783049934947
+}

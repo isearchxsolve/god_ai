@@ -1,0 +1,6 @@
+
+---
+
+## 1. Handoff Contract Implementation Specification
+
+### Step 1.1: Define Unified Handoff Payload Schema (`src/contracts/handoff-schema.ts`)

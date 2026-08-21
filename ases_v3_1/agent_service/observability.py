@@ -41,7 +41,13 @@ except ImportError:
 
 def _make_metrics():
     if not _PROMETHEUS_AVAILABLE:
-        return None
+        class _NoOpMetrics:
+            """Stable metrics boundary for deployments without Prometheus."""
+            def __getattr__(self, name):
+                def _noop(*args, **kwargs):
+                    return None
+                return _noop
+        return _NoOpMetrics()
 
     class _Metrics:
         jobs_total = Counter(

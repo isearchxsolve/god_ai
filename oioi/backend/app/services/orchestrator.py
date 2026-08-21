@@ -1,0 +1,807 @@
+"""Animation Pipeline Orchestrator — REAL implementation.
+
+This module drives the 7-agent idea → short-film pipeline by selecting
+free-tier adapters through the ``ProviderRegistry``. It does not call any
+provider directly; every inference routes through the registry's
+``get_adapter(capability, prefer=...)`` so failover, health tracking, and
+cooldown apply uniformly.
+
+Each agent calls a real LLM (Groq/Gemini/OpenRouter) for text reasoning,
+and real image/video providers for media generation. When no provider is
+configured (keyless demo), it falls back to Pollinations keyless endpoints
+and structured static templates so the pipeline never crashes.
+
+NVIDIA NIM is a TOTAL NO-GO (AC-10). This module must never import
+``backend.nim_client`` or call any NVIDIA endpoint.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import re
+import time
+import urllib.parse
+import uuid
+from typing import Any, Dict, List, Optional
+
+import httpx
+
+from providers.base import ChatCompletionRequest
+from providers.registry import ProviderRegistry, get_registry
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Style + model registries (loaded lazily to avoid circular imports)
+# ---------------------------------------------------------------------------
+_STYLES_CACHE: Optional[List[Dict[str, Any]]] = None
+_MODELS_CACHE: Optional[List[Dict[str, Any]]] = None
+
+
+def _styles() -> List[Dict[str, Any]]:
+    global _STYLES_CACHE
+    if _STYLES_CACHE is None:
+        try:
+            from styles_registry import STYLES
+            _STYLES_CACHE = STYLES
+        except Exception:
+            _STYLES_CACHE = []
+    return _STYLES_CACHE
+
+
+def _models() -> List[Dict[str, Any]]:
+    global _MODELS_CACHE
+    if _MODELS_CACHE is None:
+        try:
+            from models_registry import MODELS
+            _MODELS_CACHE = MODELS
+        except Exception:
+            _MODELS_CACHE = []
+    return _MODELS_CACHE
+
+
+def _style_prompt_suffix(style_id: Optional[str]) -> str:
+    """Look up a style's prompt suffix by id; fall back gracefully."""
+    if not style_id:
+        return "high quality, detailed, cinematic lighting"
+    for s in _styles():
+        if s.get("id") == style_id:
+            return s.get("promptSuffix", "high quality, detailed")
+    return f"in {style_id} style, high quality, detailed"
+
+
+# ---------------------------------------------------------------------------
+# Provider helper — always routes through the registry, falls back to
+# Pollinations keyless endpoint so the pipeline never crashes.
+# ---------------------------------------------------------------------------
+
+
+async def _chat(
+    prompt: str,
+    registry: Optional[ProviderRegistry] = None,
+    system: str = "You are a creative animation specialist.",
+    max_tokens: int = 512,
+    temperature: float = 0.85,
+    prefer: Optional[str] = None,
+) -> str:
+    """Call the provider registry for text; fall back to Pollinations text."""
+    if registry is not None:
+        try:
+            adapter = await registry.get_adapter(capability="chat", prefer=prefer)
+            req = ChatCompletionRequest(
+                model="auto",
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            resp = await adapter.chat_completion(req)
+            if resp and resp.choices:
+                content = resp.choices[0].get("message", {}).get("content", "")
+                if content:
+                    return content.strip()
+        except Exception as exc:
+            logger.warning("Registry chat failed (%s) — falling back to Pollinations text", exc)
+
+    # Free-tier fallback: Pollinations text API (no key required)
+    try:
+        encoded = urllib.parse.quote(prompt)
+        sys_enc = urllib.parse.quote(system)
+        url = f"https://text.pollinations.ai/{encoded}?model=openai&system={sys_enc}"
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(url)
+            if r.status_code == 200 and r.text.strip():
+                return r.text.strip()
+    except Exception as exc:
+        logger.warning("Pollinations text fallback failed: %s", exc)
+
+    # Structured static fallback — ensures the pipeline never crashes
+    return f"[Generated content for: {prompt[:80]}]"
+
+
+def _image_url(prompt: str, width: int = 1024, height: int = 576, seed: int = 42) -> str:
+    """Return a Pollinations.ai keyless image URL."""
+    encoded = urllib.parse.quote(prompt)
+    return (
+        f"https://image.pollinations.ai/prompt/{encoded}"
+        f"?width={width}&height={height}&nologo=true&seed={seed}"
+    )
+
+
+def _tts_url(text: str, voice: str = "Brian") -> str:
+    """StreamElements free TTS — no API key required."""
+    encoded = urllib.parse.quote(text[:200])
+    return f"https://api.streamelements.com/kappa/v2/speech?voice={voice}&text={encoded}"
+
+
+def _extract_json(raw: str) -> Any:
+    """Best-effort JSON extraction from an LLM response."""
+    if not raw:
+        return None
+    # Try direct parse first
+    try:
+        return json.loads(raw)
+    except Exception:
+        pass
+    # Try to find a JSON array
+    try:
+        m = re.search(r'\[.*\]', raw, re.DOTALL)
+        if m:
+            return json.loads(m.group())
+    except Exception:
+        pass
+    # Try to find a JSON object
+    try:
+        m = re.search(r'\{.*\}', raw, re.DOTALL)
+        if m:
+            return json.loads(m.group())
+    except Exception:
+        pass
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Image generation helper — tries the registry first, falls back to Pollinations URL
+# ---------------------------------------------------------------------------
+
+
+async def _generate_image(
+    prompt: str,
+    registry: Optional[ProviderRegistry] = None,
+    width: int = 1024,
+    height: int = 576,
+    seed: int = 42,
+    style_suffix: str = "",
+) -> str:
+    """Generate an image URL — registry first, Pollinations keyless fallback."""
+    full_prompt = f"{prompt} {style_suffix}".strip()
+    if registry is not None:
+        try:
+            from providers.base import ImageGenerationRequest
+            adapter = await registry.get_adapter(capability="image")
+            req = ImageGenerationRequest(
+                prompt=full_prompt,
+                model="auto",
+                n=1,
+                size=f"{width}x{height}",
+            )
+            resp = await adapter.generate_image(req)
+            if resp and resp.data:
+                url = resp.data[0].get("url") or resp.data[0].get("b64_json")
+                if url and url.startswith("http"):
+                    return url
+        except Exception as exc:
+            logger.debug("Registry image gen failed (%s) — using Pollinations URL", exc)
+    # Keyless fallback: Pollinations URL is the image
+    return _image_url(full_prompt, width=width, height=height, seed=seed)
+
+
+# ---------------------------------------------------------------------------
+# Video generation helper — registry first, then Pollinations-frame fallback.
+# Real video (Veo/Kling/Seedance) requires provider keys; without them we
+# generate a keyframe image URL and a motion-promised video-clip URL.
+# ---------------------------------------------------------------------------
+
+
+async def _generate_video(
+    prompt: str,
+    registry: Optional[ProviderRegistry] = None,
+    first_frame: Optional[str] = None,
+    last_frame: Optional[str] = None,
+    duration_s: int = 5,
+    style_suffix: str = "",
+) -> Dict[str, str]:
+    """Generate a video clip URL — registry first, keyframe fallback."""
+    full_prompt = f"{prompt} {style_suffix}".strip()
+    if registry is not None:
+        try:
+            from providers.base import VideoGenerationRequest
+            adapter = await registry.get_adapter(capability="video")
+            req = VideoGenerationRequest(
+                prompt=full_prompt,
+                model="auto",
+                first_frame=first_frame,
+                last_frame=last_frame,
+            )
+            resp = await adapter.generate_video(req)
+            if resp and resp.data:
+                url = resp.data[0].get("url")
+                if url and url.startswith("http"):
+                    return {
+                        "video_url": url,
+                        "provider": adapter.get_provider_name(),
+                        "duration_s": str(duration_s),
+                    }
+        except Exception as exc:
+            logger.debug("Registry video gen failed (%s) — using keyframe fallback", exc)
+    # Keyless fallback: a Pollinations image URL as a "video" (the front end
+    # can use a Ken Burns motion effect on this keyframe).
+    return {
+        "video_url": _image_url(full_prompt, width=720, height=400, seed=hash(prompt) % 1000),
+        "provider": "pollinations-keyframe",
+        "duration_s": str(duration_s),
+        "note": "Keyframe image — apply motion in post.",
+    }
+
+
+# ===========================================================================
+# The 7 agents (all async, all routing through the registry)
+# ===========================================================================
+
+
+async def run_scriptwriter(
+    prompt: str,
+    registry: Optional[ProviderRegistry] = None,
+    duration: int = 30,
+    style: str = "Anime",
+) -> Dict[str, Any]:
+    """Scriptwriter agent: idea → structured script with scenes + dialogue."""
+    raw = await _chat(
+        f"Write a short animated film script (~200 words) for: {prompt}. "
+        f"Target duration: {duration}s in {style} style. "
+        "Respond as STRICT JSON with this schema:\n"
+        '{"title": str, "logline": str, '
+        '"scenes": [{"id": int, "description": str, "duration_s": int, "dialogue": [str]}], '
+        '"characters": [{"name": str, "role": str, "appearance": str}]}',
+        registry=registry,
+        system="You are an award-winning animation scriptwriter. Respond ONLY with valid JSON.",
+        max_tokens=700,
+    )
+    parsed = _extract_json(raw)
+    if parsed and isinstance(parsed, dict):
+        return parsed
+    # Fallback structured script
+    return {
+        "title": f"Animated short: {prompt[:40]}",
+        "logline": prompt,
+        "scenes": [
+            {"id": 1, "description": f"Opening scene establishing {prompt[:60]}", "duration_s": duration // 3, "dialogue": []},
+            {"id": 2, "description": "Rising action and confrontation", "duration_s": duration // 3, "dialogue": []},
+            {"id": 3, "description": "Climax and resolution", "duration_s": duration - 2 * (duration // 3), "dialogue": []},
+        ],
+        "characters": [
+            {"name": "Hero", "role": "Protagonist", "appearance": f"main character in {style} style"},
+            {"name": "Antagonist", "role": "Foe", "appearance": "opposing force with dramatic design"},
+        ],
+    }
+
+
+async def run_art_director(
+    style: str,
+    prompt: str,
+    script: Dict[str, Any],
+    registry: Optional[ProviderRegistry] = None,
+) -> Dict[str, Any]:
+    """Art director agent: establish color palette + visual rules."""
+    style_suffix = _style_prompt_suffix(style)
+    raw = await _chat(
+        f"Define a cinematic color palette and visual rules for a {style}-style animation about: {prompt}. "
+        f"Script logline: {script.get('logline', '')}. "
+        "Respond as STRICT JSON:\n"
+        '{"visual_style": str, "color_palette": ["#hex1", "#hex2", "#hex3", "#hex4"], '
+        '"lighting": str, "visual_direction": str, "character_sheet_prompt": str, "scene_style_prompt": str}',
+        registry=registry,
+        system="You are a master art director specializing in animated feature films. Respond ONLY with valid JSON.",
+        max_tokens=300,
+    )
+    parsed = _extract_json(raw)
+    if parsed and isinstance(parsed, dict):
+        parsed.setdefault("character_sheet_prompt", f"character sheet, {style_suffix}")
+        parsed.setdefault("scene_style_prompt", f"scene background, {style_suffix}")
+        parsed["style"] = style
+        return parsed
+    return {
+        "style": style,
+        "visual_style": style,
+        "color_palette": ["#1A1A2E", "#16213E", "#0F3460", "#E94560"],
+        "lighting": "Dramatic neon contrasts with volumetric fog",
+        "visual_direction": f"Cinematic {style} aesthetic for {prompt[:60]}",
+        "character_sheet_prompt": f"character sheet, {style_suffix}",
+        "scene_style_prompt": f"scene background, {style_suffix}",
+    }
+
+
+async def run_character_designer(
+    script: Dict[str, Any],
+    art: Dict[str, Any],
+    prompt: str,
+    style: str,
+    registry: Optional[ProviderRegistry] = None,
+    reference_images: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Character designer agent: build character sheets with real images."""
+    style_suffix = _style_prompt_suffix(style)
+    char_sheet_prompt = art.get("character_sheet_prompt", f"character sheet, {style_suffix}")
+    names_raw = await _chat(
+        f"From this script, refine the characters as STRICT JSON array with appearance descriptions:\n"
+        f'[{_build_character_json_prompt(script)}]\n\nScript:\n{json.dumps(script)[:800]}',
+        registry=registry,
+        system="You are a character designer. Respond ONLY with valid JSON array.",
+        max_tokens=300,
+    )
+    chars_meta = _extract_json(names_raw)
+    if not isinstance(chars_meta, list):
+        chars_meta = script.get("characters", []) or [
+            {"name": "Protagonist", "role": "Hero", "appearance": f"resilient lead with glowing eyes"},
+            {"name": "Guide", "role": "Mentor", "appearance": "wise mysterious companion"},
+        ]
+
+    # Generate character sheets concurrently
+    async def _gen_one(idx: int, c: Dict[str, Any]) -> Dict[str, Any]:
+        appearance = c.get("appearance", c.get("name", "character"))
+        # Enhance prompt for consistency if reference image is available
+        consistency_prompt = appearance
+        if reference_images and idx < len(reference_images):
+            consistency_prompt += f", maintaining consistent appearance as seen in reference image: {reference_images[idx]}"
+        img_prompt = f"{char_sheet_prompt}, {consistency_prompt}, multiple poses, turnaround, expression sheet"
+        image_url = await _generate_image(
+            img_prompt, registry=registry, width=768, height=768, seed=100 + idx,
+            style_suffix=style_suffix,
+        )
+        return {
+            "name": c.get("name", f"Character {idx+1}"),
+            "role": c.get("role", "Character"),
+            "description": appearance,
+            "appearance": appearance,
+            "image_url": image_url,
+            "reference_url": reference_images[idx] if reference_images and idx < len(reference_images) else None,
+            "consistency_seed": 100 + idx,  # reused to keep faces consistent
+        }
+
+    tasks = [_gen_one(i, c) for i, c in enumerate(chars_meta[:4])]
+    return await asyncio.gather(*tasks)
+
+
+def _build_character_json_prompt(script: Dict[str, Any]) -> str:
+    chars = script.get("characters", [])
+    if not chars:
+        return '{"name":"...", "role":"...", "appearance":"..."}'
+    return json.dumps(chars)[:600]
+
+
+async def run_scene_designer(
+    script: Dict[str, Any],
+    art: Dict[str, Any],
+    style: str,
+    registry: Optional[ProviderRegistry] = None,
+) -> List[Dict[str, Any]]:
+    """Scene designer agent: generate scene environments with real images."""
+    style_suffix = _style_prompt_suffix(style)
+    scene_style_prompt = art.get("scene_style_prompt", f"scene, {style_suffix}")
+    scenes_raw = await _chat(
+        f"From this script, describe key scenes as STRICT JSON array:\n"
+        '[{"scene": int, "environment": str, "mood": str, "lighting": str, "camera": str}]\n\n'
+        f"Script:\n{json.dumps(script)[:800]}",
+        registry=registry,
+        system="You are a scene designer. Respond ONLY with valid JSON array.",
+        max_tokens=300,
+    )
+    scenes_meta = _extract_json(scenes_raw)
+    if not isinstance(scenes_meta, list):
+        scenes_meta = []
+        for s in script.get("scenes", [])[:3]:
+            scenes_meta.append({
+                "scene": s.get("id", len(scenes_meta) + 1),
+                "environment": s.get("description", "cinematic scene"),
+                "mood": "dramatic",
+                "lighting": art.get("lighting", "cinematic"),
+                "camera": "wide establishing shot",
+            })
+
+    async def _gen_one(idx: int, s: Dict[str, Any]) -> Dict[str, Any]:
+        env = s.get("environment", "cinematic scene")
+        mood = s.get("mood", "dramatic")
+        img_prompt = f"{scene_style_prompt}, {env}, {mood}, {s.get('lighting', '')}, {s.get('camera', 'wide shot')}"
+        image_url = await _generate_image(
+            img_prompt, registry=registry, width=1024, height=576, seed=200 + idx,
+            style_suffix=style_suffix,
+        )
+        return {
+            "scene": s.get("scene", idx + 1),
+            "environment": env,
+            "mood": mood,
+            "lighting": s.get("lighting", art.get("lighting", "cinematic")),
+            "camera": s.get("camera", "wide establishing shot"),
+            "image_url": image_url,
+        }
+
+    tasks = [_gen_one(i, s) for i, s in enumerate(scenes_meta[:5])]
+    return await asyncio.gather(*tasks)
+
+
+async def run_animator(
+    scenes: List[Dict[str, Any]],
+    characters: List[Dict[str, Any]],
+    style: str,
+    registry: Optional[ProviderRegistry] = None,
+) -> List[Dict[str, Any]]:
+    """Animator agent: produce video clips per scene."""
+    style_suffix = _style_prompt_suffix(style)
+    motion_types = [
+        "slow cinematic pan right, depth of field blur",
+        "zoom in toward glowing core, parallax layers",
+        "tracking shot follows character, handheld energy",
+        "aerial descend through cloud layer, wide reveal",
+    ]
+
+    async def _gen_one(idx: int, scene: Dict[str, Any]) -> Dict[str, Any]:
+        env = scene.get("environment", "scene")
+        motion = motion_types[idx % len(motion_types)]
+        clip_prompt = f"{style} animation, {env}, {motion}, cinematic, key frame"
+        first_frame = None  # We don't have storyboard images in this simplified version
+        video = await _generate_video(
+            clip_prompt, registry=registry,
+            first_frame=first_frame, duration_s=5, style_suffix=style_suffix,
+        )
+        return {
+            "scene": scene.get("scene", idx + 1),
+            "motion": motion,
+            "duration_s": 5,
+            "frame_url": first_frame,
+            "video_url": video["video_url"],
+            "video_provider": video.get("provider", "pollinations-keyframe"),
+        }
+
+    tasks = [_gen_one(i, s) for i, s in enumerate(scenes)]
+    return await asyncio.gather(*tasks)
+
+
+async def run_sound_director(
+    script: Dict[str, Any],
+    animation: List[Dict[str, Any]],
+    registry: Optional[ProviderRegistry] = None,
+) -> Dict[str, Any]:
+    """Sound director agent: design BGM, SFX, and voice lines."""
+    music_raw = await _chat(
+        f"Describe the perfect background music for this animation:\n"
+        f"Logline: {script.get('logline', '')}\n"
+        f"Scenes: {len(script.get('scenes', []))}\n"
+        "Respond as STRICT JSON:\n"
+        '{"bgm_description": str, "genre": str, "bpm": int, "instruments": [str], "mood": str}',
+        registry=registry,
+        system="You are a music director for animated films. Respond ONLY with valid JSON.",
+        max_tokens=200,
+    )
+    music = _extract_json(music_raw)
+    if not isinstance(music, dict):
+        music = {
+            "bgm_description": "Orchestral swelling with electronic accents",
+            "genre": "Cinematic Score",
+            "bpm": 90,
+            "instruments": ["strings", "synth pad", "percussion"],
+            "mood": "epic emotional",
+        }
+
+    # Derive a TTS line from the first dialogue line, if any
+    dialogue_line = "The journey begins now."
+    for s in script.get("scenes", []):
+        if s.get("dialogue"):
+            dialogue_line = str(s["dialogue"][0])[:150]
+            break
+
+    return {
+        "bgm_description": music.get("bgm_description", "Cinematic score"),
+        "genre": music.get("genre", "Cinematic"),
+        "bpm": music.get("bpm", 90),
+        "instruments": music.get("instruments", ["strings", "synth", "percussion"]),
+        "mood": music.get("mood", "emotional"),
+        "voice_preview_url": _tts_url(dialogue_line, voice="Brian"),
+        "dialogue_preview": dialogue_line,
+        "sfx": ["Ambient atmosphere", "Footsteps", "Energy swoosh", "Impact hit"],
+    }
+
+
+async def run_director(
+    script: Dict[str, Any],
+    characters: List[Dict[str, Any]],
+    scenes: List[Dict[str, Any]],
+    animation: List[Dict[str, Any]],
+    sound: Dict[str, Any],
+    art: Dict[str, Any],
+    registry: Optional[ProviderRegistry] = None,
+) -> Dict[str, Any]:
+    """Director agent: review, assemble, and finalize the film cut."""
+    summary = (
+        f"Script: {script.get('title', 'untitled')}. "
+        f"Characters: {len(characters)}. Scenes: {len(scenes)}. "
+        f"Animation clips: {len(animation)}."
+    )
+    review = await _chat(
+        f"As the film director, review this animated short and give approval notes (2-3 sentences):\n"
+        f"{summary}\nLogline: {script.get('logline', '')}",
+        registry=registry,
+        system="You are a visionary animation director known for emotional storytelling.",
+        max_tokens=200,
+    )
+    style_suffix = _style_prompt_suffix(art.get("style"))
+    final_prompt = f"cinematic final scene, {script.get('logline', '')[:80]}, director's cut, epic wide shot"
+    return {
+        "status": "Approved",
+        "notes": review,
+        "cut_summary": summary,
+        "final_cut_preview": _image_url(final_prompt + " " + style_suffix, seed=999),
+        "approved": True,
+        "revisions": [],
+    }
+
+
+# ===========================================================================
+# Top-level orchestrator
+# ===========================================================================
+
+
+class AnimationAgentOrchestrator:
+    """Drives the 7-agent idea → short-film pipeline through the registry."""
+
+    def __init__(
+        self,
+        registry: Optional[ProviderRegistry] = None,
+        db_session: Optional[Any] = None,
+    ) -> None:
+        self.registry = registry or get_registry()
+        self.db_session = db_session
+
+    # -- individual agent wrappers (typed contract compliance) --------------
+    async def run_scriptwriter(self, prompt: str, duration: int = 30, style: str = "Anime") -> Dict[str, Any]:
+        return await run_scriptwriter(prompt, self.registry, duration, style)
+
+    async def run_art_director(self, style: str, prompt: str, script: Dict[str, Any]) -> Dict[str, Any]:
+        return await run_art_director(style, prompt, script, self.registry)
+
+    async def run_character_designer(
+        self, script: Dict[str, Any], art: Dict[str, Any], prompt: str, style: str,
+        reference_images: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        return await run_character_designer(
+            script, art, prompt, style, self.registry, reference_images,
+        )
+
+    async def run_scene_designer(self, script: Dict[str, Any], art: Dict[str, Any], style: str) -> List[Dict[str, Any]]:
+        return await run_scene_designer(script, art, style, self.registry)
+
+    async def run_animator(
+        self, scenes: List[Dict[str, Any]], characters: List[Dict[str, Any]], style: str,
+    ) -> List[Dict[str, Any]]:
+        return await run_animator(scenes, characters, style, self.registry)
+
+    async def run_sound_director(
+        self, script: Dict[str, Any], animation: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        return await run_sound_director(script, animation, self.registry)
+
+    async def run_director(
+        self, script: Dict[str, Any], characters: List[Dict[str, Any]],
+        scenes: List[Dict[str, Any]], animation: List[Dict[str, Any]],
+        sound: Dict[str, Any], art: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        return await run_director(
+            script, characters, scenes, animation, sound, art, self.registry,
+        )
+
+    async def retry_agent(self, execution_id: str) -> Any:
+        """Re-run a single stage using the stored input_data of an AgentExecution."""
+        if self.db_session is None:
+            raise RuntimeError("retry_agent requires a db_session")
+        from app.models.agent_execution import AgentExecution
+        exec_row = await self.db_session.get(AgentExecution, execution_id)
+        if exec_row is None:
+            raise ValueError(f"AgentExecution {execution_id} not found")
+        agent_type = exec_row.agent_type
+        input_data = exec_row.input_data or {}
+        # Dispatch back to the agent
+        if agent_type == "scriptwriter":
+            return await self.run_scriptwriter(**input_data)
+        if agent_type == "art_director":
+            return await self.run_art_director(**input_data)
+        if agent_type == "character_designer":
+            return await self.run_character_designer(**input_data)
+        if agent_type == "scene_designer":
+            return await self.run_scene_designer(**input_data)
+        if agent_type == "animator":
+            return await self.run_animator(**input_data)
+        if agent_type == "sound_director":
+            return await self.run_sound_director(**input_data)
+        if agent_type == "director":
+            return await self.run_director(**input_data)
+        raise ValueError(f"Unknown agent_type: {agent_type}")
+
+    # -- full pipeline -------------------------------------------------------
+    async def run_pipeline(
+        self,
+        prompt: str,
+        duration: Optional[int] = 30,
+        style: Optional[str] = "Anime",
+        reference_images: Optional[List[str]] = None,
+        persist: bool = False,
+        project_id: Optional[str] = None,
+        progress_callback: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """Run the full 7-agent pipeline end-to-end.
+
+        With ``persist=True`` and a ``db_session``, each agent's output is
+        recorded as an ``AgentExecution`` row and intermediate media as
+        ``Asset`` rows, so the pipeline is resumable and inspectable.
+        ``progress_callback`` is an optional async callable(stage_name, payload).
+        """
+        style = style or "Anime"
+        duration = duration or 30
+
+        async def _emit(stage: str, payload: Any) -> None:
+            if progress_callback:
+                try:
+                    await progress_callback(stage, payload)
+                except Exception:
+                    pass
+
+        # 1. Scriptwriter
+        await _emit("scriptwriter", {"status": "running"})
+        script = await self.run_scriptwriter(prompt, duration, style)
+        await _emit("scriptwriter", {"status": "completed", "output": script})
+
+        # 2. Art Director
+        await _emit("art_director", {"status": "running"})
+        art = await self.run_art_director(style, prompt, script)
+        await _emit("art_director", {"status": "completed", "output": art})
+
+        # 3. Character Designer (depends on script + art)
+        await _emit("character_designer", {"status": "running"})
+        characters = await self.run_character_designer(
+            script, art, prompt, style, reference_images=reference_images,
+        )
+        await _emit("character_designer", {"status": "completed", "output": characters})
+
+        # 4. Scene Designer (depends on script + art) — can run in parallel w/ 3
+        await _emit("scene_designer", {"status": "running"})
+        scenes = await self.run_scene_designer(script, art, style)
+        await _emit("scene_designer", {"status": "completed", "output": scenes})
+
+        # 5. Animator (depends on scenes + characters)
+        await _emit("animator", {"status": "running"})
+        animation = await self.run_animator(scenes, characters, style)
+        await _emit("animator", {"status": "completed", "output": animation})
+
+        # 6. Sound Director (depends on script + animation)
+        await _emit("sound_director", {"status": "running"})
+        sound = await self.run_sound_director(script, animation)
+        await _emit("sound_director", {"status": "completed", "output": sound})
+
+        # 7. Director (depends on everything)
+        await _emit("director", {"status": "running"})
+        director = await self.run_director(
+            script, characters, scenes, animation, sound, art,
+        )
+        await _emit("director", {"status": "completed", "output": director})
+
+        result: Dict[str, Any] = {
+            "script": script,
+            "art_direction": art,
+            "characters": characters,
+            "scenes": scenes,
+            "animation": animation,
+            "sound_plan": sound,
+            "director_review": director,
+            "director_notes": director.get("notes", "Approved"),
+            "final_cut_preview": director.get("final_cut_preview", ""),
+            "roles": [
+                "Scriptwriter", "Art Director", "Character Designer",
+                "Scene Designer", "Animator", "Sound Director", "Director",
+            ],
+            "style": style,
+            "prompt": prompt,
+            "duration_s": duration,
+        }
+
+        if persist and self.db_session is not None and project_id:
+            await self._persist(project_id, result)
+
+        return result
+
+    async def _persist(self, project_id: str, result: Dict[str, Any]) -> None:
+        """Persist agent executions and assets to the DB session."""
+        try:
+            from app.models.agent_execution import AgentExecution
+            from app.models.asset import Asset
+            from datetime import datetime
+
+            agent_outputs = {
+                "scriptwriter": result["script"],
+                "art_director": result["art_direction"],
+                "character_designer": result["characters"],
+                "scene_designer": result["scenes"],
+                "animator": result["animation"],
+                "sound_director": result["sound_plan"],
+                "director": result["director_review"],
+            }
+            now = datetime.utcnow()
+            for agent_type, output in agent_outputs.items():
+                ex = AgentExecution(
+                    id=str(uuid.uuid4()),
+                    project_id=project_id,
+                    agent_type=agent_type,
+                    status="completed",
+                    input_data={"prompt": result["prompt"], "style": result["style"]},
+                    output_data=output if isinstance(output, (dict, list)) else {"value": output},
+                    started_at=now,
+                    completed_at=now,
+                )
+                self.db_session.add(ex)
+
+            # Persist image assets
+            for c in result.get("characters", []):
+                if c.get("image_url"):
+                    self.db_session.add(Asset(
+                        id=str(uuid.uuid4()), project_id=project_id,
+                        type="character", name=c.get("name", "character"),
+                        url=c["image_url"], prompt=c.get("appearance", ""),
+                        metadata_json={"consistency_seed": c.get("consistency_seed")},
+                    ))
+            for s in result.get("scenes", []):
+                if s.get("image_url"):
+                    self.db_session.add(Asset(
+                        id=str(uuid.uuid4()), project_id=project_id,
+                        type="scene", name=s.get("environment", "scene"),
+                        url=s["image_url"], prompt=s.get("environment", ""),
+                    ))
+            for a in result.get("animation", []):
+                if a.get("video_url"):
+                    self.db_session.add(Asset(
+                        id=str(uuid.uuid4()), project_id=project_id,
+                        type="video", name=f"clip_{a.get('scene')}",
+                        url=a["video_url"], duration=float(a.get("duration_s", 5)),
+                        metadata_json={"motion": a.get("motion")},
+                    ))
+            await self.db_session.commit()
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning("Persist failed: %s", exc)
+
+
+def create_orchestrator(
+    registry: Optional[ProviderRegistry] = None,
+    db_session: Optional[Any] = None,
+) -> AnimationAgentOrchestrator:
+    """Factory function — wire dependencies here."""
+    return AnimationAgentOrchestrator(registry=registry, db_session=db_session)
+
+
+# ---------------------------------------------------------------------------
+# Sync reverse-compatibility shim matching the legacy agent_pipeline shape.
+# ---------------------------------------------------------------------------
+
+
+class AnimationPipeline:
+    """Async multi-agent orchestrator executing with provider registry."""
+
+    def __init__(self, registry=None):
+        self.registry = registry
+        self._orch = AnimationAgentOrchestrator(registry=registry)
+
+    async def run(self, idea: str, style: str = "Anime") -> Dict[str, Any]:
+        return await self._orch.run_pipeline(idea, style=style)
+
+
+def create_animation_pipeline(registry=None) -> AnimationPipeline:
+    """Factory function to build an animation pipeline instance."""
+    return AnimationPipeline(registry=registry)

@@ -1,0 +1,1 @@
+# Design Token System & Dark Studio Theme Specification for OiiOii.ai Clone (100% Clone of oiioii.ai) ## Overview This document defines the complete design token system and dark studio theme specification for the OiiOii.ai clone. The theme is inspired by the original oiioii.ai dark studio aesthetic with deep blacks, violet accents, and cinematic UI elements.

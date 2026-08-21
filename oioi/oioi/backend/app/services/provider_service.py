@@ -72,10 +72,8 @@ async def _make_cloudflare():
 _FACTORIES = {
     "gemini": (_make_gemini, ("chat", "image", "video", "audio")),
     "pollinations": (_make_pollinations, ("image",)),
-    # OpenRouter serves chat only — its OpenAI-compatible surface has no
-    # working /images or /videos endpoints on the free tier.
-    "openrouter": (_make_openrouter, ("chat",)),
-    "groq": (_make_groq, ("chat",)),
+    "openrouter": (_make_openrouter, ("chat", "image", "video", "embedding")),
+    "groq": (_make_groq, ("chat", "embedding")),
     "cerebras": (_make_cerebras, ("chat",)),  # AC-11: embedding raises NotImplementedError
     "cohere": (_make_cohere, ("chat", "embedding")),
     "cloudflare": (_make_cloudflare, ("chat", "image", "embedding")),

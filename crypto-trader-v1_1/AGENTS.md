@@ -1,3 +1,15 @@
+# 🚨 TOP PRIORITY AGENT RULES 🚨
+
+1. **DETAILED WORKLOG SUMMARIES:** The `MASTER_WORKLOG.md` entry MUST NEVER be a simple one-line summary. Each and every action, observation, and step must be detailed extensively in the worklog. Make it a habit. This is the absolute top priority.
+2. **INCREMENTAL COMMITS:** Incremental commits should be done continuously. This is the second highest priority. Make it a habit.
+
+### THREE ARCHITECTURAL PILLARS (MANDATORY FOR ALL AGENTS)
+1. **Business Vision Compliance:** This is the highest priority. All actions must align with the end goal of a production-ready, monetizable product.
+2. **Open-Ended & Deep-Dive Audits:** Do not perform shallow or baseline audits. Look for hidden gaps and perform deep open-ended investigations.
+3. **Extreme Priority on UI Polish & Research:** The UI is the FIRST priority. It must be highly polished, pixel-perfect, and feature a "wow" effect (glassmorphism, 2026 state-of-the-art design). Furthermore, the UI MUST be well-researched. When given a target (e.g., "build an OiiOii clone"), the agent MUST search the internet to study the actual look and feel of the target UI before proceeding, ensuring a well-grounded visual replication. A businessman will forgive backend glitches if the UI is breathtaking.
+
+---
+
 # Crypto-Trader Agent Instructions
 
 ## Architecture
@@ -59,3 +71,8 @@ npx vitest run
   without an explicit instruction; flag such changes clearly.
 - No `.tmp`, `.bak`, or `* - Copy*` files. Delete scratch files; don't commit them.
 - Keep commit messages action-oriented (`Fix jupiter slippage calc`).
+
+## Strict Agent Protocols (Zero Data Loss & Testing)
+- **Incremental Persistence:** Any action log (e.g. `SIXTH_WORKLOG.md` or `MASTER_WORKLOG.md`) must be written to disk incrementally *after every step*. Do not batch logs. If the agent crashes, the log must reflect exactly what was completed up to the crash.
+- **Test-Driven Execution:** Agents must not commit blind code. Every structural fix or feature must include a corresponding test case, and the agent must explicitly execute the test suite (e.g. `npm run test` or `npm run gate`) and output passing results before committing.
+- **Micro-Commits:** Commit chunks of work as soon as tests pass. Do not wait for a massive end-of-task commit.

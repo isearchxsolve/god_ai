@@ -83,7 +83,7 @@ MAX_VOCAB = 300             # TF-IDF vocabulary cap (keeps model small in JSONB)
 
 def _tokenize(text: str) -> List[str]:
     """Lowercase, strip punctuation, split on whitespace."""
-    return re.findall(r'[a-z]+', text.lower())
+    return re.findall(r'[a-z0-9]+', text.lower())
 
 
 def _heuristic_features(description: str) -> List[float]:
@@ -106,11 +106,11 @@ def _heuristic_features(description: str) -> List[float]:
                      "module not found", "missing dependency"]
 
     return [
-        sum(1.0 for kw in strong_design if kw in d),    # f0: strong design hits
-        sum(1.0 for kw in medium_design if kw in d),    # f1: medium design hits
-        sum(1.0 for kw in weak_design   if kw in d),    # f2: weak design hits
-        sum(1.0 for kw in code_signals  if kw in d),    # f3: code counter-signals
-        score_design_failure({"description": description}),  # f4: composite heuristic
+        float(sum(1.0 for kw in strong_design if kw in d)),    # f0: strong design hits
+        float(sum(1.0 for kw in medium_design if kw in d)),    # f1: medium design hits
+        float(sum(1.0 for kw in weak_design   if kw in d)),    # f2: weak design hits
+        float(sum(1.0 for kw in code_signals  if kw in d)),    # f3: code counter-signals
+        float(score_design_failure({"description": description})),  # f4: composite heuristic
     ]
 
 

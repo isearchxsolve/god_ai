@@ -122,14 +122,31 @@ async def require_auth(
             detail="Missing x-api-key header",
         )
 
-    pool = await get_db_pool()
-
-    stored_hash = await _get_tenant_key_hash(pool, x_tenant_id)
+    try:
+        pool = await get_db_pool()
+        stored_hash = await _get_tenant_key_hash(pool, x_tenant_id)
+    except HTTPException:
+        raise
+    except Exception:
+        # DB unreachable or schema missing (e.g. migrations not run).
+        # Never leak the driver error as a raw 500 — surface a clean 503.
+        logger.error("auth.db_unavailable", tenant_id=x_tenant_id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Tenant store unavailable",
+        )
 
     if stored_hash is None:
         # Tenant exists (auto-created) but has no key yet — bootstrap it.
         # Only happens on the very first authenticated call per tenant.
-        await bootstrap_tenant_key(pool, x_tenant_id)
+        try:
+            await bootstrap_tenant_key(pool, x_tenant_id)
+        except Exception:
+            logger.error("auth.bootstrap_failed", tenant_id=x_tenant_id)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Tenant store unavailable",
+            )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=(
@@ -165,10 +182,17 @@ async def rotate_tenant_key(tenant_id: str) -> str:
     Invalidates the current key and issues a new one.
     Returns plaintext new key — log/return to operator once.
     """
-    pool = await get_db_pool()
-    key = _generate_key()
-    key_hash = _hash_key(key)
-    await _set_tenant_key_hash(pool, tenant_id, key_hash)
+    try:
+        pool = await get_db_pool()
+        key = _generate_key()
+        key_hash = _hash_key(key)
+        await _set_tenant_key_hash(pool, tenant_id, key_hash)
+    except Exception:
+        logger.error("auth.rotate_failed", tenant_id=tenant_id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Tenant store unavailable",
+        )
     logger.warning(
         "auth.key_rotated",
         tenant_id=tenant_id,

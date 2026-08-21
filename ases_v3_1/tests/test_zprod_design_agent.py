@@ -23,7 +23,9 @@ def test_parse_design_json_fenced(i):
 
 @pytest.mark.parametrize("i", range(10), ids=[f"parse-invalid-{i}" for i in range(10)])
 def test_parse_design_json_invalid(i):
-    assert _parse_design_json(f"not json {i}") is None
+    # The parser's public contract is a safe empty mapping, avoiding nullable
+    # handling at every downstream planner/coder boundary.
+    assert _parse_design_json(f"not json {i}") == {}
 
 
 @pytest.mark.parametrize("i", range(20), ids=[f"css-vars-{i}" for i in range(20)])

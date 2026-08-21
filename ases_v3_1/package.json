@@ -1,5 +1,11 @@
 {
   "dependencies": {
     "supercode-cli": "^0.1.90"
+  },
+  "devDependencies": {
+    "@types/jest": "^30.0.0",
+    "jest": "^30.4.2",
+    "ts-jest": "^29.4.12",
+    "vitest": "^4.1.11"
   }
 }

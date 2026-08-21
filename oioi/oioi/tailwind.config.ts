@@ -1,78 +1,68 @@
 import type { Config } from 'tailwindcss';
 
 const config: Config = {
-  content: ['./src/**/*.{js,ts,jsx,tsx,mdx}'],
+  content: [
+    './src/app/**/*.{js,ts,jsx,tsx,mdx}',
+    './src/components/**/*.{js,ts,jsx,tsx,mdx}',
+    './src/lib/**/*.{js,ts,jsx,tsx,mdx}',
+  ],
   theme: {
     extend: {
       colors: {
-        // Background layers (z-axis depth)
+        brand: {
+          50: '#f0f4ff',
+          100: '#dbe4ff',
+          200: '#bac9ff',
+          300: '#8da3ff',
+          400: '#5b75ff',
+          500: '#3a4eff',
+          600: '#2a36f5',
+          700: '#2229d8',
+          800: '#1f25af',
+          900: '#1f248a',
+        },
         bg: {
-          base: '#0a0a0b',
-          surface: '#131316',
-          elevated: '#1c1c21',
-          canvas: '#0f0f12',
+          base: 'var(--background)',
+          surface: 'var(--bg-surface)',
+          elevated: 'var(--bg-elevated)',
+          canvas: 'var(--bg-canvas)',
         },
-        // Foreground
         fg: {
-          primary: '#ededed',
-          secondary: '#a1a1aa',
-          muted: '#71717a',
-          inverse: '#0a0a0b',
+          primary: 'var(--foreground)',
         },
-        // Brand accent (violet→fuchsia)
-        accent: {
-          400: '#a78bfa',
-          500: '#8b5cf6',
-          600: '#7c3aed',
-          glow: '#8b5cf633',
-        },
-        // Semantic
-        success: '#22c55e',
-        warning: '#f59e0b',
-        danger: '#ef4444',
-        info: '#3b82f6',
-        // Borders
-        border: {
-          subtle: '#27272a',
-          strong: '#3f3f46',
-        },
-        // Legacy alias kept for back-compat with any existing usage
-        primary: {
-          400: '#a78bfa',
-          500: '#8b5cf6',
-          600: '#7c3aed',
-        },
-      },
-      fontFamily: {
-        sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'],
-        mono: ['JetBrains Mono', 'ui-monospace', 'monospace'],
-      },
-      borderRadius: {
-        sm: '6px',
-        md: '8px',
-        lg: '12px',
-        xl: '16px',
       },
       boxShadow: {
-        elevated: '0 1px 2px #00000040, 0 8px 24px #00000060',
-        glow: '0 0 0 4px #8b5cf633',
+        'glass': '0 4px 30px rgba(0, 0, 0, 0.1)',
+        'glass-inset': 'inset 0 1px 0 0 rgba(255, 255, 255, 0.1)',
+        'glow': '0 0 20px rgba(139, 92, 246, 0.5)',
       },
-      transitionTimingFunction: {
-        canvas: 'cubic-bezier(0.16, 1, 0.3, 1)',
+      backgroundImage: {
+        'glass-gradient': 'linear-gradient(135deg, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0.01) 100%)',
+        'mesh-gradient': 'radial-gradient(at 40% 20%, hsla(280,100%,74%,0.15) 0px, transparent 50%), radial-gradient(at 80% 0%, hsla(189,100%,56%,0.15) 0px, transparent 50%), radial-gradient(at 0% 50%, hsla(355,100%,93%,0.1) 0px, transparent 50%)',
       },
-      keyframes: {
-        shimmer: {
-          '0%': { backgroundPosition: '-200% 0' },
-          '100%': { backgroundPosition: '200% 0' },
-        },
-        'pulse-glow': {
-          '0%, 100%': { boxShadow: '0 0 0 0 #8b5cf633' },
-          '50%': { boxShadow: '0 0 0 6px #8b5cf633' },
-        },
+      fontFamily: {
+        sans: ['var(--font-inter)', 'system-ui', 'sans-serif'],
+        display: ['var(--font-outfit)', 'system-ui', 'sans-serif'],
       },
       animation: {
-        shimmer: 'shimmer 1.6s linear infinite',
-        'pulse-glow': 'pulse-glow 1.8s ease-in-out infinite',
+        'fade-in': 'fadeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1)',
+        'slide-up': 'slideUp 0.5s cubic-bezier(0.16, 1, 0.3, 1)',
+        'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+        'float': 'float 6s ease-in-out infinite',
+      },
+      keyframes: {
+        fadeIn: {
+          '0%': { opacity: '0' },
+          '100%': { opacity: '1' },
+        },
+        slideUp: {
+          '0%': { transform: 'translateY(20px)', opacity: '0' },
+          '100%': { transform: 'translateY(0)', opacity: '1' },
+        },
+        float: {
+          '0%, 100%': { transform: 'translateY(0)' },
+          '50%': { transform: 'translateY(-10px)' },
+        },
       },
     },
   },

@@ -1,4 +1,4 @@
-# OiiOii.ai 100% Clone — backend container (free-tier providers)
+# OiiOii.ai 100% Clone — backend container (free-tier, NVIDIA-free)
 # Multi-stage build: deps -> app
 FROM python:3.11-slim AS deps
 
@@ -25,8 +25,7 @@ FROM python:3.11-slim AS app
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PORT=8000 \
-    PYTHONPATH=/srv/app
+    PORT=8000
 
 WORKDIR /srv/app
 
@@ -43,6 +42,9 @@ COPY --from=deps /usr/local/bin /usr/local/bin
 
 # Project source
 COPY backend /srv/app/backend
+COPY tests   /srv/app/tests
+COPY scripts /srv/app/scripts
+COPY README.md /srv/app/README.md 2>/dev/null || true
 
 USER appuser
 

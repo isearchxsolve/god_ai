@@ -5,7 +5,7 @@ Implements the AIProviderAdapter interface. NVIDIA NIM is NOT used.
 """
 from __future__ import annotations
 
-import asyncio
+import time
 from abc import ABC, abstractmethod
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
@@ -30,7 +30,7 @@ class ChatCompletionResponse(BaseModel):
     created: int
     model: str
     choices: List[Dict[str, Any]]
-    usage: Dict[str, Any]
+    usage: Dict[str, int]
 
 
 class ChatCompletionChunk(BaseModel):
@@ -75,7 +75,7 @@ class EmbeddingResponse(BaseModel):
     object: str = "list"
     data: List[Dict[str, Any]]
     model: str
-    usage: Dict[str, Any]
+    usage: Dict[str, int]
 
 
 class Model(BaseModel):
@@ -153,14 +153,14 @@ class OpenRouterAdapter(AIProviderAdapter):
             try:
                 resp = await self.client.request(method, path, json=json)
                 if resp.status_code in RETRY_STATUS and attempt < MAX_RETRIES - 1:
-                    await asyncio.sleep(backoff(attempt))
+                    time.sleep(backoff(attempt))
                     continue
                 resp.raise_for_status()
                 return resp
             except httpx.HTTPError as exc:
                 last_exc = exc
                 if attempt < MAX_RETRIES - 1:
-                    await asyncio.sleep(backoff(attempt))
+                    time.sleep(backoff(attempt))
                     continue
                 raise
         raise last_exc  # type: ignore[misc]

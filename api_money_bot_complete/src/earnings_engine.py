@@ -352,6 +352,7 @@ class EarningsMonitor:
     def __init__(self, platforms: List):
         self.platforms = {p.NAME: p for p in platforms}
         self.reports: Dict[str, EarningsReport] = {}
+        self._lock = __import__('threading').Lock()
 
     def check_all(self) -> List[EarningsReport]:
         """Check earnings on every available platform."""
@@ -362,7 +363,8 @@ class EarningsMonitor:
                 report = get_platform_earnings(platform)
             except Exception as e:
                 report = EarningsReport(name, status="error", error=str(e))
-            self.reports[name] = report
+            with self._lock:
+                self.reports[name] = report
             reports.append(report)
             if report.status == "ok":
                 log.info(f"  {name:<22} ${report.total_usd:>8.2f}  "
@@ -383,35 +385,42 @@ class EarningsMonitor:
             report = get_platform_earnings(platform)
         except Exception as e:
             report = EarningsReport(name, status="error", error=str(e))
-        self.reports[name] = report
+        with self._lock:
+            self.reports[name] = report
         return report
 
     def total_earned(self) -> float:
         """Sum of all earnings across all platforms."""
-        return sum(r.total_usd for r in self.reports.values() if r.status == "ok")
+        with self._lock:
+            return sum(r.total_usd for r in self.reports.values() if r.status == "ok")
 
     def total_available(self) -> float:
         """Sum of available (not pending) earnings."""
-        return sum(r.available_usd for r in self.reports.values() if r.status == "ok")
+        with self._lock:
+            return sum(r.available_usd for r in self.reports.values() if r.status == "ok")
 
     def total_pending(self) -> float:
         """Sum of pending earnings."""
-        return sum(r.pending_usd for r in self.reports.values() if r.status == "ok")
+        with self._lock:
+            return sum(r.pending_usd for r in self.reports.values() if r.status == "ok")
 
     def earning_platforms_earnings(self) -> Dict[str, EarningsReport]:
         """Earnings from pure earning platforms (stock media, freelance, ecommerce, content, microtasks)."""
-        return {n: r for n, r in self.reports.items()
-                if n in self.EARNING_PLATFORM_NAMES and r.status == "ok"}
+        with self._lock:
+            return {n: r for n, r in self.reports.items()
+                    if n in self.EARNING_PLATFORM_NAMES and r.status == "ok"}
 
     def withdrawal_platform_balances(self) -> Dict[str, EarningsReport]:
         """Balances from payment/withdrawal platforms."""
-        return {n: r for n, r in self.reports.items()
-                if n in self.WITHDRAWAL_PLATFORM_NAMES and r.status == "ok"}
+        with self._lock:
+            return {n: r for n, r in self.reports.items()
+                    if n in self.WITHDRAWAL_PLATFORM_NAMES and r.status == "ok"}
 
     def trading_platform_balances(self) -> Dict[str, EarningsReport]:
         """Balances from trading platforms."""
-        return {n: r for n, r in self.reports.items()
-                if n in self.TRADING_PLATFORM_NAMES and r.status == "ok"}
+        with self._lock:
+            return {n: r for n, r in self.reports.items()
+                    if n in self.TRADING_PLATFORM_NAMES and r.status == "ok"}
 
     def summary(self) -> Dict[str, Any]:
         """Produce a summary dict."""
@@ -476,7 +485,8 @@ class EarningsMonitor:
 
     def _save_report(self):
         """Save earnings report to JSON file."""
-        data = {name: asdict(r) for name, r in self.reports.items()}
+        with self._lock:
+            data = {name: asdict(r) for name, r in self.reports.items()}
         with open(EARNINGS_FILE, "w", encoding="utf-8") as f:
             json.dump({"timestamp": datetime.now(timezone.utc).isoformat(), "reports": data}, f, indent=2, default=str)
         log.info(f"Report saved to {EARNINGS_FILE}")
@@ -496,6 +506,7 @@ class TradingBalanceTracker:
         self._balance = 0.0
         self._total_deposited = 0.0
         self._total_traded = 0.0
+        self._lock = __import__('threading').Lock()
         self._load()
 
     def _load(self):
@@ -520,33 +531,39 @@ class TradingBalanceTracker:
 
     @property
     def balance(self) -> float:
-        return self._balance
+        with self._lock:
+            return self._balance
 
     @property
     def total_deposited(self) -> float:
-        return self._total_deposited
+        with self._lock:
+            return self._total_deposited
 
     @property
     def total_traded(self) -> float:
-        return self._total_traded
+        with self._lock:
+            return self._total_traded
 
     def deposit(self, amount: float):
         """Add funds to the trading balance (simulates bank deposit to exchange)."""
-        self._balance += amount
-        self._total_deposited += amount
-        self._save()
+        with self._lock:
+            self._balance += amount
+            self._total_deposited += amount
+            self._save()
         log.info(f"[TradingBalance] Deposited ${amount:.2f} --- balance: ${self._balance:.2f}")
 
     def withdraw_trade(self, amount: float):
         """Deduct funds (simulates trade execution spending)."""
-        self._balance -= amount
-        self._total_traded += amount
-        self._save()
+        with self._lock:
+            self._balance -= amount
+            self._total_traded += amount
+            self._save()
         log.info(f"[TradingBalance] Trade spent ${amount:.2f} --- balance: ${self._balance:.2f}")
 
     def has_sufficient_balance(self, min_balance: float = None) -> bool:
         threshold = min_balance if min_balance is not None else EarningsConfig.MIN_TRADE_BALANCE
-        return self._balance >= threshold
+        with self._lock:
+            return self._balance >= threshold
 
 
 # ═══════════════════════════════════════════════════════════════

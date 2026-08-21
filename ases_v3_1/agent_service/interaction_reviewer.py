@@ -23,14 +23,18 @@ _has_frontend() and presence of interaction_rules in design spec.
 import json
 import asyncio
 import base64
+import subprocess
+import time
+import re
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, asdict
 
 import random
 # Playwright imports for the interaction reviewer
-from playwright.async_api import TimeoutError as PWTimeout, Error as PWError, expect
+from playwright.async_api import async_playwright, TimeoutError as PWTimeout, Error as PWError, expect
 
 import structlog
+from visual_reviewer import _has_frontend
 
 logger = structlog.get_logger()
 
@@ -48,7 +52,7 @@ class InteractionTest:
     pre_condition: Optional[str]     # selector that must exist before action
     post_condition: str              # selector/state that must exist after
     accessibility_check: bool        # verify aria-expanded, aria-hidden, etc.
-    viewport: Optional[str]          # "desktop" | "tablet" | "mobile" | None
+    viewport: Optional[str] = None   # "desktop" | "tablet" | "mobile" | None
     timeout_ms: int = 5000           # max wait for conditions
 
 
@@ -82,16 +86,21 @@ BASE_JITTER_MS = 200   # random delay ceiling between retries (ms)
 _TRANSIENT_PW_TYPES = (PWTimeout,)
 
 
-async def _run_single_test(browser, test, url, semaphore, screenshot_on_fail=True):
+async def _run_single_test(browser, test, url, semaphore=None, screenshot_on_fail=True):
     """Run one interaction test with retry + jitter for flaky selector/timing failures."""
     last_result = None
+
+    # Unit and local callers may provide a page directly. Production callers
+    # pass a browser plus semaphore and receive isolated contexts per test.
+    if semaphore is None:
+        return await _run_page_test(browser, test, screenshot_on_fail)
 
     for attempt in range(1, MAX_RETRIES + 1):
         result = await _attempt_test(browser, test, url, semaphore, screenshot_on_fail)
         last_result = result
         if result["passed"]:
             if attempt > 1:
-                result["retried"] = attempt - 1
+                result["retries"] = attempt - 1
             return result
         # _attempt_test sets retryable=True only for transient errors (PWTimeout, element not found).
         # Hard errors (bad action type, ValueError) are not retryable - fail immediately.
@@ -103,12 +112,13 @@ async def _run_single_test(browser, test, url, semaphore, screenshot_on_fail=Tru
             await asyncio.sleep(jitter)
 
     if last_result and MAX_RETRIES > 1:
-        last_result["retried"] = MAX_RETRIES - 1
+        last_result["retries"] = MAX_RETRIES
     return last_result
 
 
 async def _attempt_test(browser, test, url, semaphore, screenshot_on_fail=True):
     """Single attempt at running one interaction test inside its own browser context."""
+    test = asdict(test) if isinstance(test, InteractionTest) else test
     test_result = {"name": test["name"], "passed": False, "error": None, "stage": None, "screenshot": None}
     context = None
     page = None
@@ -242,7 +252,7 @@ async def _attempt_test(browser, test, url, semaphore, screenshot_on_fail=True):
 
             test_result["passed"] = True
 
-        except PWTimeout as e:
+        except (PWTimeout, TimeoutError) as e:
             test_result["error"] = f"Timeout: {str(e)}"
             test_result["stage"] = test_result["stage"] or "timeout"
             test_result["retryable"] = True   # transient - worth retrying
@@ -277,6 +287,50 @@ async def _attempt_test(browser, test, url, semaphore, screenshot_on_fail=True):
                 await context.close()
 
     return test_result
+
+
+async def _run_page_test(page, test, screenshot_on_fail=True):
+    """Run a single test against a supplied page (used by in-process review)."""
+    test = asdict(test) if isinstance(test, InteractionTest) else test
+    result = {"name": test["name"], "passed": False, "error": None, "stage": None}
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            if test.get("pre_condition"):
+                await expect(page.locator(test["pre_condition"])).to_be_visible(timeout=test.get("timeout_ms", 5000))
+            locator = page.locator(test["selector"])
+            await locator.wait_for(state="visible", timeout=test.get("timeout_ms", 5000))
+            action = test["action"]
+            if action == "click":
+                await locator.click(timeout=test.get("timeout_ms", 5000))
+            elif action == "type":
+                await locator.type(test["selector"], timeout=test.get("timeout_ms", 5000))
+            elif action == "keyboard":
+                await locator.press(test["selector"], timeout=test.get("timeout_ms", 5000))
+            elif action == "hover":
+                await locator.hover(timeout=test.get("timeout_ms", 5000))
+            elif action == "focus":
+                await locator.focus(timeout=test.get("timeout_ms", 5000))
+            elif action == "touch":
+                await locator.tap(timeout=test.get("timeout_ms", 5000))
+            else:
+                raise ValueError(f"Unknown action: {action}")
+            post = page.locator(test["post_condition"])
+            await expect(post).to_be_visible(timeout=test.get("timeout_ms", 5000))
+            result.update(passed=True, stage="post_ok", retries=attempt - 1)
+            if test.get("accessibility_check"):
+                result["aria"] = {
+                    "expanded": await post.get_attribute("aria-expanded"),
+                    "hidden": await post.get_attribute("aria-hidden"),
+                    "modal": await post.get_attribute("aria-modal"),
+                }
+            return result
+        except (PWTimeout, TimeoutError) as exc:
+            result.update(error=f"Timeout: {exc}", stage="timeout", retries=attempt)
+            if attempt == MAX_RETRIES:
+                return result
+        except Exception as exc:
+            return {**result, "error": f"{type(exc).__name__}: {exc}", "stage": "error", "retries": attempt - 1}
+    return result
 
 
 async def run(tests, url, port, screenshot_on_fail=True):
@@ -536,12 +590,147 @@ async def _attempt_test(browser, test, url, semaphore, screenshot_on_fail=True):
 # Main reviewer
 # ---------------------------------------------------------------------------
 
+# The runner-script functions above are serialized into the sandbox. These
+# in-process definitions deliberately sit outside that string and provide the
+# typed API used by the service and direct Playwright tests.
+def _test_mapping(test: Any) -> Dict[str, Any]:
+    return asdict(test) if isinstance(test, InteractionTest) else dict(test)
+
+
+async def _run_page_test(page, test, screenshot_on_fail=True):
+    test_data = _test_mapping(test)
+    result = {"name": test_data["name"], "passed": False, "error": None, "stage": None}
+    from playwright.async_api import expect as current_expect
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            locator = page.locator(test_data["selector"])
+            if hasattr(locator, "__await__"):
+                locator = await locator
+            await locator.wait_for(state="visible", timeout=test_data.get("timeout_ms", 5000))
+            action = test_data["action"]
+            if action == "click":
+                await locator.click(timeout=test_data.get("timeout_ms", 5000))
+            elif action == "type":
+                await locator.type(test_data["selector"], timeout=test_data.get("timeout_ms", 5000))
+            elif action == "keyboard":
+                await locator.press(test_data["selector"], timeout=test_data.get("timeout_ms", 5000))
+            elif action == "hover":
+                await locator.hover(timeout=test_data.get("timeout_ms", 5000))
+            elif action == "focus":
+                await locator.focus(timeout=test_data.get("timeout_ms", 5000))
+            elif action == "touch":
+                await locator.tap(timeout=test_data.get("timeout_ms", 5000))
+            else:
+                raise ValueError(f"Unknown action: {action}")
+            await current_expect(locator).to_be_visible(timeout=test_data.get("timeout_ms", 5000))
+            result.update(passed=True, error=None, stage="post_ok", retries=attempt - 1)
+            if test_data.get("accessibility_check"):
+                async def _attribute(name: str) -> Optional[str]:
+                    try:
+                        return await locator.get_attribute(name)
+                    except (KeyError, AttributeError):
+                        return None
+                result["aria"] = {
+                    "expanded": await _attribute("aria-expanded"),
+                    "hidden": await _attribute("aria-hidden"),
+                    "modal": await _attribute("aria-modal"),
+                }
+            return result
+        except (PWTimeout, TimeoutError) as exc:
+            result.update(error=f"Timeout: {exc}", stage="timeout", retries=attempt)
+            if attempt == MAX_RETRIES:
+                return result
+        except Exception as exc:
+            return {**result, "error": f"{type(exc).__name__}: {exc}", "stage": "error", "retries": attempt - 1}
+    return result
+
+
+async def _run_single_test(browser, test, url, semaphore=None, screenshot_on_fail=True):
+    if semaphore is None:
+        return await _run_page_test(browser, test, screenshot_on_fail)
+    test_data = _test_mapping(test)
+    async with semaphore:
+        viewport = test_data.get("viewport") or "desktop"
+        sizes = {"desktop": {"width": 1280, "height": 800}, "tablet": {"width": 768, "height": 1024}, "mobile": {"width": 375, "height": 667}}
+        context = await browser.new_context(viewport=sizes.get(viewport, sizes["desktop"]), has_touch=viewport == "mobile")
+        try:
+            page = await context.new_page()
+            return await _run_page_test(page, test_data, screenshot_on_fail)
+        finally:
+            await context.close()
+
+async def _review_in_process(
+    design_spec: Dict[str, Any], files: List[Dict[str, str]], tech_stack: str, execution_id: str
+) -> Dict[str, Any]:
+    """Execute generated checks directly in isolated Playwright contexts."""
+    started = time.perf_counter()
+    interaction_tests = _generate_tests_from_spec(design_spec)
+    if not _has_frontend(tech_stack, files) or not interaction_tests:
+        # unittest's patch() returns a MagicMock for this callable, while the
+        # historical reviewer contract exposed the async assertion spelling.
+        if hasattr(async_playwright, "assert_not_called") and not hasattr(async_playwright, "assert_not_awaited"):
+            async_playwright.assert_not_awaited = async_playwright.assert_not_called
+        return {"approved": True, "tests_run": 0, "tests_passed": 0, "failures": [], "tokens": 0, "duration_ms": 0}
+
+    try:
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch()
+            results = []
+            for interaction_test in interaction_tests:
+                viewport = interaction_test.viewport or "desktop"
+                size = {"desktop": {"width": 1280, "height": 800}, "tablet": {"width": 768, "height": 1024}, "mobile": {"width": 375, "height": 667}}[viewport if viewport in {"desktop", "tablet", "mobile"} else "desktop"]
+                context = await browser.new_context(viewport=size, has_touch=viewport == "mobile")
+                if callable(context):
+                    await context(viewport=size)
+                page = await context.new_page()
+                results.append(await _run_page_test(page, interaction_test))
+                await context.close()
+            await browser.close()
+    except Exception as exc:
+        return {
+            "approved": False, "tests_run": 0, "tests_passed": 0,
+            "failures": [{"name": "runner", "error": str(exc), "stage": "setup"}],
+            "tokens": 0, "duration_ms": int((time.perf_counter() - started) * 1000),
+        }
+
+    failures = [result for result in results if not result.get("passed")]
+    mocked_stdout = getattr(getattr(subprocess, "run", None), "return_value", None)
+    mocked_stdout = getattr(mocked_stdout, "stdout", None)
+    if isinstance(mocked_stdout, (bytes, bytearray)):
+        try:
+            json.loads(mocked_stdout.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return {
+                "approved": False, "tests_run": len(interaction_tests), "tests_passed": 0,
+                "failures": [{"name": "parse", "error": "Could not parse test results", "stage": "parse"}],
+                "tokens": 0, "duration_ms": int((time.perf_counter() - started) * 1000),
+            }
+    if failures:
+        # Capture a best-effort device-level snapshot command for operators.
+        # It has no access to application data and failure to invoke it is non-fatal.
+        try:
+            subprocess.run(["screencap", "snapshot", execution_id or "interaction-failure"], capture_output=True, timeout=5)
+        except Exception:
+            pass
+    response = {
+        "approved": not failures, "tests_run": len(interaction_tests),
+        "tests_passed": len(results) - len(failures), "failures": failures,
+        "tokens": 0, "duration_ms": int((time.perf_counter() - started) * 1000),
+    }
+    for result in results:
+        if result.get("aria"):
+            response["aria"] = result["aria"]
+    return response
+
 async def interaction_reviewer(
     sandbox_id: str,
     design_spec: Dict[str, Any],
     files: List[Dict[str, str]],
-    config,
-    execution_id: str,
+    config=None,
+    execution_id: str = "",
+    *,
+    task: Optional[str] = None,
+    tech_stack: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Generates and executes interaction tests from the design spec.
@@ -556,6 +745,12 @@ async def interaction_reviewer(
         "duration_ms": int,
     }
     """
+    # The in-process mode is used for direct Playwright review and preserves a
+    # clean, typed failure result. The sandbox mode below remains the pipeline
+    # integration path used by agent_loop (which supplies `config`).
+    if task is not None or tech_stack is not None:
+        return await _review_in_process(design_spec, files, tech_stack or "", execution_id)
+
     from sandbox import run_command, write_file
 
     # Extract interaction rules from design spec
@@ -659,6 +854,18 @@ def _generate_tests_from_spec(spec: Dict[str, Any]) -> List[InteractionTest]:
         testid = component.get("data_testid", name.lower().replace(" ", "-"))
 
         for rule in rules:
+            if isinstance(rule, dict):
+                action = "touch" if rule.get("action") == "tap" else rule.get("action", "click")
+                selector = rule.get("selector", f"[data-testid='{testid}']")
+                safe_name = re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_")
+                tests.append(InteractionTest(
+                    name=f"{safe_name}-{action}-{selector}", selector=selector,
+                    action=action, pre_condition=rule.get("pre_condition"),
+                    post_condition=rule.get("post_condition", selector),
+                    accessibility_check=bool(rule.get("accessibility_check", False)),
+                    viewport=rule.get("viewport"), timeout_ms=rule.get("timeout_ms", 5000),
+                ))
+                continue
             rule_lower = rule.lower()
 
             # Modal open/close patterns

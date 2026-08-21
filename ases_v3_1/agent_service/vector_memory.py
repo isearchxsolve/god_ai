@@ -103,8 +103,8 @@ async def store_memory_pattern_vector(
             await pool.execute(
                 """
                 INSERT INTO code_patterns
-                    (tenant_id, pattern_hash, context, solution, pattern_type, tech_stack, embedding, success_count)
-                VALUES ($1, $2, $3, $4, 'success', $5, $6::vector, 1)
+                    (tenant_id, pattern_hash, context, solution, pattern_type, embedding, tech_stack, success_count)
+                VALUES ($1, $2, $3, $4, 'success', $5::vector, $6, 1)
                 ON CONFLICT (tenant_id, pattern_hash)
                 DO UPDATE SET
                     success_count = code_patterns.success_count + 1,
@@ -115,8 +115,8 @@ async def store_memory_pattern_vector(
                 pattern_hash,
                 context_text,
                 solution_text[:1000],
-                tech_stack,
                 json.dumps(embedding),
+                tech_stack,
             )
         else:
             # Fallback: store without embedding (ILIKE still works for retrieval)
@@ -262,8 +262,8 @@ async def store_design_spec_vector(
             await pool.execute(
                 """
                 INSERT INTO design_specs
-                    (tenant_id, task_context, task_context_hash, tech_stack, spec_json, embedding, hit_count)
-                VALUES ($1, $2, $3, $4, $5, $6::vector, 1)
+                    (tenant_id, task_context, task_context_hash, tech_stack, embedding, spec_json, hit_count)
+                VALUES ($1, $2, $3, $4, $5::vector, $6, 1)
                 ON CONFLICT (tenant_id, task_context_hash)
                 DO UPDATE SET
                     spec_json = EXCLUDED.spec_json,
@@ -275,8 +275,8 @@ async def store_design_spec_vector(
                 task[:200],
                 context_hash,
                 tech_stack,
-                json.dumps(design_spec),
                 json.dumps(embedding),
+                json.dumps(design_spec),
             )
             logger.info("vector_memory.design_stored", execution_id=execution_id)
     except Exception as e:

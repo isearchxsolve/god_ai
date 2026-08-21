@@ -210,7 +210,7 @@ def test_{safe_name}_unauthenticated():
     client = TestClient(app)
     if hasattr(client, "raise_server_exceptions"):
         client.raise_server_exceptions = False
-    response = client.{method.lower()}("{path}")
+    response = client.{method.lower()}({json.dumps(path)})
     # auth gates: 200 is suspicious if no-auth was implied, but we only flag 5xx
     assert response.status_code < 500, (
         f"route {method} {path} returned {{response.status_code}} without auth — "
@@ -226,7 +226,7 @@ def test_{safe_name}_oversized_body():
         return
     client = TestClient(_app)
     big = "x" * 1_000_000
-    response = client.{method.lower()}("{path}", json={{"big": big}})
+    response = client.{method.lower()}({json.dumps(path)}, json={{"big": big}})
     assert response.status_code in (200, 201, 400, 401, 403, 413), (
         f"unexpected {{response.status_code}} on oversized body")
 """

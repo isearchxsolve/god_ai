@@ -82,7 +82,7 @@ async def _gather_execution_signals(pool, tenant_uuid: str,
         async with pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT success,
+                SELECT COUNT(*) FILTER (WHERE success) AS success_count,
                        AVG(iterations)        AS avg_iter,
                        AVG(cost_usd)          AS avg_cost,
                        AVG(compute_seconds)   AS avg_dur,
@@ -103,8 +103,7 @@ async def _gather_execution_signals(pool, tenant_uuid: str,
     n = int(r["n"] or 0)
     if not n:
         return []
-    success_rate = float(r["success"] or 0) / n if isinstance(r["success"], (int, float)) \
-        else 0.5  # placeholder; success column is bool
+    success_rate = float(r["success_count"] or 0) / n
     avg_cost = float(r["avg_cost"] or 0)
     avg_iter = float(r["avg_iter"] or 0)
     uniq_deliveries = int(r["uniq_deliveries"] or 0)
