@@ -42,8 +42,10 @@ export default function Home() {
   const [selectedModel, setSelectedModel] = useState('gemini-2.5-flash');
   const [selectedStyle, setSelectedStyle] = useState('Anime Style 0');
   const [isGenerating, setIsGenerating] = useState(false);
+  const [pipelineState, setPipelineState] = useState<'idle' | 'scripting' | 'pending_approval' | 'animating' | 'completed'>('idle');
   const [agentProgress, setAgentProgress] = useState<number>(0);
   const [activeAgent, setActiveAgent] = useState<string>('Director');
+  const [generatedScenes, setGeneratedScenes] = useState<any[]>([]);
   
   // Storyboard panels
   const [panels, setPanels] = useState<Array<{
@@ -98,21 +100,22 @@ export default function Home() {
 
   const handleRunPipeline = async () => {
     setIsGenerating(true);
+    setPipelineState('scripting');
     setAgentProgress(10);
     setActiveAgent('Scriptwriter');
 
     try {
-      // Simulate multi-agent step progression for UI visual
+      // Simulate Agent 1-4 step progression
       const agentPromise = (async () => {
-        for (let i = 0; i < agentTeam.length; i++) {
+        for (let i = 0; i < 4; i++) {
           setActiveAgent(agentTeam[i].role);
-          setAgentProgress(Math.round(((i + 1) / agentTeam.length) * 100));
+          setAgentProgress(Math.round(((i + 1) / 7) * 100));
           await new Promise((r) => setTimeout(r, 800));
         }
       })();
 
-      // Run real backend pipeline call
-      const res = await fetch('/api/v1/projects/new-project/pipeline/run/', {
+      // Run real backend pipeline call for Scriptwriter
+      const res = await fetch('/api/v1/projects/new-project/pipeline/scriptwriter', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -122,10 +125,58 @@ export default function Home() {
         })
       });
 
-      if (!res.ok) throw new Error('Pipeline failed');
+      if (!res.ok) throw new Error('Pipeline scriptwriter failed');
       const data = await res.json();
       
-      await agentPromise; // Ensure UI completes animation
+      await agentPromise; 
+
+      if (data.result && data.result.scenes) {
+        setGeneratedScenes(data.result.scenes);
+        setPanels(data.result.scenes.map((scene: any, i: number) => ({
+          id: i + 1,
+          title: `Scene ${scene.scene || i + 1}`,
+          prompt: scene.visual_prompt,
+          imageUrl: scene.image_url,
+          status: 'ready',
+          aspectRatio: '16:9',
+        })));
+        setPipelineState('pending_approval');
+        setActiveAgent('Human Approval Required');
+      }
+    } catch (err) {
+      console.error(err);
+      setIsGenerating(false);
+      setPipelineState('idle');
+    }
+  };
+
+  const handleApprovePipeline = async () => {
+    setPipelineState('animating');
+    setActiveAgent('Animator');
+
+    try {
+      // Simulate Agent 5-7 step progression
+      const agentPromise = (async () => {
+        for (let i = 4; i < 7; i++) {
+          setActiveAgent(agentTeam[i].role);
+          setAgentProgress(Math.round(((i + 1) / 7) * 100));
+          await new Promise((r) => setTimeout(r, 800));
+        }
+      })();
+
+      // Run real backend pipeline call for Animator
+      const res = await fetch('/api/v1/projects/new-project/pipeline/animate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          scenes: generatedScenes
+        })
+      });
+
+      if (!res.ok) throw new Error('Pipeline animator failed');
+      const data = await res.json();
+      
+      await agentPromise; 
 
       if (data.result && data.result.animation) {
         setPanels(prev => {
@@ -135,10 +186,12 @@ export default function Home() {
               ...p,
               title: `Scene ${anim.scene || i + 1}`,
               videoUrl: anim.video_url,
+              status: 'ready'
             };
           });
         });
       }
+      setPipelineState('completed');
     } catch (err) {
       console.error(err);
     } finally {
@@ -320,27 +373,47 @@ export default function Home() {
               </Select>
             </div>
 
-            <div className="mt-4">
+            <div className="mt-4 space-y-3">
               <Button 
                 onClick={handleRunPipeline}
-                disabled={isGenerating}
+                disabled={pipelineState !== 'idle' && pipelineState !== 'completed'}
                 className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-cyan-500 via-indigo-600 to-fuchsia-600 hover:opacity-90 transition-opacity font-semibold text-xs text-white shadow-lg shadow-indigo-600/30 flex items-center justify-center space-x-2 disabled:opacity-50"
               >
-                {isGenerating ? (
+                {pipelineState === 'scripting' ? (
                   <>
                     <RefreshCw className="w-4 h-4 animate-spin" />
-                    <span>Agent Team Working ({activeAgent})...</span>
+                    <span>Scripting...</span>
                   </>
                 ) : (
                   <>
                     <Sparkles className="w-4 h-4" />
-                    <span>Generate Full Animation Pipeline</span>
+                    <span>Generate Scripts & Scenes</span>
                   </>
                 )}
               </Button>
+
+              {pipelineState === 'pending_approval' && (
+                <Button 
+                  onClick={handleApprovePipeline}
+                  className="w-full py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 transition-opacity font-semibold text-xs text-white shadow-lg flex items-center justify-center space-x-2 animate-pulse"
+                >
+                  <CheckCircle2 className="w-4 h-4" />
+                  <span>Approve & Generate Video</span>
+                </Button>
+              )}
+
+              {pipelineState === 'animating' && (
+                <Button 
+                  disabled
+                  className="w-full py-3 px-4 rounded-xl bg-slate-700 font-semibold text-xs text-white flex items-center justify-center space-x-2"
+                >
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                  <span>Animating & Stitching...</span>
+                </Button>
+              )}
             </div>
 
-            {isGenerating && (
+            {(pipelineState !== 'idle' && pipelineState !== 'completed') && (
               <div className="mt-4 space-y-2">
                 <div className="flex justify-between text-[11px] text-slate-400">
                   <span>Pipeline Progress</span>
