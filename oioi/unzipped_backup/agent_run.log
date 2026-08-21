@@ -1,0 +1,65 @@
+
+[38;2;124;111;206m+--------------------------------------------------------------------------------------------------------------+[0m
+[38;2;124;111;206m|[0m                                                                                                              [38;2;124;111;206m|[0m
+[38;2;124;111;206m|[0m                                          [1;38;2;167;139;250m◆  [0m[1;38;2;167;139;250mNEON ARCHITECT[0m[38;2;100;116;139m  v4.6.4[0m                                           [38;2;124;111;206m|[0m
+[38;2;124;111;206m|[0m                                                                                                              [38;2;124;111;206m|[0m
+[38;2;124;111;206m|[0m                               [1;38;2;241;245;249mGLM-5.2[0m[38;2;100;116;139m   ·   [0m[38;2;56;189;248mNVIDIA NIM[0m[38;2;100;116;139m   ·   [0m[38;2;249;168;212mZero Bottlenecks[0m                                [38;2;124;111;206m|[0m
+[38;2;124;111;206m|[0m                                                                                                              [38;2;124;111;206m|[0m
+[38;2;124;111;206m+--------------------------------------------------------------------------------------------------------------+[0m
+
+[38;2;124;111;206m+--------------------------------------------------------------------------------------------------------------+[0m
+[38;2;124;111;206m|[0m [1;38;2;167;139;250m◆ [0m[1;38;2;167;139;250mNEON ARCHITECT[0m[38;2;100;116;139m  v4.6.4[0m                                                             [1;38;2;241;245;249mGLM-5.2[0m[38;2;100;116;139m  [0m[38;2;148;163;184mC:\god_ai\oioi[0m [38;2;124;111;206m|[0m
+[38;2;124;111;206m+--------------------------------------------------------------------------------------------------------------+[0m
+
+[38;2;71;85;105m────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+[1;38;2;74;222;128m  ✓ [0m[38;2;226;232;240mInitialized in C:\god_ai\oioi[0m
+[38;2;56;189;248m  · [0m[38;2;226;232;240mPermissions: project-folder only for files | full_in_project=True | run_tool=structured (program+args, no [0m
+[38;2;226;232;240mshell) | local_net=True | worktree=True | tdd=True[0m
+[38;2;56;189;248m  · [0m[38;2;226;232;240mThinking: low | show=True | first_token=150.0s[0m
+[38;2;56;189;248m  · [0m[38;2;226;232;240mModel: GLM-5.2 (z-ai/glm-5.2)[0m
+[38;2;56;189;248m  · [0m[38;2;226;232;240mPersona: Architect[0m
+[1;38;2;74;222;128m  ✓ [0m[38;2;226;232;240mSession restored from previous launch[0m
+[38;2;56;189;248m  · [0m[38;2;226;232;240mGoal: Build a 100% pixel-perfect clone of oiioii.ai � the AI creative studio. Features: 1) Landing page with[0m
+[38;2;226;232;240moiioii.ai branding, hero section, feature cards. 2) Video generation UI with model/style selectors (75+ models [0m
+[38;2;226;232;240macross video/image/LLM categories, 150+ animation styles). 3) Image generation UI. 4) 7-agent animation pipeline[0m
+[38;2;226;232;240mendpoint. 5) Free-tier providers only: Gemini, Pollinations, OpenRouter, Groq, Cerebras, Cohere, Cloudflare. [0m
+[38;2;226;232;240mNVIDIA is BANNED. 6) All 52 backend tests must stay green. AC-11 is already fixed (Cerebras no longer advertises[0m
+[38;2;226;232;240membedding). Frontend in frontend/ directory using React or plain HTML. Backend already in backend/.[0m
+[38;2;56;189;248m  · [0m[38;2;226;232;240mSDLC phase: ARCHITECTURE | completed: planning[0m
+[38;2;56;189;248m  · [0m[38;2;226;232;240mTodos: 6 item(s) restored[0m
+[38;2;56;189;248m  · [0m[38;2;226;232;240mConversation: 57 message(s) restored[0m
+[38;2;56;189;248m  · [0m[38;2;226;232;240mTokens so far: 7,515,095 tok total (7,495,416 prompt + 19,679 completion)[0m
+
+[1;38;2;167;139;250m RESUME AUTOPILOT? [0m [38;2;71;85;105m────────────────────────────────────────────────────────────────────────────────────────────[0m
+[38;2;56;189;248m  · [0m[38;2;226;232;240mGoal: Build a 100% pixel-perfect clone of oiioii.ai � the AI creative studio. Features: 1) Landing page with[0m
+[38;2;226;232;240moiioii.ai branding, hero section, feature cards. 2) Video generation UI with model/style selectors (75+ models [0m
+[38;2;226;232;240macross video/image/LLM categories, 150+ animation styles). 3) Image generation UI. 4) 7-agent animation pipeline[0m
+[38;2;226;232;240mendpoint. 5) Free-tier providers only: Gemini, Pollinations, OpenRouter, Groq, Cerebras, Cohere, Cloudflare. [0m
+[38;2;226;232;240mNVIDIA is BANNED. 6) All 52 backend tests must stay green. AC-11 is already fixed (Cerebras no longer advertises[0m
+[38;2;226;232;240membedding). Frontend in frontend/ directory using React or plain HTML. Backend already in backend/.[0m
+[38;2;56;189;248m  · [0m[38;2;226;232;240mLast phase: ARCHITECTURE | completed: planning[0m
+[38;2;56;189;248m  · [0m[38;2;226;232;240mPress Enter or y to resume autopilot from this phase.[0m
+[38;2;56;189;248m  · [0m[38;2;226;232;240mType n to stay in interactive mode (goal kept).[0m
+  Resume autopilot? [Y/n]: [38;2;56;189;248m  · [0m[38;2;226;232;240mStaying interactive. /autopilot when ready, /autopilot restart for a full restart.[0m
+
+[1;38;2;167;139;250m READY [0m [38;2;71;85;105m────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+  [38;2;148;163;184m   API key[0m[38;2;148;163;184m  [0m[38;2;226;232;240m***-ULB  (14 projects configured)                                      [0m                           
+  [38;2;148;163;184m  Timeouts[0m[38;2;148;163;184m  [0m[38;2;226;232;240mfirst-token 150s  ·  retries 8  ·  thinking low                        [0m                           
+  [38;2;148;163;184m  Personas[0m[38;2;148;163;184m  [0m[38;2;226;232;240marchitect · designer · engineer · tester · debugger · reviewer · devops[0m                           
+
+[38;2;148;163;184m  [0m[38;2;226;232;240mType a request[0m[38;2;148;163;184m  ·  press [0m[1;38;2;241;245;249mEnter[0m[38;2;148;163;184m to continue  ·  [0m[1;38;2;56;189;248m/help[0m[38;2;148;163;184m commands  ·  [0m[1;38;2;56;189;248m/goal[0m[38;2;148;163;184m + [0m[1;38;2;56;189;248m/autopilot[0m[38;2;148;163;184m for full SDLC[0m
+
+[1;38;2;56;189;248m  ❯  [0m[38;2;56;189;248m  · [0m[38;2;226;232;240mAutopilot resuming at ARCHITECTURE (completed: planning). Use /autopilot restart for a full restart.[0m
+[38;2;56;189;248m  · [0m[38;2;226;232;240mAuto-switched: Architect → Architect[0m
+
+[1;38;2;167;139;250m GOD AUTOPILOT ENGAGED [0m [38;2;71;85;105m────────────────────────────────────────────────────────────────────────────────────────[0m
+[1;38;2;74;222;128m  ✓ [0m[38;2;226;232;240mGoal: Build a 100% pixel-perfect clone of oiioii.ai � the AI creative studio. Features: 1) Landing page with[0m
+[38;2;226;232;240moiioii.ai branding, hero section, feature cards. 2) Video generation UI with model/style selectors (75+ models [0m
+[38;2;226;232;240macross video/image/LLM categories, 150+ animation styles). 3) Image generation UI. 4) 7-agent animation pipeline[0m
+[38;2;226;232;240mendpoint. 5) Free-tier providers only: Gemini, Pollinations, OpenRouter, Groq, Cerebras, Cohere, Cloudflare. [0m
+[38;2;226;232;240mNVIDIA is BANNED. 6) All 52 backend tests must stay green. AC-11 is already fixed (Cerebras no longer advertises[0m
+[38;2;226;232;240membedding). Frontend in frontend/ directory using React or plain HTML. Backend already in backend/.[0m
+[38;2;56;189;248m  · [0m[38;2;226;232;240mCurrent SDLC phase: ARCHITECTURE[0m
+[38;2;56;189;248m  · [0m[38;2;226;232;240mSDLC: planning → architecture → design → implementation → testing → review → deployment → verification[0m
+[38;2;56;189;248m  · [0m[38;2;226;232;240mGates: PLAN.md + todos; ARCHITECTURE.md + stubs. No fixed turn force-advance.[0m
+[38;2;56;189;248m  · [0m[38;2;226;232;240mType /stop to halt, /status for progress[0m

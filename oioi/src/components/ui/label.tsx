@@ -1,9 +1,8 @@
 import * as React from "react";
-import { Slot } from "@radix-ui/react-label";
 
 export const Label = React.forwardRef<
   HTMLLabelElement,
-  React.ComponentPropsWithoutRef<typeof Slot>
+  React.LabelHTMLAttributes<HTMLLabelElement>
 >(({ className, ...props }, ref) => (
   <label
     className={
@@ -15,5 +14,3 @@ export const Label = React.forwardRef<
   />
 ));
 Label.displayName = "Label";
-
-const SlotSlot = Slot;
