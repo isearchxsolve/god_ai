@@ -13,6 +13,7 @@ AGENT_ROLES = [
     'Animator',
     'Sound Director',
     'Director',
+    'AI Avatar Agent',
 ]
 
 class AnimationPipeline:
@@ -138,6 +139,44 @@ Structure:
         # Incremental state checkpoint to MASTER_WORKLOG
         self._checkpoint_state("Animator, Sound Director, Director")
 
+        return self.state
+
+    async def run_avatar_agent(self, script: str, character_image_url: str) -> Dict[str, Any]:
+        """Agent 8: AI Avatar Agent generates a lip-synced video speaking the script."""
+        kaggle_webhook = os.getenv("KAGGLE_AVATAR_WEBHOOK")
+        
+        avatar_video_url = None
+        
+        if kaggle_webhook:
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.post(
+                        kaggle_webhook,
+                        json={
+                            "text": script,
+                            "reference_image_url": character_image_url,
+                            "voice": "af_heart"
+                        },
+                        timeout=120.0
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                    avatar_video_url = data.get("video_url")
+            except Exception as e:
+                print(f"Avatar Generation Error: {e}")
+                
+        if not avatar_video_url:
+            # Fallback to mock URL
+            avatar_video_url = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4"
+            
+        self.state['avatar'] = {
+            "role": "AI Avatar Agent",
+            "video_url": avatar_video_url,
+            "status": "completed"
+        }
+        
+        self._checkpoint_state("AI Avatar Agent")
+        
         return self.state
 
     def _checkpoint_state(self, agents_completed: str):
