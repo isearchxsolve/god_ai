@@ -209,7 +209,10 @@ class DesignerAgent(BaseAgent):
     SYSTEM_PROMPT = (
         "You are a senior UI/UX designer and frontend architect. Given a project plan, "
         "produce a complete design specification covering: color palette, typography, "
-        "component hierarchy, page layouts, responsive breakpoints, and accessibility notes."
+        "component hierarchy, page layouts, responsive breakpoints, and accessibility notes. "
+        "UI REQUIREMENT (THE GRINDING): You MUST implement a stunning, premium, modern user interface. "
+        "Use 2026 state-of-the-art aesthetics including glassmorphism, dynamic micro-animations, "
+        "modern typography, and smooth gradients. The UI is the FIRST priority. No generic designs."
     )
 
     async def run(self, ctx: PipelineContext) -> PipelineContext:
@@ -235,6 +238,8 @@ class FrontendAgent(BaseAgent):
     SYSTEM_PROMPT = (
         "You are an expert React/TypeScript frontend engineer. Given a design spec, "
         "generate complete, production-ready React component code using Tailwind CSS. "
+        "You MUST ensure the UI exactly matches the premium design spec. "
+        "Apply glassmorphism effects, hover micro-animations, and pixel-perfect layouts. "
         "Output only valid, runnable code with no placeholders."
     )
 
@@ -265,6 +270,9 @@ class BackendAgent(BaseAgent):
         "You are an expert Python/FastAPI backend engineer. Given a project plan, "
         "generate a complete, production-ready FastAPI application with all routes, "
         "Pydantic models, database integration (SQLAlchemy), and auth (JWT). "
+        "BACKEND REQUIREMENT (THE HARDENING): You MUST ensure the backend is fully hardened. "
+        "Implement defensive programming, strict thread safety (use Locks across shared state), "
+        "comprehensive input validation, and proper error boundaries. "
         "Output only valid, runnable Python code."
     )
 

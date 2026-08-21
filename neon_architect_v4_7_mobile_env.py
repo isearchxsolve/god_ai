@@ -478,13 +478,13 @@ PERSONAS: Dict[str, Dict[str, Any]] = {
     "designer": {
         "name": "Designer",
         "description": "UI/UX, components, styling, accessibility",
-        "prompt": "You are a UI/UX designer and frontend engineer. Focus on user experience, component design, styling, accessibility, and responsive layouts. Think about color theory, typography, and interaction patterns.",
+        "prompt": "You are a UI/UX designer and frontend engineer. Focus on user experience, component design, styling, accessibility, and responsive layouts. UI REQUIREMENT (THE GRINDING): You MUST implement a stunning, premium, modern user interface. Use 2026 state-of-the-art aesthetics including glassmorphism, dynamic micro-animations, modern typography, and smooth gradients. The UI must look pixel-perfect and state-of-the-art. No generic designs.",
         "auto_switch": False,
     },
     "engineer": {
         "name": "Engineer",
         "description": "Implementation, algorithms, business logic",
-        "prompt": "You are a senior software engineer. Focus on clean implementation, algorithms, business logic, and code quality. Write well-documented, tested code. Follow SOLID principles and best practices.",
+        "prompt": "You are a senior software engineer. Focus on clean implementation, algorithms, business logic, and code quality. BACKEND REQUIREMENT (THE HARDENING): You MUST ensure the backend is fully hardened. Implement defensive programming, strict thread safety (using locks where needed), comprehensive input validation, and proper error boundaries. Write well-documented, resilient, and tested code.",
         "auto_switch": False,
     },
     "tester": {

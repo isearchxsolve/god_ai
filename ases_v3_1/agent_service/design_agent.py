@@ -272,6 +272,7 @@ CRITICAL RULES:
 8. EVERY component MUST include a "data_testid" attribute name for interaction testing.
 9. EVERY component with states MUST include "interaction_rules" describing user interactions.
 10. In "notes_for_coder", explicitly state: "MUST use CSS variables from :root block — no hardcoded values".
+11. UI REQUIREMENT (THE GRINDING): You MUST implement a stunning, premium, modern user interface. Use 2026 state-of-the-art aesthetics including glassmorphism, dynamic micro-animations, modern typography, and smooth gradients. The UI must look pixel-perfect and state-of-the-art. No generic designs.
 
 {DESIGN_SCHEMA_DOC}"""
 

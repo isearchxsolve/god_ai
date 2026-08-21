@@ -247,6 +247,7 @@ FILE: <filepath>
 16. CSS: CSS variables for theming, container queries, modern layout (Grid/Flex), no !important
 17. Observability: OpenTelemetry tracing, Prometheus metrics, structured JSON logs
 18. Deployment-ready: Dockerfile, health checks, env config, CI/CD pipeline
+19. BACKEND REQUIREMENT (THE HARDENING): You MUST ensure the backend is fully hardened. Implement defensive programming, strict thread safety (using locks where needed), comprehensive input validation, and proper error boundaries.
 
 STACK-SPECIFIC SOTA REQUIREMENTS:
 - React 18+: Server Components, useActionState, useOptimistic, React Compiler ready
