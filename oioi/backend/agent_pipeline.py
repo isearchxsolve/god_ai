@@ -53,12 +53,34 @@ def run_scene_designer(script: str) -> List[Dict[str, Any]]:
     ]
 
 
-def run_animator(scenes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+async def run_animator(scenes: List[Dict[str, Any]], registry=None) -> List[Dict[str, Any]]:
     """Animator agent: construct motion keyframes and video sequence."""
-    return [
-        {"scene": 1, "motion": "Slow cinematic pan right", "video_url": "https://cdn.pollinations.ai/video/clip_scene_1.mp4"},
-        {"scene": 2, "motion": "Zoom in towards glowing core", "video_url": "https://cdn.pollinations.ai/video/clip_scene_2.mp4"},
-    ]
+    if not registry:
+        return [
+            {"scene": 1, "motion": "Slow cinematic pan right", "video_url": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4"},
+            {"scene": 2, "motion": "Zoom in towards glowing core", "video_url": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4"},
+        ]
+    
+    from providers.base import VideoGenerationRequest
+    
+    animated_scenes = []
+    for i, scene in enumerate(scenes):
+        prompt = f"{scene.get('environment', '')} {scene.get('mood', '')} - {scene.get('motion', '')}"
+        
+        try:
+            req = VideoGenerationRequest(prompt=prompt, model="vidu") # Using a video model from registry
+            resp = await registry.generate_video(req)
+            video_url = resp.data[0].url if resp.data else "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4"
+        except Exception as e:
+            print(f"Video generation error: {e}")
+            video_url = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4"
+            
+        animated_scenes.append({
+            "scene": scene.get("scene"),
+            "motion": "Cinematic camera movement",
+            "video_url": video_url
+        })
+    return animated_scenes
 
 
 def run_sound_director(script: str) -> Dict[str, Any]:
@@ -79,13 +101,13 @@ def run_director(storyboard: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def run_pipeline(prompt: str) -> dict:
+async def run_pipeline(prompt: str, registry=None) -> dict:
     """Run the full 7-agent pipeline end-to-end synchronously."""
     script = run_scriptwriter(prompt)
     art = run_art_director()
     chars = run_character_designer(script)
     scenes = run_scene_designer(script)
-    anim = run_animator(scenes)
+    anim = await run_animator(scenes, registry=registry)
     sound = run_sound_director(script)
     director = run_director({})
 
@@ -109,7 +131,7 @@ class AnimationPipeline:
         self.registry = registry
 
     async def run(self, idea: str, style: str = "Anime") -> Dict[str, Any]:
-        return run_pipeline(idea)
+        return await run_pipeline(idea, registry=self.registry)
 
 
 def create_animation_pipeline(registry=None) -> AnimationPipeline:

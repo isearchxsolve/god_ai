@@ -60,7 +60,7 @@ export default function Home() {
       title: 'Scene 1: The Rainy Rooftop',
       prompt: 'Cyberpunk ninja perched on a glowing skyscraper ledge in heavy rain',
       imageUrl: 'https://image.pollinations.ai/prompt/cyberpunk%20ninja%20on%20neon%20rooftop%20rain%20anime%20style',
-      videoUrl: 'https://cdn.pollinations.ai/video/clip_scene1.mp4',
+      videoUrl: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4',
       status: 'ready',
       aspectRatio: '16:9',
     },
@@ -69,7 +69,7 @@ export default function Home() {
       title: 'Scene 2: Neon Dragon Emerges',
       prompt: 'Giant luminescent dragon rising through volumetric clouds above Neo-Tokyo',
       imageUrl: 'https://image.pollinations.ai/prompt/giant%20neon%20dragon%20clouds%20anime%20style',
-      videoUrl: 'https://cdn.pollinations.ai/video/clip_scene2.mp4',
+      videoUrl: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4',
       status: 'ready',
       aspectRatio: '16:9',
     },
@@ -78,7 +78,7 @@ export default function Home() {
       title: 'Scene 3: The Clashing Blade',
       prompt: 'Energy katana slashing through holographic rain particles in hyper-speed',
       imageUrl: 'https://image.pollinations.ai/prompt/energy%20katana%20slash%20hologram%20anime%20style',
-      videoUrl: 'https://cdn.pollinations.ai/video/clip_scene3.mp4',
+      videoUrl: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4',
       status: 'ready',
       aspectRatio: '16:9',
     },
@@ -101,42 +101,50 @@ export default function Home() {
     setAgentProgress(10);
     setActiveAgent('Scriptwriter');
 
-    // Simulate multi-agent step progression
-    for (let i = 0; i < agentTeam.length; i++) {
-      setActiveAgent(agentTeam[i].role);
-      setAgentProgress(Math.round(((i + 1) / agentTeam.length) * 100));
-      await new Promise((r) => setTimeout(r, 800));
-    }
-
     try {
-      const res = await fetch('/api/v1/projects/new-project/pipeline/run', {
+      // Simulate multi-agent step progression for UI visual
+      const agentPromise = (async () => {
+        for (let i = 0; i < agentTeam.length; i++) {
+          setActiveAgent(agentTeam[i].role);
+          setAgentProgress(Math.round(((i + 1) / agentTeam.length) * 100));
+          await new Promise((r) => setTimeout(r, 800));
+        }
+      })();
+
+      // Run real backend pipeline call
+      const res = await fetch('/api/v1/projects/new-project/pipeline/run/', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ idea: prompt, style: selectedStyle })
+        body: JSON.stringify({
+          idea: prompt,
+          style: selectedStyle,
+          aspect_ratio: '16:9'
+        })
       });
+
+      if (!res.ok) throw new Error('Pipeline failed');
       const data = await res.json();
-      if (data && data.status === 'completed') {
-        const result = data.result;
-        if (result && result.scenes && result.animation) {
-          const newPanels = result.scenes.map((scene: any) => {
-            const anim = result.animation.find((a: any) => a.scene === scene.scene) || {};
+      
+      await agentPromise; // Ensure UI completes animation
+
+      if (data.result && data.result.animation) {
+        setPanels(prev => {
+          return data.result.animation.map((anim: any, i: number) => {
+            const p = prev[i] || { ...prev[0], id: i + 1 };
             return {
-              id: scene.scene,
-              title: `Scene ${scene.scene}: ${scene.environment}`,
-              prompt: scene.mood,
-              imageUrl: scene.image_url,
+              ...p,
+              title: `Scene ${anim.scene || i + 1}`,
               videoUrl: anim.video_url,
-              status: 'ready',
-              aspectRatio: '16:9'
             };
           });
-          setPanels(newPanels);
-        }
+        });
       }
     } catch (err) {
-      console.error("Backend fetch error:", err);
+      console.error(err);
     } finally {
       setIsGenerating(false);
+      setActiveAgent('Director');
+      setAgentProgress(100);
     }
   };
 
@@ -244,7 +252,7 @@ export default function Home() {
       {/* Main Content */}
       <main className="flex-1 flex overflow-hidden">
         {/* Sidebar Controls */}
-        <aside className="w-72 border-r border-slate-800 bg-[#0c0d14] p-4 flex flex-col">
+        <aside className="w-72 border-r border-slate-800 bg-[#0c0d14] p-4 flex flex-col overflow-y-auto overflow-x-hidden">
           <div className="space-y-4">
             <div>
               <Label className="text-xs font-semibold text-slate-300 flex items-center space-x-1.5 mb-1">
@@ -267,9 +275,8 @@ export default function Home() {
               <Select 
                 value={selectedModel}
                 onValueChange={(value) => setSelectedModel(value)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2 text-xs text-slate-200"
               >
-                <SelectTrigger>
+                <SelectTrigger className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2 text-xs text-slate-200">
                   <SelectValue placeholder="Select model..." />
                 </SelectTrigger>
                 <SelectContent>
@@ -291,9 +298,8 @@ export default function Home() {
               <Select 
                 value={selectedStyle}
                 onValueChange={(value) => setSelectedStyle(value)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2 text-xs text-slate-200"
               >
-                <SelectTrigger>
+                <SelectTrigger className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2 text-xs text-slate-200">
                   <SelectValue placeholder="Select style..." />
                 </SelectTrigger>
                 <SelectContent>
@@ -392,8 +398,17 @@ export default function Home() {
                     key={panel.id}
                     className="bg-slate-900/80 border border-slate-800 rounded-2xl overflow-hidden hover:border-slate-700 transition-all flex flex-col group shadow-lg"
                   >
-                    <div className="relative aspect-video bg-slate-950 overflow-hidden">
-                      {panel.imageUrl && (
+                    <div className="relative aspect-video bg-slate-950 overflow-hidden group/media">
+                      {panel.videoUrl ? (
+                        <video
+                          src={panel.videoUrl}
+                          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                          autoPlay
+                          loop
+                          muted
+                          playsInline
+                        />
+                      ) : panel.imageUrl && (
                         <img
                           src={panel.imageUrl}
                           alt={panel.title}
