@@ -45,6 +45,7 @@ Structure:
                 "http://localhost:20128/v1/chat/completions",
                 json={
                     "model": "frontier",
+                    "stream": False,
                     "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": prompt}
