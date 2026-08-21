@@ -42,11 +42,23 @@ export default function WorkspacePage() {
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [activities, setActivities] = useState<AgentActivity[]>([]);
-  const [currentPhase, setCurrentPhase] = useState<'planning' | 'coding' | 'testing' | 'deploying' | 'complete'>('planning');
+  const [currentPhase, setCurrentPhase] = useState<'planning' | 'coding' | 'testing' | 'deploying' | 'complete' | 'error'>('planning');
   const [previewUrl, setPreviewUrl] = useState('http://localhost:3001');
   const [showPreview, setShowPreview] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  const [mounted, setMounted] = useState(false);
+  const [credits, setCredits] = useState<number | null>(null);
+  const [currentJobId, setCurrentJobId] = useState<string | null>(null);
+
+  useEffect(() => {
+    setMounted(true);
+    fetch('/api/pipeline/credits')
+      .then(res => res.json())
+      .then(data => setCredits(data.credits))
+      .catch(err => console.error("Failed to fetch credits", err));
+  }, []);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -71,48 +83,86 @@ export default function WorkspacePage() {
     setInput('');
     setIsLoading(true);
 
-    // Simulate agent response
-    setTimeout(() => {
-      const phases: Array<'planning' | 'coding' | 'testing' | 'deploying' | 'complete'> = 
-        ['planning', 'coding', 'testing', 'deploying', 'complete'];
-      let phaseIndex = 0;
-
-      const interval = setInterval(() => {
-        if (phaseIndex >= phases.length) {
-          clearInterval(interval);
-          setIsLoading(false);
-          return;
+    try {
+      const res = await fetch('/api/pipeline/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: input })
+      });
+      
+      if (!res.ok) {
+        if (res.status === 402) {
+          throw new Error("Insufficient credits");
         }
+        throw new Error("Failed to start pipeline");
+      }
+      
+      const data = await res.json();
+      const jobId = data.job_id;
+      setCurrentJobId(jobId);
+      
+      if (credits !== null) {
+        setCredits(credits - 1);
+      }
 
-        const phase = phases[phaseIndex];
-        setCurrentPhase(phase);
+      const eventSource = new EventSource(`/api/pipeline/stream/${jobId}`);
+      
+      eventSource.onmessage = (event) => {
+        const payload = JSON.parse(event.data);
+        if (payload.event === 'agent_start' || payload.event === 'agent_done') {
+          const status = payload.event === 'agent_start' ? 'running' : 'complete';
+          const agentName = payload.agent || payload.role;
+          setActivities(prev => [...prev, {
+            id: Date.now().toString() + Math.random(),
+            agent: agentName,
+            status: status as any,
+            message: `${agentName} is ${status}...`,
+            timestamp: new Date(),
+          }]);
+          setCurrentPhase(agentName as any);
+        } else if (payload.event === 'pipeline_complete') {
+          setIsLoading(false);
+          setPreviewUrl(`/preview/${jobId}/`);
+          
+          const assistantMessage: Message = {
+            id: Date.now().toString(),
+            role: 'assistant',
+            agent: 'Orchestrator',
+            content: `I've completed building your app! The multi-agent team has finished all phases. You can now preview the live app, iterate with more instructions, or export the code.`,
+            timestamp: new Date(),
+            metadata: { jobId }
+          };
+          setMessages(prev => [...prev, assistantMessage]);
+          eventSource.close();
+        } else if (payload.event === 'pipeline_error') {
+          setIsLoading(false);
+          const errMessage: Message = {
+            id: Date.now().toString(),
+            role: 'system',
+            content: `Pipeline failed: ${payload.data.error}`,
+            timestamp: new Date(),
+          };
+          setMessages(prev => [...prev, errMessage]);
+          eventSource.close();
+        }
+      };
+      
+      eventSource.onerror = (err) => {
+        console.error("SSE Error", err);
+        eventSource.close();
+        setIsLoading(false);
+      };
 
-        const agent = agents[phaseIndex % agents.length];
-        
-        setActivities(prev => [...prev, {
-          id: Date.now().toString(),
-          agent: agent.name,
-          status: phase,
-          message: `${agent.name} is ${phase}...`,
-          timestamp: new Date(),
-        }]);
-
-        phaseIndex++;
-      }, 2000);
-
-      // Add assistant response after all phases
-      setTimeout(() => {
-        const assistantMessage: Message = {
-          id: (Date.now() + 1).toString(),
-          role: 'assistant',
-          agent: 'Orchestrator',
-          content: `I've completed building your app! The multi-agent team has finished all phases. You can now preview the live app, iterate with more instructions, or export the code.`,
-          timestamp: new Date(),
-        };
-        setMessages(prev => [...prev, assistantMessage]);
-      }, phases.length * 2000 + 1000);
-
-    }, 1000);
+    } catch (error: any) {
+      setIsLoading(false);
+      const errMessage: Message = {
+        id: Date.now().toString(),
+        role: 'system',
+        content: `Error: ${error.message}`,
+        timestamp: new Date(),
+      };
+      setMessages(prev => [...prev, errMessage]);
+    }
   };
 
   return (
@@ -175,10 +225,14 @@ export default function WorkspacePage() {
             <span className="px-2 py-1 text-xs bg-primary-500/10 text-primary-400 rounded-full">v1.0.0</span>
           </div>
           <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 px-3 py-1 bg-dark-800 rounded-lg text-sm text-dark-300 font-medium mr-2 border border-dark-700">
+              <Zap className="w-4 h-4 text-amber-500" />
+              <span>{credits !== null ? credits : '...'} Credits</span>
+            </div>
             <button className="p-2 text-dark-400 hover:text-white hover:bg-dark-800 rounded-lg transition-colors" title="Settings">
               <Settings className="w-5 h-5" />
             </button>
-            <button className="p-2 text-dark-400 hover:text-white hover:bg-dark-800 rounded-lg transition-colors" title="Toggle Sidebar">
+            <button className="p-2 text-dark-400 hover:text-white hover:bg-dark-800 rounded-lg transition-colors" title="Toggle Sidebar" onClick={() => setSidebarOpen(!sidebarOpen)}>
               <Layers className="w-5 h-5" />
             </button>
           </div>
@@ -213,8 +267,16 @@ export default function WorkspacePage() {
                     <p className="text-xs text-primary-400 mb-1 font-medium">{message.agent}</p>
                   )}
                   <p className="whitespace-pre-wrap">{message.content}</p>
+                  {message.metadata?.jobId && (
+                    <div className="mt-4 flex gap-2">
+                      <a href={`/api/pipeline/export/${message.metadata.jobId}`} download className="flex items-center gap-2 px-3 py-1.5 bg-dark-700 hover:bg-dark-600 rounded-lg text-sm font-medium transition-colors">
+                        <Download className="w-4 h-4" />
+                        Download Source Code (.zip)
+                      </a>
+                    </div>
+                  )}
                 </div>
-                <p className="text-xs text-dark-500 mt-1">{message.timestamp.toLocaleTimeString()}</p>
+                <p className="text-xs text-dark-500 mt-1">{mounted ? message.timestamp.toLocaleTimeString() : ''}</p>
               </div>
             </div>
           ))}

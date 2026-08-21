@@ -17,6 +17,8 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional
+import ast
+import re
 
 from .nim_client import NIMClient, NIMConfig
 
@@ -80,6 +82,15 @@ class PipelineContext:
         self.messages.append(msg)
 
     def set_artifact(self, name: str, content: str) -> None:
+        if name.endswith(".py"):
+            try:
+                ast.parse(content)
+            except SyntaxError as e:
+                self.errors.append(f"AST validation failed for {name}: {e}")
+        elif name.endswith((".js", ".jsx", ".ts", ".tsx")):
+            if re.search(r'^\s*import\s+', content, re.MULTILINE) is None and re.search(r'^\s*export\s+', content, re.MULTILINE) is None and re.search(r'function', content) is None and re.search(r'const|let|var', content) is None:
+                self.errors.append(f"JS validation failed for {name}: No valid JS/TS constructs found")
+                
         self.artifacts[name] = content
         # Also write to disk if project_dir is set
         if self.project_dir:

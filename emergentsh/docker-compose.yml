@@ -47,6 +47,8 @@ services:
       DATABASE_URL: postgresql+asyncpg://emergent:emergent_dev@postgres:5432/emergent
       REDIS_URL: redis://redis:6379/0
       NIM_API_KEY: ${NIM_API_KEY}
+      NVIDIA_API_KEY: ${NVIDIA_API_KEY}
+      NIM_STRICT_MODE: ${NIM_STRICT_MODE:-true}
       NIM_BASE_URL: ${NIM_BASE_URL:-https://integrate.api.nvidia.com/v1}
       SECRET_KEY: ${SECRET_KEY:-dev-secret-change-in-production}
       DEBUG: ${DEBUG:-true}
@@ -68,12 +70,13 @@ services:
   # Frontend development server (React/Next.js)
   frontend:
     build:
-      context: .
-      dockerfile: Dockerfile.frontend
+      context: ./frontend
+      dockerfile: Dockerfile
     container_name: emergent-frontend
     environment:
-      NEXT_PUBLIC_API_URL: http://backend:8000
-      NEXT_PUBLIC_WS_URL: ws://backend:8000
+      BACKEND_API_URL: http://backend:8000/api
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+      NEXT_PUBLIC_WS_URL: ws://localhost:8000
     ports:
       - "3000:3000"
     volumes:
@@ -87,7 +90,7 @@ services:
       sh -c "cd /app/frontend && npm install && npm run dev"
 
   # Live preview server for generated apps
-  preview:
+  preview_proxy:
     build:
       context: .
       dockerfile: Dockerfile.preview

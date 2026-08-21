@@ -119,7 +119,7 @@ class AuthDialog(QDialog):
         or_layout = QFormLayout(or_group)
         
         self._openrouter_key = QLineEdit()
-        self._openrouter_key.setPlaceholderText("sk-or-v1-...")
+        self._openrouter_key.setPlaceholderText("REDACTED_OPENROUTER_KEY...")
         self._openrouter_key.setEchoMode(QLineEdit.EchoMode.Password)
         or_layout.addRow("API Key:", self._openrouter_key)
         

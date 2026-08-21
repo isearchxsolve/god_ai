@@ -37,7 +37,7 @@ export default function HomePage() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-dark-900 via-dark-900 to-dark-950">
+    <div className="min-h-screen bg-mesh-dark relative overflow-hidden">
       {/* Navigation */}
       <nav className="fixed top-0 left-0 right-0 z-50 bg-dark-950/80 backdrop-blur-md border-b border-dark-700">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -65,14 +65,17 @@ export default function HomePage() {
         </div>
       </nav>
 
+
       {/* Hero Section */}
+      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[800px] h-[800px] bg-primary-500/20 rounded-full blur-[120px] animate-blob-spin mix-blend-screen pointer-events-none -z-10" />
       <section className="relative pt-32 pb-20 px-4 sm:px-6 lg:px-8">
+
         <div className="max-w-7xl mx-auto text-center">
           <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-primary-500/10 border border-primary-500/20 text-primary-400 text-sm mb-8">
             <span className="w-2 h-2 bg-primary-500 rounded-full animate-pulse"></span>
             Powered by NVIDIA NIM • Exclusive Inference Engine
           </div>
-          <h1 className="text-5xl sm:text-6xl lg:text-7xl font-bold text-white mb-6 leading-tight">
+          <h1 className="text-5xl sm:text-6xl lg:text-7xl font-bold text-white mb-6 leading-tight animate-reveal-up drop-shadow-[0_0_15px_rgba(255,255,255,0.3)]">
             Describe your idea{' '}
             <span className="bg-gradient-to-r from-primary-400 via-primary-500 to-primary-600 bg-clip-text text-transparent">
               → Build websites & apps with AI
@@ -102,7 +105,7 @@ export default function HomePage() {
               <button
                 type="submit"
                 disabled={isLoading || !prompt.trim()}
-                className="group w-full sm:w-auto px-8 py-4 text-lg font-medium text-white bg-gradient-to-r from-primary-600 to-primary-700 hover:from-primary-700 hover:to-primary-800 rounded-xl transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                className="group w-full sm:w-auto px-8 py-4 text-lg font-medium text-white bg-gradient-to-r from-primary-600 to-primary-500 hover:from-primary-500 hover:to-primary-400 rounded-xl transition-all duration-500 shadow-glow-primary hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
               >
                 {isLoading ? (
                   <>
@@ -172,7 +175,7 @@ export default function HomePage() {
             {features.map((feature, index) => (
               <div
                 key={feature.title}
-                className="group p-6 bg-dark-900/50 border border-dark-700 rounded-2xl hover:border-primary-500/30 transition-all duration-300"
+                className="group p-6 bg-dark-900/40 backdrop-blur-xl border border-white/5 rounded-2xl hover:border-primary-500/50 hover:shadow-glow-primary transition-all duration-500 hover:-translate-y-2"
               >
                 <div className="w-12 h-12 bg-primary-500/10 rounded-xl flex items-center justify-center mb-4 group-hover:bg-primary-500/20 transition-colors">
                   <feature.icon className="w-6 h-6 text-primary-400" />
@@ -231,7 +234,7 @@ export default function HomePage() {
             ].map((agent, index) => (
               <div
                 key={agent.name}
-                className="p-6 bg-dark-900/50 border border-dark-700 rounded-2xl hover:border-primary-500/30 transition-all duration-300"
+                className="p-6 bg-dark-900/30 backdrop-blur-lg border border-white/10 shadow-[inset_0_1px_0_rgba(255,255,255,0.1)] rounded-2xl hover:border-primary-500/50 hover:shadow-glow-primary transition-all duration-500 transform hover:scale-[1.03]"
               >
                 <div className={`w-12 h-12 bg-gradient-to-br ${agent.color} rounded-xl flex items-center justify-center mb-4`}>
                   <Terminal className="w-6 h-6 text-white" />
@@ -268,7 +271,7 @@ export default function HomePage() {
                 <button
                   type="submit"
                   disabled={isLoading || !prompt.trim()}
-                  className="px-8 py-4 text-lg font-medium text-white bg-gradient-to-r from-primary-600 to-primary-700 hover:from-primary-700 hover:to-primary-800 rounded-xl transition-all duration-200 disabled:opacity-50 flex items-center gap-2"
+                  className="px-8 py-4 text-lg font-medium text-white bg-gradient-to-r from-primary-600 to-primary-500 hover:from-primary-500 hover:to-primary-400 rounded-xl transition-all duration-500 shadow-glow-primary hover:scale-105 disabled:opacity-50 flex items-center gap-2"
                 >
                   {isLoading ? (
                     <>
