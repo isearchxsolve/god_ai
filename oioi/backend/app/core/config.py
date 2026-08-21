@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     HOST: str = "0.0.0.0"
     PORT: int = 8000
     
+    JWT_SECRET_KEY: str = "default_secret"
+    JWT_SECRET: str = "default_secret"
+    
     # CORS
     CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:5173"]
     
