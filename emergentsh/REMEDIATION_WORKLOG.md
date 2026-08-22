@@ -205,3 +205,45 @@ which all exist and are correct. Now `parents[2]`.
 from 8 failures at baseline to ZERO.
 
 **[COMMIT]** next.
+
+---
+
+### [2026-08-22] #5 — GAP-EM-5 FIXED: hardened Docker sandbox for sandbox_executor.py
+
+**[VERIFY]** `backend/sandbox_executor.py` was a 50-line bare host subprocess
+(`subprocess.run(["pytest", target])`) with zero isolation — generated,
+untrusted test code ran with full host privileges.
+
+**[FIX]** Rewrote the executor sharing the NU-3 hardened-container design
+from neon_unified (do-not-reinvent rule):
+- `isolation` mode: "auto" (default; Docker when daemon up, host fallback
+  when down), "docker" (FAIL CLOSED when daemon unreachable — explicit
+  BLOCKED message naming the refused fallback, never a silent host drop),
+  "host" (explicit).
+- Hardened container flags: `--network none --read-only --tmpfs /tmp
+  --cpus 1.0 --memory 512m --workdir /project -v <project>:/project`,
+  constant command-string list (no shell interpretation).
+- Path safety: absolute paths and `..` traversal rejected before any exec;
+  missing target = failure, never a silent pass.
+- Public contract unchanged: `run_pytest()` still returns (success, output),
+  so QAAgent/SeleniumQAAgent call sites are untouched.
+
+**[TEST]** New tests/test_em5_sandbox_executor.py — **11/11 PASS**:
+- Escape attempts blocked (the acceptance test): traversal, nested
+  traversal, absolute path, shell-metachar path (verified exec is a list
+  with shell=False and nothing runs for a bogus path), missing target.
+- Hardened flags asserted on the generated docker command.
+- Fail-closed: isolation=docker + daemon down -> BLOCKED (not host);
+  auto + daemon down -> host fallback; daemon up -> container path used;
+  container pytest failure is not a silent pass.
+
+**[ENV NOTE]** Docker daemon is DOWN on this host (`docker info` -> 500
+Internal Server Error on the DockerDesktopLinuxEngine pipe). So container
+execution is unit-verified via mocked subprocess; the full-suite QA path
+exercises the honest auto->host fallback (suite time rose 21s -> 70s
+because the QA agent's generated tests now actually execute). When the
+daemon is restored, the same code path runs containerized with no changes.
+
+**[VERIFY-REGRESSION]** Full suite: **136 passed, 0 failed, 1 skipped**.
+
+**[COMMIT]** next.
