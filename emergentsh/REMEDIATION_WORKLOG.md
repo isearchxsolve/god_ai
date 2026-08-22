@@ -100,3 +100,39 @@ get_db) or register→login can't see the new user.
 failures. The 8 are tracked for EM-3/EM-4 and the ROOT_DIR bug.
 
 **[COMMIT]** next.
+
+---
+
+### [2026-08-22] #3 — GAP-EM-2 FIXED: per-user persisted credit ledger replaces process-global USER_CREDITS
+
+**[VERIFY]** `backend/app/api/pipeline.py` had `USER_CREDITS = 10` as a
+module global: every caller shared one balance, it reset on every restart,
+and `/credits` reported it regardless of who asked. Meanwhile the schema
+ALREADY had the right primitives unused by the pipeline: `User.credits`
+(default 1000) and `CreditTransaction` (amount/transaction_type/description
+audit rows, already used by /api/credits/purchase).
+
+**[FIX]** `backend/app/api/pipeline.py`:
+- Deleted the `USER_CREDITS` global entirely; added `PIPELINE_RUN_COST = 1`.
+- New `_debit_credits(db, user, amount, description)`: raises 402 when the
+  caller's persisted balance cannot cover the cost, else decrements
+  `user.credits` and writes a `CreditTransaction(amount=-1,
+  transaction_type="usage")` row; both land in the request session's single
+  commit (atomic).
+- `/run` now depends on `get_db` and calls `_debit_credits` before creating
+  the job — a refused run creates no job.
+- `/credits` now returns the CALLER's persisted balance
+  (`current_user.credits`), not a shared global.
+
+**[TEST]** New `tests/test_em2_credit_ledger.py` — **6/6 PASS**:
+- global USER_CREDITS attribute is gone (regression guard)
+- /credits reports own persisted balance (1000 model default, not 10)
+- /run debits exactly 1 credit AND writes exactly 1 usage audit row
+- zero balance -> 402 AND no job created
+- user A's run leaves user B's balance untouched
+- 3 runs -> balance 997 AND exactly 3 audit rows summing to -3 (atomicity)
+
+**[VERIFY-REGRESSION]** Full suite: **96 passed, 8 failed, 1 skipped** —
+same 8 pre-existing failures, zero new.
+
+**[COMMIT]** next.

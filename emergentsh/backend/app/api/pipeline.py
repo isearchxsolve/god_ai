@@ -6,9 +6,11 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.auth import get_current_active_user
-from backend.app.models import User
+from backend.app.core.database import get_db
+from backend.app.models import CreditTransaction, User
 
 router = APIRouter(prefix="/pipeline", tags=["pipeline"])
 _JOBS: Dict[str, Dict[str, Any]] = {}
@@ -19,7 +21,7 @@ _PREVIEW_ROOT.mkdir(parents=True, exist_ok=True)
 class NIMInferenceError(Exception):
     pass
 
-USER_CREDITS = 10  # Mock user credit balance
+PIPELINE_RUN_COST = 1  # credits debited per pipeline run (EM-2: per-user ledger)
 
 class PipelineRequest(BaseModel):
     prompt: str = Field(..., min_length=3)
@@ -124,16 +126,33 @@ def _job_owner(job: Dict[str, Any], user: User) -> None:
         raise HTTPException(404, "Job not found")
 
 
+async def _debit_credits(db: AsyncSession, user: User, amount: int, description: str) -> None:
+    """EM-2: debit the caller's persisted ledger and record the transaction.
+
+    Raises 402 when the balance cannot cover the cost. The caller's request
+    session commits both the balance change and the audit row atomically.
+    """
+    balance = user.credits or 0
+    if balance < amount:
+        raise HTTPException(402, f"Insufficient credits: balance {balance}, cost {amount}.")
+    user.credits = balance - amount
+    db.add(CreditTransaction(
+        user_id=user.id,
+        amount=-amount,
+        transaction_type="usage",
+        description=description,
+    ))
+    await db.flush()
+
+
 @router.post("/run", response_model=PipelineStatusResponse)
 async def start_pipeline(
     req: PipelineRequest,
     background: BackgroundTasks,
     current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
 ):
-    global USER_CREDITS
-    if USER_CREDITS <= 0:
-        raise HTTPException(402, "Insufficient credits.")
-    USER_CREDITS -= 1
+    await _debit_credits(db, current_user, PIPELINE_RUN_COST, f"Pipeline run: {req.prompt[:80]}")
     
     job_id = uuid.uuid4().hex[:12]
     project_dir = _PREVIEW_ROOT / job_id
@@ -189,4 +208,5 @@ async def export_job(job_id: str, current_user: User = Depends(get_current_activ
 
 @router.get("/credits")
 async def get_credits(current_user: User = Depends(get_current_active_user)):
-    return {"credits": USER_CREDITS}
+    """EM-2: report the caller's persisted balance, not a process global."""
+    return {"credits": current_user.credits or 0}
