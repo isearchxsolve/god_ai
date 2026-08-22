@@ -1,8 +1,8 @@
 import os
 from datetime import datetime, timedelta
 from typing import Optional
+import bcrypt
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,18 +15,66 @@ SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-in-production")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Fail-closed boot validation (EM-1): a served app must never run on a
+# forgeable signing key. Known defaults and short keys are rejected at
+# startup by validate_secret_key(), which main.py lifespan enforces.
+INSECURE_SECRET_KEYS = frozenset({
+    "",
+    "your-secret-key-change-in-production",
+    "dev-secret-change-in-production",
+    "secret",
+    "changeme",
+    "change-me",
+    "supersecret",
+})
+MIN_SECRET_KEY_LENGTH = 32
+
+
+def validate_secret_key(secret: Optional[str] = None) -> str:
+    """Return the signing key if it is safe, else raise RuntimeError.
+
+    Called from the app lifespan so the API refuses to boot (fail closed)
+    when SECRET_KEY is missing, a known-insecure default, or too short.
+    Passing an explicit `secret` validates that value instead of the
+    module-level SECRET_KEY (used by tests).
+    """
+    value = SECRET_KEY if secret is None else secret
+    if not value:
+        raise RuntimeError(
+            "SECRET_KEY is not set. Refusing to boot: JWT signatures would be "
+            "forgeable. Export a strong random SECRET_KEY (>= 32 chars)."
+        )
+    if value in INSECURE_SECRET_KEYS:
+        raise RuntimeError(
+            "SECRET_KEY is a known-insecure default. Refusing to boot: anyone "
+            "could forge valid JWTs. Export a strong random SECRET_KEY."
+        )
+    if len(value) < MIN_SECRET_KEY_LENGTH:
+        raise RuntimeError(
+            f"SECRET_KEY is too short ({len(value)} chars < {MIN_SECRET_KEY_LENGTH}). "
+            "Refusing to boot: short HMAC keys are brute-forceable."
+        )
+    return value
+
+
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
-import os
+
+def _bcrypt_secret(password: str) -> bytes:
+    # bcrypt's algorithm caps secrets at 72 bytes; passlib used to truncate
+    # silently, bcrypt>=4.1 raises. Keep the truncation explicit.
+    return password.encode("utf-8")[:72]
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
+    try:
+        return bcrypt.checkpw(_bcrypt_secret(plain_password), hashed_password.encode("utf-8"))
+    except ValueError:
+        return False
 
 
 def get_password_hash(password: str) -> str:
-    return pwd_context.hash(password)
+    return bcrypt.hashpw(_bcrypt_secret(password), bcrypt.gensalt()).decode("utf-8")
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:

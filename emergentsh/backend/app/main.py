@@ -7,10 +7,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from backend.app.core.database import init_db, close_db
+from backend.app.core.auth import validate_secret_key
 from backend.app.api import projects, auth, credits, pipeline as pipeline_api
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # EM-1 fail-closed boot: refuse to serve on a forgeable JWT signing key.
+    validate_secret_key()
     await init_db()
     yield
     await close_db()

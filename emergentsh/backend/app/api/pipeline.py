@@ -3,9 +3,12 @@ from __future__ import annotations
 import os, uuid, json, asyncio, shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel, Field
+
+from backend.app.core.auth import get_current_active_user
+from backend.app.models import User
 
 router = APIRouter(prefix="/pipeline", tags=["pipeline"])
 _JOBS: Dict[str, Dict[str, Any]] = {}
@@ -114,8 +117,19 @@ async def _run_job_stream(job_id: str, prompt: str, project_dir: Path, use_mock:
             await queue.put(None)
 
 
+def _job_owner(job: Dict[str, Any], user: User) -> None:
+    """EM-1: jobs are owned; a non-superuser may only touch their own jobs."""
+    owner_id = job.get("user_id")
+    if owner_id is not None and owner_id != user.id and not user.is_superuser:
+        raise HTTPException(404, "Job not found")
+
+
 @router.post("/run", response_model=PipelineStatusResponse)
-async def start_pipeline(req: PipelineRequest, background: BackgroundTasks):
+async def start_pipeline(
+    req: PipelineRequest,
+    background: BackgroundTasks,
+    current_user: User = Depends(get_current_active_user),
+):
     global USER_CREDITS
     if USER_CREDITS <= 0:
         raise HTTPException(402, "Insufficient credits.")
@@ -124,7 +138,7 @@ async def start_pipeline(req: PipelineRequest, background: BackgroundTasks):
     job_id = uuid.uuid4().hex[:12]
     project_dir = _PREVIEW_ROOT / job_id
     project_dir.mkdir(parents=True, exist_ok=True)
-    _JOBS[job_id] = {"job_id": job_id, "status": "queued", "phase": "queued", "artifacts": [], "preview_url": None, "errors": [], "message": "Queued", "prompt": req.prompt, "project_dir": str(project_dir)}
+    _JOBS[job_id] = {"job_id": job_id, "user_id": current_user.id, "status": "queued", "phase": "queued", "artifacts": [], "preview_url": None, "errors": [], "message": "Queued", "prompt": req.prompt, "project_dir": str(project_dir)}
     
     _JOB_QUEUES[job_id] = asyncio.Queue()
     background.add_task(_run_job_stream, job_id, req.prompt, project_dir, req.use_mock)
@@ -132,10 +146,12 @@ async def start_pipeline(req: PipelineRequest, background: BackgroundTasks):
     return PipelineStatusResponse(**{k: v for k, v in _JOBS[job_id].items() if k in PipelineStatusResponse.model_fields})
 
 @router.get("/stream/{job_id}")
-async def stream_job(job_id: str):
+async def stream_job(job_id: str, current_user: User = Depends(get_current_active_user)):
     queue = _JOB_QUEUES.get(job_id)
-    if not queue:
+    job = _JOBS.get(job_id)
+    if not queue or not job:
         raise HTTPException(404, "Stream not found")
+    _job_owner(job, current_user)
         
     async def event_generator():
         while True:
@@ -147,21 +163,23 @@ async def stream_job(job_id: str):
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @router.get("/status/{job_id}", response_model=PipelineStatusResponse)
-async def pipeline_status(job_id: str):
+async def pipeline_status(job_id: str, current_user: User = Depends(get_current_active_user)):
     job = _JOBS.get(job_id)
     if not job:
         raise HTTPException(404, "Job not found")
+    _job_owner(job, current_user)
     return PipelineStatusResponse(**{k: v for k, v in job.items() if k in PipelineStatusResponse.model_fields})
 
 @router.get("/jobs")
-async def list_jobs():
-    return [{"job_id": j["job_id"], "status": j["status"], "phase": j["phase"], "preview_url": j.get("preview_url"), "prompt": (j.get("prompt") or "")[:120]} for j in _JOBS.values()]
+async def list_jobs(current_user: User = Depends(get_current_active_user)):
+    return [{"job_id": j["job_id"], "status": j["status"], "phase": j["phase"], "preview_url": j.get("preview_url"), "prompt": (j.get("prompt") or "")[:120]} for j in _JOBS.values() if j.get("user_id") == current_user.id or current_user.is_superuser]
 
 @router.get("/export/{job_id}")
-async def export_job(job_id: str):
+async def export_job(job_id: str, current_user: User = Depends(get_current_active_user)):
     job = _JOBS.get(job_id)
     if not job:
         raise HTTPException(404, "Job not found")
+    _job_owner(job, current_user)
     project_dir = job.get("project_dir")
     if not project_dir or not os.path.exists(project_dir):
         raise HTTPException(404, "Project directory not found")
@@ -170,5 +188,5 @@ async def export_job(job_id: str):
     return FileResponse(archive_path, filename=f"{job_id}.zip")
 
 @router.get("/credits")
-async def get_credits():
+async def get_credits(current_user: User = Depends(get_current_active_user)):
     return {"credits": USER_CREDITS}
