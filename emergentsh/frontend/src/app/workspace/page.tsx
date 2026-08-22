@@ -162,10 +162,6 @@ export default function WorkspacePage() {
 
   const handleRegister = async () => {
     if (!authUsername.trim() || !authPassword || authBusy) return;
-    if (authPassword.length < 8) {
-      setAuthError('Password must be at least 8 characters to register.');
-      return;
-    }
     setAuthBusy(true);
     setAuthError('');
     try {

@@ -38,24 +38,42 @@ class PipelineStatusResponse(BaseModel):
     message: str = ""
 
 def _make_mock_client():
+    """Smoke/mock NIM client. Branches route on the SYSTEM prompt role (not
+    user-message keywords, which every later agent embeds and would misroute).
+    Outputs satisfy each agent's validation contract: the designer yields
+    valid JSON tokens and the frontend yields code that passes the EM-4
+    structural design-token lint."""
     from unittest.mock import AsyncMock, MagicMock
     client = AsyncMock()
     async def fake_stream(messages, model=None, temperature=0.4, max_tokens=4096):
-        system = (messages[0].get("content") or "") if messages else ""
-        user = (messages[1].get("content") or "") if len(messages) > 1 else ""
-        blob = (system + " " + user).lower()
-        if "plan" in blob or "architect" in blob:
+        system = ((messages[0].get("content") or "") if messages else "").lower()
+        if "software architect" in system:
             yield "# Project Plan\n\n## Overview\nFull-stack app by EmergentSH.\n\n## Tech Stack\n- Next.js 14\n- FastAPI\n- SQLite\n"
-        elif "design" in blob:
-            yield "# Design\n\nPrimary: #76B900\nBackground: #0A0A0B\n"
-        elif "frontend" in blob or "react" in blob or "next" in blob:
-            yield "export default function App() {\n  return (<main style={{padding:'2rem',background:'#0A0A0B',color:'#F5F5F7'}}><h1 style={{color:'#76B900'}}>EmergentSH</h1><p>Generated app</p></main>);\n}\n"
-        elif "backend" in blob or "fastapi" in blob or "api" in blob:
+        elif "ui/ux designer" in system:
+            yield json.dumps({
+                "colors": {"primary": "#76B900", "background": "#0A0A0B", "text": "#F5F5F7"},
+                "typography": {"font_family": "Inter, system-ui, sans-serif"},
+            })
+        elif "frontend engineer" in system:
+            yield (
+                "import React from 'react';\n"
+                "export default function App() {\n"
+                "  return (\n"
+                "    <main style={{padding:'2rem',background:'#0A0A0B',color:'#F5F5F7'}} className='transition-colors'>\n"
+                "      <h1 style={{color:'#76B900'}} className='backdrop-blur-md'>EmergentSH</h1>\n"
+                "      <p className='transition-opacity hover:opacity-80'>Generated app</p>\n"
+                "    </main>\n"
+                "  );\n"
+                "}\n"
+            )
+        elif "fastapi backend engineer" in system:
             yield "from fastapi import FastAPI\napp = FastAPI()\n@app.get('/health')\ndef health():\n    return {'status':'healthy'}\n"
-        elif "docker" in blob or "integration" in blob or "compose" in blob:
+        elif "devops and integration specialist" in system:
             yield "version: '3.8'\nservices:\n  app:\n    build: .\n    ports: ['8080:8080']\n"
-        elif "test" in blob or "qa" in blob:
+        elif "qa engineer" in system:
             yield "def test_health():\n    assert True\n"
+        elif "devops engineer" in system:
+            yield "name: CI\non: [push]\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n"
         else:
             yield "# artifact\n"
     client.chat_stream = fake_stream

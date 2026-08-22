@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { ArrowRight, Sparkles, Zap, Github, Database, Layers, Terminal, CheckCircle, Loader2 } from 'lucide-react';
 
 const features = [
@@ -21,19 +22,16 @@ const steps = [
 ];
 
 export default function HomePage() {
+  const router = useRouter();
   const [prompt, setPrompt] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [showDemo, setShowDemo] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!prompt.trim()) return;
     setIsLoading(true);
-    // In real app, this would call the backend API
-    setTimeout(() => {
-      setIsLoading(false);
-      setShowDemo(true);
-    }, 2000);
+    // Navigate to the actual workspace
+    router.push('/workspace');
   };
 
   return (
@@ -57,7 +55,7 @@ export default function HomePage() {
               <button className="hidden sm:block px-4 py-2 text-sm font-medium text-dark-300 hover:text-white transition-colors">
                 Sign In
               </button>
-              <button className="px-4 py-2 text-sm font-medium text-white bg-primary-600 hover:bg-primary-700 rounded-lg transition-colors">
+              <button onClick={() => router.push('/workspace')} className="px-4 py-2 text-sm font-medium text-white bg-primary-600 hover:bg-primary-700 rounded-lg transition-colors">
                 Start Building
               </button>
             </div>

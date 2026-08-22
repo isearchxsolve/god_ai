@@ -278,6 +278,11 @@ class PlannerAgent(BaseAgent):
             temperature=0.3,
             max_tokens=3000,
         )
+        
+        plan_lower = plan.lower()
+        if "cannot fulfill" in plan_lower or "unable to" in plan_lower or "safety" in plan_lower or "violate" in plan_lower:
+             raise ValueError("NVIDIA AI Safety Filter Triggered: The upstream model refused to generate a plan for this prompt due to safety guidelines. Please try a different prompt.")
+             
         ctx.set_artifact("PLAN.md", plan)
         ctx.add_message(AgentMessage(
             from_role=self.role,
@@ -319,7 +324,10 @@ class DesignerAgent(BaseAgent):
             if "colors" not in design_json or "typography" not in design_json:
                 raise ValueError("Designer validation failed: Missing required token categories.")
         except json.JSONDecodeError:
-            raise ValueError("Designer validation failed: Output must be valid JSON.")
+            design_lower = design.lower()
+            if "cannot fulfill" in design_lower or "unable to" in design_lower or "safety" in design_lower or "violate" in design_lower:
+                raise ValueError("NVIDIA AI Safety Filter Triggered: The upstream model refused to generate content for this prompt due to safety guidelines. Please try a different prompt.")
+            raise ValueError(f"Designer validation failed: Output must be valid JSON. (Got: {design[:50]}...)")
 
         ctx.set_artifact("design_tokens.json", json.dumps(design_json, indent=2))
         # DESIGN.md: human-readable design spec artifact (expected by the
