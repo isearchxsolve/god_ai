@@ -181,6 +181,88 @@ class BaseAgent:
 # Specialized Agents
 # ---------------------------------------------------------------------------
 
+def _design_markdown(design_json: Dict[str, Any]) -> str:
+    """Render the validated design tokens as a human-readable DESIGN.md."""
+    lines = ["# Design Specification", ""]
+    for section, value in design_json.items():
+        lines.append(f"## {section.replace('_', ' ').title()}")
+        lines.append("")
+        if isinstance(value, dict):
+            for k, v in value.items():
+                lines.append(f"- **{k}**: {v}")
+        elif isinstance(value, list):
+            for item in value:
+                lines.append(f"- {item}")
+        else:
+            lines.append(str(value))
+        lines.append("")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# EM-4: Structural design-token lint (replaces the "backdrop-blur" string
+# search). A generated frontend must demonstrate, structurally, that the
+# designer's tokens were actually applied: module structure, a component
+# definition, a minimum number of styling applications, at least one
+# motion/interaction primitive, and fidelity to the designer's palette.
+# ---------------------------------------------------------------------------
+
+MIN_STYLE_APPLICATIONS = 3
+_MOTION_PRIMITIVES = re.compile(
+    r"transition|animate|animation|keyframes|motion\.|hover:|active:|focus:"
+)
+_STYLE_APPLICATIONS = re.compile(r"className=|style=\{|styled\.|css\(|sx=\{")
+_COMPONENT_DEF = re.compile(
+    r"function\s+[A-Z]\w*|const\s+[A-Z]\w*\s*=|class\s+[A-Z]\w*"
+)
+_MODULE_STRUCTURE = re.compile(r"^\s*(import|export)\s", re.MULTILINE)
+_HEX_COLOR = re.compile(r"#[0-9a-fA-F]{6}\b")
+
+
+def extract_palette_colors(design_json: Dict[str, Any]) -> List[str]:
+    """Pull hex colors out of the validated designer tokens."""
+    colors: List[str] = []
+    section = design_json.get("colors") or design_json.get("color_palette") or {}
+    if isinstance(section, dict):
+        for value in section.values():
+            if isinstance(value, str):
+                colors.extend(_HEX_COLOR.findall(value))
+    elif isinstance(section, list):
+        for value in section:
+            if isinstance(value, str):
+                colors.extend(_HEX_COLOR.findall(value))
+    return [c.lower() for c in colors]
+
+
+def lint_frontend_design_tokens(code: str, design_json: Optional[Dict[str, Any]] = None) -> List[str]:
+    """Return a list of structural violations (empty list = compliant)."""
+    violations: List[str] = []
+    if not _MODULE_STRUCTURE.search(code):
+        violations.append("no module structure: generated frontend has no import/export statements")
+    if not _COMPONENT_DEF.search(code):
+        violations.append("no component definition: expected function/const/class React component")
+    style_applications = len(_STYLE_APPLICATIONS.findall(code))
+    if style_applications < MIN_STYLE_APPLICATIONS:
+        violations.append(
+            f"only {style_applications} styling application(s) found "
+            f"(< {MIN_STYLE_APPLICATIONS}): design tokens are not actually applied"
+        )
+    if not _MOTION_PRIMITIVES.search(code):
+        violations.append(
+            "no motion/interaction primitives (transition/animation/hover/focus states)"
+        )
+    if design_json:
+        palette = extract_palette_colors(design_json)
+        if palette:
+            code_lower = code.lower()
+            if not any(color in code_lower for color in palette):
+                violations.append(
+                    "palette fidelity failure: none of the designer's palette colors "
+                    f"({', '.join(sorted(set(palette))[:6])}) appear in the generated code"
+                )
+    return violations
+
+
 class PlannerAgent(BaseAgent):
     role = AgentRole.PLANNER
     SYSTEM_PROMPT = (
@@ -240,6 +322,9 @@ class DesignerAgent(BaseAgent):
             raise ValueError("Designer validation failed: Output must be valid JSON.")
 
         ctx.set_artifact("design_tokens.json", json.dumps(design_json, indent=2))
+        # DESIGN.md: human-readable design spec artifact (expected by the
+        # generated-project contract alongside design_tokens.json).
+        ctx.set_artifact("DESIGN.md", _design_markdown(design_json))
         ctx.add_message(AgentMessage(
             from_role=self.role,
             to_role=AgentRole.FRONTEND,
@@ -276,9 +361,19 @@ class FrontendAgent(BaseAgent):
             max_tokens=6000,
         )
         
-        # AST Validation for UI Tokens
-        if "backdrop-blur" not in code and "transition" not in code:
-            raise ValueError("Frontend validation failed: The code must include structural UI tokens like backdrop-blur and transitions for the architectural moat.")
+        # EM-4: structural design-token lint (replaces the old single-keyword
+        # string-search gate).
+        design_json: Optional[Dict[str, Any]] = None
+        try:
+            design_json = json.loads(design) if design else None
+        except (json.JSONDecodeError, TypeError):
+            design_json = None
+        violations = lint_frontend_design_tokens(code, design_json)
+        if violations:
+            raise ValueError(
+                "Frontend validation failed: design tokens not structurally applied -- "
+                + "; ".join(violations)
+            )
 
         ctx.set_artifact("frontend/App.tsx", code)
         ctx.add_message(AgentMessage(
@@ -532,6 +627,9 @@ class AgentPipeline:
 
     def __init__(self, nim_client: NIMClient) -> None:
         self.nim = nim_client
+        # 7-agent chain: Planning -> Design -> Frontend -> Backend ->
+        # Integration -> QA -> DevOps. (SeleniumQAAgent remains defined for
+        # opt-in use but is not part of the default contract.)
         self._agents: List[BaseAgent] = [
             PlannerAgent(nim_client),
             DesignerAgent(nim_client),
@@ -539,9 +637,27 @@ class AgentPipeline:
             BackendAgent(nim_client),
             IntegrationAgent(nim_client),
             QAAgent(nim_client),
-            SeleniumQAAgent(nim_client),
             DevOpsAgent(nim_client),
         ]
+
+    # EM-3: ONE retry policy shared by run() and stream_run(). Validation
+    # failures (ValueError) are retryable up to MAX_AGENT_RETRIES with the
+    # error fed back to the agent; any other exception fails the pipeline.
+    MAX_AGENT_RETRIES = 3
+
+    async def _run_agent_with_retry(self, agent: BaseAgent, ctx: PipelineContext) -> PipelineContext:
+        for attempt in range(self.MAX_AGENT_RETRIES):
+            try:
+                return await agent.run(ctx)
+            except ValueError as ve:
+                if attempt == self.MAX_AGENT_RETRIES - 1:
+                    ctx.fail(f"{agent.role.value} validation completely failed: {ve}")
+                    return ctx
+                ctx.errors.append(str(ve))
+            except Exception as exc:  # noqa: BLE001
+                ctx.fail(f"{agent.role.value} agent failed: {exc}")
+                return ctx
+        return ctx  # unreachable; keeps type-checkers happy
 
     async def run(self, user_prompt: str, project_dir: str = "") -> PipelineContext:
         """
@@ -551,21 +667,7 @@ class AgentPipeline:
         for agent in self._agents:
             if ctx.status == PipelineStatus.FAILED:
                 break
-            
-            # Execution Self-Healing Loop
-            max_retries = 3
-            for attempt in range(max_retries):
-                try:
-                    ctx = await agent.run(ctx)
-                    break # Success, break out of retry loop
-                except ValueError as ve:
-                    if attempt == max_retries - 1:
-                        ctx.fail(f"{agent.role.value} validation completely failed: {ve}")
-                        break
-                    ctx.errors.append(str(ve))
-                except Exception as exc:  # noqa: BLE001
-                    ctx.fail(f"{agent.role.value} agent failed: {exc}")
-                    break
+            ctx = await self._run_agent_with_retry(agent, ctx)
         return ctx
 
     async def stream_run(
@@ -575,30 +677,33 @@ class AgentPipeline:
         Execute the pipeline and yield real-time status events as dicts.
 
         Each yielded dict has keys: 'event', 'role', 'data'.
+
+        EM-3: retry parity with run(). A retryable failure re-runs the SAME
+        agent in place (resume-from-stage): agent_start is yielded once per
+        stage, so SSE consumers never see duplicated events for a stage that
+        eventually succeeds.
         """
         ctx = PipelineContext(user_prompt=user_prompt, project_dir=project_dir)
         for agent in self._agents:
             if ctx.status == PipelineStatus.FAILED:
                 break
             yield {"event": "agent_start", "role": agent.role.value, "data": {}}
-            try:
-                ctx = await agent.run(ctx)
-                yield {
-                    "event": "agent_done",
-                    "role": agent.role.value,
-                    "data": {
-                        "artifacts": list(ctx.artifacts.keys()),
-                        "status": ctx.status.value,
-                    },
-                }
-            except Exception as exc:  # noqa: BLE001
-                ctx.fail(f"{agent.role.value} agent failed: {exc}")
+            ctx = await self._run_agent_with_retry(agent, ctx)
+            if ctx.status == PipelineStatus.FAILED:
                 yield {
                     "event": "agent_error",
                     "role": agent.role.value,
-                    "data": {"error": str(exc)},
+                    "data": {"error": ctx.errors[-1] if ctx.errors else "agent failed"},
                 }
                 break
+            yield {
+                "event": "agent_done",
+                "role": agent.role.value,
+                "data": {
+                    "artifacts": list(ctx.artifacts.keys()),
+                    "status": ctx.status.value,
+                },
+            }
 
         yield {
             "event": "pipeline_complete",

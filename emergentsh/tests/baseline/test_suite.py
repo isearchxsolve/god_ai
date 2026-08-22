@@ -4,7 +4,9 @@ import json
 import pytest
 from pathlib import Path
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
+# tests/baseline/test_suite.py -> parents[2] is the repo root (emergentsh/).
+# parents[1] resolves to tests/, which made every path lookup below fail.
+ROOT_DIR = Path(__file__).resolve().parents[2]
 
 class TestL1VisionAndNIMExclusivity:
     """Validate L1 Vision Requirements: Strict NIM usage without silent mock fallbacks."""

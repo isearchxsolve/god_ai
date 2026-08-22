@@ -136,3 +136,72 @@ audit rows, already used by /api/credits/purchase).
 same 8 pre-existing failures, zero new.
 
 **[COMMIT]** next.
+
+---
+
+### [2026-08-22] #4 — GAP-EM-3 + GAP-EM-4 FIXED: stream_run retry parity + structural design-token lint; suite driven to ZERO failures
+
+**[VERIFY]** Confirmed `run()` had a 3-retry self-heal loop while
+`stream_run()` (the path the UI uses) had none — a transient ValueError
+killed the stream after 2 of 7 agents. Confirmed FrontendAgent's "moat" was
+`if "backdrop-blur" not in code and "transition" not in code` — a string
+search any text can pass and legitimate UIs can fail.
+
+**[FIX] EM-3 (backend/agent_pipeline.py):**
+- Extracted the retry policy into ONE function `_run_agent_with_retry()`
+  (MAX_AGENT_RETRIES=3; ValueError retryable with error fed back to the
+  agent; any other exception fails the pipeline). BOTH `run()` and
+  `stream_run()` now route through it — no drift possible.
+- stream_run retries resume IN-PLACE (resume-from-stage): `agent_start` is
+  yielded once per stage, so SSE consumers never see duplicated events for a
+  stage that eventually succeeds; on exhausted retries it yields one
+  `agent_error` then `pipeline_complete` with status=failed.
+- Default chain is now the documented 7-agent contract (planner, designer,
+  frontend, backend, integration, qa, devops). SeleniumQAAgent stays defined
+  for opt-in use but is not in the default chain (it made the chain 8 agents
+  and its host-executed Playwright tests could never pass in CI).
+- DesignerAgent now also emits DESIGN.md (human-readable Markdown rendered
+  from the validated tokens via `_design_markdown()`), completing the
+  generated-project artifact contract.
+
+**[FIX] EM-4 (backend/agent_pipeline.py):**
+- New `lint_frontend_design_tokens(code, design_json)` structural lint:
+  module structure (import/export), component definition, >=3 styling
+  applications (className/style/styled/css/sx), >=1 motion/interaction
+  primitive (transition/animation/keyframes/motion./hover:/active:/focus:),
+  and palette fidelity (at least one of the designer's hex colors must
+  appear in the code). `extract_palette_colors()` pulls hexes from the
+  validated designer tokens. FrontendAgent.run now raises ValueError with the
+  full violation list instead of the string search.
+
+**[FIX] Test fixture (tests/test_integration.py mock_nim_client):**
+- Routing conditions matched on USER-message keywords ("plan", "design",
+  "react", "docker", "test") that every later agent's prompt embeds — a
+  landmine. All six branches now match on SYSTEM-prompt role strings only.
+- Designer branch now yields valid JSON tokens (was Markdown, which failed
+  DesignerAgent's JSON validation — the original cause of the 2-of-7 death).
+- Frontend branch now yields a styled component that passes the EM-4 lint
+  (palette colors, transitions, backdrop-blur, 3+ className applications).
+- QA branch now yields a SELF-CONTAINED passing test (the old one imported
+  backend.main/backend.database/backend.models which the generator never
+  emits, so the host-executed pytest always failed and QA could never
+  complete). Added a devops branch for the 7th agent.
+
+**[FIX] tests/baseline/test_suite.py ROOT_DIR bug:** `parents[1]` resolved to
+tests/ instead of the repo root, failing 5 baseline tests that audit files
+which all exist and are correct. Now `parents[2]`.
+
+**[TEST]**
+- New tests/test_em3_stream_retry_parity.py — 7/7 PASS (run retries, stream
+  retries mid-stream [the acceptance test], no duplicate SSE events on
+  retry, exhausted retries fail loudly, fatal errors not retried in either
+  path, both paths share _run_agent_with_retry, 7-agent chain contract).
+- New tests/test_em4_design_token_lint.py — 14/14 PASS (compliant page
+  passes with/without design, empty/plain-text fail, each violation category
+  isolated, palette extraction, old string-search gate gone).
+- The 3 previously-failing TestFullPipeline tests now PASS.
+
+**[VERIFY-REGRESSION]** Full suite: **125 passed, 0 failed, 1 skipped** —
+from 8 failures at baseline to ZERO.
+
+**[COMMIT]** next.
